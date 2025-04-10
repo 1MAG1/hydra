@@ -1,0 +1,19 @@
+[package]
+name = "hydra-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "I/O-free multi-source download scheduler: interval algebra, divergence-triggered repair, liveness"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
+criterion = { workspace = true }
+
+[[bench]]
+name = "intervals"
+harness = false
+
+[lints]
+workspace = true
