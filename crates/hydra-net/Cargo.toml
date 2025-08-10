@@ -1,0 +1,31 @@
+[package]
+name = "hydra-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HTTP/1.1 range transport driving the hydra-core scheduler"
+
+[dependencies]
+hydra-core = { workspace = true }
+tokio = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+webpki-roots = { workspace = true }
+rustls-pki-types = { workspace = true }
+memchr = { workspace = true }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+reed-solomon-simd = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "fs", "sync"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "hot_paths"
+harness = false
+
+[lints]
+workspace = true
