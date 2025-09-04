@@ -1,0 +1,1489 @@
+//! HTTP/1.1 request construction, response-head parsing, probing, and the
+//! per-range fetch path.
+//!
+//! Outgoing request headers are built centrally by [`build_request_head`]
+//! to ensure consistency across probes and body fetches.
+
+use crate::framebuf;
+use crate::polite::Pace;
+use crate::sink::SparseSink;
+use crate::{Arrival, Connector, Target, READ_BUF};
+use std::io;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
+
+/// Probe a target: `Content-Length`, `Accept-Ranges`, validator.
+/// What a HEAD request reveals about an object.
+#[derive(Clone, Debug, Default)]
+pub struct Probe {
+    pub size: u64,
+    /// Server advertises byte-range support.
+    pub ranges: bool,
+    /// `ETag`, or `Last-Modified` when no ETag was offered.
+    pub validator: Option<String>,
+    /// `Last-Modified`, verbatim, whether or not an ETag was also sent.
+    ///
+    /// Kept SEPARATELY from `validator` because the two answer different
+    /// questions. `validator` answers "may these bytes be spliced with those?",
+    /// and an ETag is the better answer whenever there is one — so the collapse
+    /// to `etag.or(last_mod)` is right for resume and mirror assembly. But
+    /// `--remote-time` asks "when was this object last changed?", which an ETag
+    /// cannot answer at all: it is opaque. Reading the collapsed field for that
+    /// purpose meant every server sending BOTH headers — GitHub, S3, and most
+    /// CDNs, i.e. the common case — had its date discarded before the flag saw
+    /// it, and `--remote-time` reported "no date-form validator" about a response
+    /// that plainly carried one.
+    pub last_modified: Option<String>,
+    /// The validator is WEAK (`W/"..."`) or is a `Last-Modified` date.
+    ///
+    /// RFC 9110 permits a weak validator to compare equal across representations
+    /// that are merely "semantically equivalent" — which is exactly the case
+    /// multi-source assembly must not tolerate. Two mirrors agreeing on a weak
+    /// ETag is not evidence they will serve the same bytes, so the engine treats a
+    /// weak validator as grounds to use ONE source rather than splicing several.
+    pub weak_validator: bool,
+    /// `Content-Type`, a weak hint for classification.
+    pub content_type: Option<String>,
+    /// `Content-Disposition`, which may carry a filename.
+    pub disposition: Option<String>,
+    /// Status of the probe response.
+    ///
+    /// Kept because a 3xx probe is not a description of the object: GitHub's release
+    /// assets answer HEAD with `302` and `Content-Length: 0`, so treating the headers
+    /// as metadata reports a zero-byte object and the caller cannot tell that apart
+    /// from an object that really is empty.
+    pub status: u16,
+    /// `Location`, when the probe was a redirect.
+    pub location: Option<String>,
+    /// The response header block, verbatim.
+    ///
+    /// Kept because a paraphrase is not a diagnostic: when a server misbehaves, the
+    /// useful output is the bytes it actually sent — the exact `Content-Range`
+    /// spelling, the `Via`/`X-Cache` chain, the validator's exact form. A summary
+    /// showing "size: 0" hides which header was missing.
+    pub raw_head: String,
+    /// The request line and headers we sent, verbatim.
+    pub raw_request: String,
+}
+
+impl Probe {
+    /// This probe described a redirect rather than the object.
+    pub fn is_redirect(&self) -> bool {
+        matches!(self.status, 301 | 302 | 303 | 307 | 308) && self.location.is_some()
+    }
+}
+
+impl Probe {
+    /// Filename from a `Content-Disposition` header, if it carries one.
+    pub fn suggested_filename(&self) -> Option<String> {
+        let d = self.disposition.as_ref()?;
+        let lower = d.to_ascii_lowercase();
+        let idx = lower.find("filename=")?;
+        let rest = d[idx + 9..].trim();
+        let name = rest
+            .trim_start_matches('"')
+            .split(['"', ';'])
+            .next()?
+            .trim();
+        // A server-supplied name must never escape the output directory.
+        let base = std::path::Path::new(name)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())?;
+        if base.is_empty() || base == "." || base == ".." {
+            None
+        } else {
+            Some(base)
+        }
+    }
+}
+
+/// Build a complete HTTP/1.1 request head for `t`: request line, `Host`,
+/// optional `Range` (inclusive first/last byte positions), `Accept`,
+/// `User-Agent`, the target's extra headers, and `Connection: close`.
+///
+/// Central request head builder ensuring that custom headers and User-Agent
+/// are consistently applied to both metadata probes and range body requests.
+fn build_request_head(method: &str, t: &Target, range: Option<(u64, u64)>) -> String {
+    let (target, host_hdr) = t.request_target();
+    let mut req = format!("{method} {target} HTTP/1.1\r\nHost: {host_hdr}\r\n");
+    if let Some((first, last)) = range {
+        req.push_str(&format!("Range: bytes={first}-{last}\r\n"));
+    }
+    req.push_str("Accept: */*\r\n");
+    req.push_str(&format!("User-Agent: {}\r\n", t.user_agent()));
+    for h in t.extra_headers() {
+        req.push_str(h);
+        req.push_str("\r\n");
+    }
+    req.push_str("Connection: close\r\n\r\n");
+    req
+}
+
+/// Fetch an object whose length the server will not state, streaming to EOF.
+///
+/// Some resources have no knowable size in advance: a dynamically generated page, a
+/// `Content-Range: bytes 0-0/*` reply (an asterisk total means "I will not say"), or a
+/// chunked response with no length at all. Multi-source scheduling is impossible here —
+/// with no size there are no ranges to divide — but *fetching* is not, and curl handles
+/// these routinely. Refusing them made `hydra <html-page>` fail where every other
+/// client succeeds.
+///
+/// So this is the honest degradation: one connection, sequential, no resume, no
+/// parallelism, and the caller is told that is what happened.
+pub async fn fetch_streaming<C: Connector>(c: &C, t: &Target, path: &str) -> io::Result<u64> {
+    let mut s = c.connect(t).await?;
+    let req = build_request_head("GET", t, None);
+    s.write_all(req.as_bytes()).await?;
+
+    let mut head = Vec::new();
+    let mut buf = vec![0u8; 32 * 1024];
+    let body_start = loop {
+        let n = match s.read(&mut buf).await {
+            Ok(0) => break find_crlf2(&head),
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break find_crlf2(&head),
+            Err(e) => return Err(e),
+        };
+        head.extend_from_slice(&buf[..n]);
+        if let Some(i) = find_crlf2(&head) {
+            break Some(i);
+        }
+        if head.len() > 64 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "response headers exceed 64 KiB",
+            ));
+        }
+    }
+    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no header terminator"))?;
+
+    let h = String::from_utf8_lossy(&head[..body_start]).to_string();
+    let status: u16 = h
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    if !(200..300).contains(&status) {
+        return Err(io::Error::other(format!(
+            "server returned {status} for a streaming fetch"
+        )));
+    }
+    let chunked = header_value(&h, "transfer-encoding")
+        .map(|v| v.to_ascii_lowercase().contains("chunked"))
+        .unwrap_or(false);
+
+    use tokio::io::AsyncWriteExt as _;
+    let f = tokio::fs::File::create(path).await?;
+    let mut w = tokio::io::BufWriter::new(f);
+    let mut total = 0u64;
+    let first = &head[body_start..];
+
+    if chunked {
+        // Reuse the same de-framing rules as the ranged path: a chunk header, the
+        // bytes, a CRLF, terminated by a zero-size chunk.
+        let mut pending = first.to_vec();
+        let mut need_size = true;
+        let mut remaining = 0u64;
+        loop {
+            if need_size {
+                if let Some(i) = find_crlf(&pending) {
+                    let line = String::from_utf8_lossy(&pending[..i]).to_string();
+                    let hex = line.split(';').next().unwrap_or("").trim();
+                    let sz = u64::from_str_radix(hex, 16).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("bad chunk size {hex:?}"),
+                        )
+                    })?;
+                    pending.drain(..i + 2);
+                    if sz == 0 {
+                        break;
+                    }
+                    remaining = sz;
+                    need_size = false;
+                    continue;
+                }
+            } else if !pending.is_empty() {
+                let take = (remaining as usize).min(pending.len());
+                w.write_all(&pending[..take]).await?;
+                total += take as u64;
+                pending.drain(..take);
+                remaining -= take as u64;
+                if remaining == 0 {
+                    // Consume the CRLF that terminates the chunk body.
+                    while pending.len() < 2 {
+                        let n = s.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        pending.extend_from_slice(&buf[..n]);
+                    }
+                    if pending.len() >= 2 {
+                        pending.drain(..2);
+                    }
+                    need_size = true;
+                }
+                continue;
+            }
+            let n = match s.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
+            };
+            pending.extend_from_slice(&buf[..n]);
+        }
+    } else {
+        w.write_all(first).await?;
+        total += first.len() as u64;
+        loop {
+            match s.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    w.write_all(&buf[..n]).await?;
+                    total += n as u64;
+                }
+                // An unclean TLS close is how many servers end a Connection: close
+                // body. The bytes already read are still valid.
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    w.flush().await?;
+    Ok(total)
+}
+
+/// Fetch a small object whole, into memory, with a hard cap.
+///
+/// For checksum sidecars and manifests: tens to thousands of bytes, wanted as a string,
+/// not worth a scheduler or a file. The cap is a refusal rather than a truncation — a
+/// truncated manifest would parse as a manifest and select the wrong line.
+pub async fn fetch_small<C: Connector>(c: &C, t: &Target, cap: usize) -> io::Result<Vec<u8>> {
+    let mut s = c.connect(t).await?;
+    let req = build_request_head("GET", t, None);
+    s.write_all(req.as_bytes()).await?;
+    let mut buf = Vec::new();
+    let mut chunk = vec![0u8; 16 * 1024];
+    loop {
+        let n = match s.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e),
+        };
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > cap + 8192 {
+            return Err(io::Error::other("response exceeds the small-fetch cap"));
+        }
+    }
+    let Some(start) = find_crlf2(&buf) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "no header terminator",
+        ));
+    };
+    let head = String::from_utf8_lossy(&buf[..start]).to_string();
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    if !(200..300).contains(&status) {
+        return Err(io::Error::other(format!("server returned {status}")));
+    }
+    let body = buf[start..].to_vec();
+    if header_value(&head, "transfer-encoding")
+        .map(|v| v.to_ascii_lowercase().contains("chunked"))
+        .unwrap_or(false)
+    {
+        return Ok(dechunk(&body));
+    }
+    Ok(body)
+}
+
+/// De-frame a complete chunked body already held in memory.
+fn dechunk(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(i) = find_crlf(rest) {
+        let Ok(line) = std::str::from_utf8(&rest[..i]) else {
+            break;
+        };
+        let Ok(n) = usize::from_str_radix(line.split(';').next().unwrap_or("").trim(), 16) else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        let start = i + 2;
+        if start + n > rest.len() {
+            out.extend_from_slice(&rest[start..]);
+            break;
+        }
+        out.extend_from_slice(&rest[start..start + n]);
+        rest = &rest[(start + n + 2).min(rest.len())..];
+    }
+    out
+}
+
+/// Probe an object with a ranged GET instead of a HEAD.
+///
+/// Necessary because HEAD is not universally supported in practice. Some servers
+/// close the connection on HEAD without replying at all (observed on a public
+/// speed-test host: HEAD returns zero bytes and an unclean TLS shutdown, while GET
+/// on the same path answers `200` normally). Others answer HEAD with a redirect and
+/// `Content-Length: 0`.
+///
+/// A `bytes=0-0` GET is the robust alternative: it costs one byte of body, it proves
+/// range support rather than trusting an `Accept-Ranges` advertisement, and its
+/// `Content-Range` carries the total size. This is what curl's `--head`-less probing
+/// effectively does.
+pub async fn probe_via_get<C: Connector>(c: &C, t: &Target) -> io::Result<Probe> {
+    let mut s = c.connect(t).await?;
+    let req = build_request_head("GET", t, Some((0, 0)));
+    s.write_all(req.as_bytes()).await?;
+
+    let mut head = Vec::new();
+    let mut buf = vec![0u8; 4096];
+    loop {
+        // A server that closes without TLS close_notify surfaces as UnexpectedEof.
+        // If a complete header block already arrived, that is not a failure: the
+        // response is in hand and the peer was merely impolite about hanging up.
+        let n = match s.read(&mut buf).await {
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof && find_crlf2(&head).is_some() => {
+                break
+            }
+            Err(e) => return Err(e),
+        };
+        if n == 0 {
+            break;
+        }
+        head.extend_from_slice(&buf[..n]);
+        if find_crlf2(&head).is_some() || head.len() > 64 * 1024 {
+            break;
+        }
+    }
+    let h = String::from_utf8_lossy(&head);
+    let status: u16 = h
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let cr = header_value(&h, "content-range");
+    let ranges = status == 206 && cr.is_some();
+    let size = match cr.as_deref().and_then(parse_content_range_total) {
+        Some(n) => n,
+        // A 200 to a range request means ranges are unsupported; the object length is
+        // then the whole body.
+        None => header_value(&h, "content-length")
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0),
+    };
+    let (validator, weak, last_modified) =
+        validator_from(header_value(&h, "etag"), header_value(&h, "last-modified"));
+    Ok(Probe {
+        size,
+        ranges,
+        last_modified,
+        validator,
+        weak_validator: weak,
+        content_type: header_value(&h, "content-type"),
+        disposition: header_value(&h, "content-disposition"),
+        status,
+        location: header_value(&h, "location"),
+        raw_head: h.to_string(),
+        raw_request: req,
+    })
+}
+
+/// Total object size from a one-byte range request.
+///
+/// Needed because a HEAD is allowed to omit `Content-Length`, and CDNs do: a HEAD
+/// against a jsDelivr object returns `200` with no length at all. Without this
+/// fallback the size reads as zero, and a downloader that trusts it "succeeds"
+/// while writing an empty file — the worst possible failure, because it looks like
+/// success. `Content-Range: bytes 0-0/533653` carries the number.
+pub async fn probe_size_via_range<C: Connector>(c: &C, t: &Target) -> io::Result<u64> {
+    let mut s = c.connect(t).await?;
+    let req = build_request_head("GET", t, Some((0, 0)));
+    s.write_all(req.as_bytes()).await?;
+    let mut head = Vec::new();
+    let mut buf = vec![0u8; 2048];
+    while find_crlf2(&head).is_none() {
+        let n = s.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        head.extend_from_slice(&buf[..n]);
+        if head.len() > 32 * 1024 {
+            break;
+        }
+    }
+    let h = String::from_utf8_lossy(&head);
+    header_value(&h, "content-range")
+        .as_deref()
+        .and_then(parse_content_range_total)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "no Content-Length on HEAD and no total in Content-Range",
+            )
+        })
+}
+
+/// Total length from a `Content-Range: bytes lo-hi/total` header.
+pub(crate) fn parse_content_range_total(v: &str) -> Option<u64> {
+    v.rsplit('/').next()?.trim().parse().ok()
+}
+
+/// Decide the resume validator, its strength, and the object's date from the two
+/// headers that carry them.
+///
+/// Returns `(validator, weak, last_modified)`. Shared by both probe paths, which
+/// had made this decision independently — and a rule duplicated at two sites is a
+/// rule that will eventually differ at two sites.
+///
+/// The validator prefers the ETag and falls back to the date, because resume and
+/// mirror assembly are only sound against one of the two. The date is ALSO
+/// returned unchanged, because `--remote-time` needs it whether or not an ETag
+/// exists: an ETag is opaque and carries no time, so collapsing the two lost the
+/// date on every server that sends both — which is most of them.
+pub(crate) fn validator_from(
+    etag: Option<String>,
+    last_mod: Option<String>,
+) -> (Option<String>, bool, Option<String>) {
+    // A weak ETag (`W/"..."`) or a bare Last-Modified date is not strong enough to
+    // justify assembling one file from several mirrors: RFC 9110 lets a weak
+    // validator compare equal across representations that merely mean the same
+    // thing, which is exactly what byte-range assembly must not tolerate.
+    let weak = match (&etag, &last_mod) {
+        (Some(e), _) => e.trim_start().starts_with("W/"),
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    let validator = etag.or_else(|| last_mod.clone());
+    (validator, weak, last_mod)
+}
+
+pub async fn probe<C: Connector>(c: &C, t: &Target) -> io::Result<Probe> {
+    let mut s = c.connect(t).await?;
+    // The extra headers and User-Agent are included so headers meant to influence
+    // what the server returns (such as Authorization or Accept) shape the probe as well.
+    let req = build_request_head("HEAD", t, None);
+    s.write_all(req.as_bytes()).await?;
+    let mut buf = Vec::new();
+    // A server may close without sending TLS `close_notify`, which rustls reports as
+    // UnexpectedEof. That is a protocol impoliteness, not a failed request: if the
+    // header block already arrived, the response is in hand. Treating it as fatal made
+    // an otherwise-fine HEAD fail outright, which is how a legitimate host came back as
+    // "every probe failed".
+    match s.read_to_end(&mut buf).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof && find_crlf2(&buf).is_some() => {}
+        Err(e) => return Err(e),
+    }
+    let raw_head = String::from_utf8_lossy(&buf).to_string();
+    let head = raw_head.clone();
+    // The status line is not decoration. A 302 carries `Content-Length: 0` and an
+    // HTML body, so parsing its headers as object metadata yields "size 0" and the
+    // caller cannot tell a redirect from a genuinely empty object.
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let mut location = None;
+    let mut len = 0u64;
+    let mut ranges = false;
+    let mut etag = None;
+    let mut last_mod = None;
+    let mut ctype = None;
+    let mut disposition = None;
+    for line in head.lines() {
+        let l = line.to_ascii_lowercase();
+        if let Some(v) = l.strip_prefix("content-length:") {
+            len = v.trim().parse().unwrap_or(0);
+        } else if let Some(v) = l.strip_prefix("accept-ranges:") {
+            ranges = v.trim() == "bytes";
+        } else if l.starts_with("etag:") {
+            etag = line.split_once(':').map(|(_, v)| v.trim().to_string());
+        } else if l.starts_with("last-modified:") {
+            last_mod = line.split_once(':').map(|(_, v)| v.trim().to_string());
+        } else if l.starts_with("content-type:") {
+            ctype = line.split_once(':').map(|(_, v)| v.trim().to_string());
+        } else if l.starts_with("content-disposition:") {
+            disposition = line.split_once(':').map(|(_, v)| v.trim().to_string());
+        } else if l.starts_with("location:") {
+            location = line.split_once(':').map(|(_, v)| v.trim().to_string());
+        }
+    }
+    let (validator, weak, last_modified) = validator_from(etag, last_mod);
+    Ok(Probe {
+        size: len,
+        ranges,
+        validator,
+        last_modified,
+        weak_validator: weak,
+        content_type: ctype,
+        disposition,
+        status,
+        location,
+        raw_head,
+        raw_request: req,
+    })
+}
+
+/// Fetch one byte range, streaming arrivals to `tx` and writing them to `sink`.
+///
+/// `pace` is the aggregate `--limit-rate` cap, shared across every connection of
+/// the transfer. It is applied HERE, at the read, rather than at the sink: the
+/// point of a rate cap is to slow what is taken off the wire, and shaping only
+/// the writes would let the kernel receive buffer fill at full speed while the
+/// user was told the transfer was capped.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn fetch_range<C: Connector>(
+    c: Arc<C>,
+    conn: usize,
+    t: Target,
+    lo: u64,
+    hi: u64,
+    sink: Arc<SparseSink>,
+    tx: mpsc::UnboundedSender<Arrival>,
+    t0: Instant,
+    pace: Pace,
+) -> io::Result<()> {
+    let mut s = c.connect(&t).await?;
+    // A User-Agent identifying the client is basic etiquette: a mirror operator
+    // seeing unexplained parallel range requests should be able to tell what is
+    // making them. The builder sends it on every request.
+    let req = build_request_head("GET", &t, Some((lo, hi.saturating_sub(1))));
+    s.write_all(req.as_bytes()).await?;
+
+    // Read headers, then stream the body straight to its file offset.
+    let mut buf = vec![0u8; READ_BUF];
+    let mut head = Vec::new();
+    let body_start;
+    let mut n_head = 0usize;
+    loop {
+        let n = s.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        head.extend_from_slice(&buf[..n]);
+        n_head += n;
+        if let Some(p) = find_crlf2(&head) {
+            body_start = p;
+            break;
+        }
+        if n_head > 64 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "header too large",
+            ));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Validate that this response is the range we asked for.
+    //
+    // Found by real-network testing, and it is a CORRECTNESS bug rather than a
+    // performance one: without this check, a `200 OK` full-body reply to a
+    // `Range` request has its bytes written starting at `lo`, so the file is
+    // silently corrupted and still passes every length check. It was observed
+    // in the wild -- one baseline transfer out of 24 produced a file whose
+    // digest differed from the other 23 while reporting success.
+    //
+    // Rules enforced here:
+    //   * 206 must carry a Content-Range whose first byte equals `lo`;
+    //   * 200 is only acceptable when we asked from byte 0, and then only for
+    //     the whole object -- otherwise the bytes belong at offsets we did not
+    //     request and MUST NOT be written;
+    //   * anything else (3xx/4xx/5xx) is an error, not a body.
+    let head_str = String::from_utf8_lossy(&head[..body_start]);
+    let status: u16 = head_str
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let content_range = header_value(&head_str, "content-range");
+    match status {
+        206 => {
+            let first = content_range
+                .as_deref()
+                .and_then(parse_content_range_start)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "206 without a parsable Content-Range",
+                    )
+                })?;
+            if first != lo {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("206 Content-Range starts at {first}, requested {lo}"),
+                ));
+            }
+        }
+        200 => {
+            if lo != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("server ignored Range and sent 200 for a request from offset {lo}"),
+                ));
+            }
+        }
+        // Admission control: the server is telling us to slow down. Surface the
+        // requested delay so the caller can honour it rather than retrying
+        // immediately, which is how a client earns a ban.
+        429 | 503 => {
+            let ra = header_value(&head_str, "retry-after")
+                .and_then(|v| crate::polite::parse_retry_after(&v, unix_now()))
+                .unwrap_or(std::time::Duration::from_secs(1));
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "{status} throttled, retry after {}s",
+                    ra.as_secs_f64().round()
+                ),
+            ));
+        }
+        // Redirects are followed by the caller, which owns the hop budget: a
+        // redirect loop must cost a bounded number of `delta`, not unbounded.
+        301 | 302 | 303 | 307 | 308 => {
+            let loc = header_value(&head_str, "location").unwrap_or_default();
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                format!("redirect:{loc}"),
+            ));
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unexpected status {other} for a range request"),
+            ));
+        }
+    }
+
+    // A chunked body carries size lines interleaved with the data. Writing the raw
+    // stream to disk would embed those lines IN the file, so they must be stripped.
+    // jsDelivr answers range requests this way, which is legal: RFC 9112 allows
+    // chunked with 206.
+    let chunked = header_value(&head_str, "transfer-encoding")
+        .map(|v| v.to_ascii_lowercase().contains("chunked"))
+        .unwrap_or(false);
+    if chunked {
+        return stream_chunked(s, conn, lo, hi, &head[body_start..], sink, tx, t0, pace).await;
+    }
+
+    let mut off = lo;
+    let mut last = Instant::now();
+    let first_body = &head[body_start..];
+    if !first_body.is_empty() {
+        let take = first_body.len().min((hi - off) as usize);
+        // These bytes arrived alongside the headers and are as real as any other:
+        // they are charged against the cap too, or a small object could be
+        // delivered entirely unshaped in the header read.
+        pace.wait(take as u64).await;
+        sink.write_at(off, &first_body[..take])?;
+        let at_off = off;
+        off += take as u64;
+        let now = Instant::now();
+        let _ = tx.send(Arrival {
+            conn,
+            off: at_off,
+            bytes: take as u64,
+            at: now.duration_since(t0).as_secs_f64(),
+            dt: now.duration_since(last).as_secs_f64().max(1e-6),
+        });
+        last = now;
+    }
+
+    while off < hi {
+        let want = pace.read_size(((hi - off) as usize).min(READ_BUF));
+        let n = s.read(&mut buf[..want]).await?;
+        if n == 0 {
+            break;
+        }
+        // Pay for the bytes just taken off the wire, before doing anything with
+        // them. Charging after the write would let a burst land first and shape
+        // only the next read, which is the difference between a cap and an
+        // average.
+        pace.wait(n as u64).await;
+        sink.write_at(off, &buf[..n])?;
+        let at_off = off;
+        off += n as u64;
+        let now = Instant::now();
+        let _ = tx.send(Arrival {
+            conn,
+            off: at_off,
+            bytes: n as u64,
+            at: now.duration_since(t0).as_secs_f64(),
+            dt: now.duration_since(last).as_secs_f64().max(1e-6),
+        });
+        last = now;
+    }
+    // The peer closing early is NOT success. A truncating origin advertises an
+    // honest-looking Content-Length and then closes mid-body; returning Ok here
+    // let the caller treat a short read as a delivered range, so the bytes that
+    // never arrived were never re-requested. `UnexpectedEof` is retryable, which
+    // is the correct disposition: the range may well arrive on a second attempt.
+    if off < hi {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!(
+                "connection closed after {} of {} bytes of the requested range",
+                off - lo,
+                hi - lo
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Fetch one range with bounded retries, writing to `sink`. This is the
+/// baseline transport used by the static-split policies: a part is retried in
+/// place on its own connection, which is what "never reassign" means, and it is
+/// why a permanently dead mirror strands that part.
+/// Stream a chunked body to its file offsets, stripping the chunk framing.
+///
+/// A chunked body is a sequence of `<hex-size>\r\n<size bytes>\r\n`, terminated by a
+/// zero-size chunk. The framing bytes are transport, not content: writing them to
+/// disk corrupts the file in a way no length check catches, because the byte count
+/// still looks plausible.
+///
+/// Written as an explicit state machine over a rolling buffer rather than with a
+/// line-reader, because a chunk boundary can land anywhere inside a read — the
+/// hex size line can be split across two reads, and so can the trailing CRLF.
+///
+/// # Why the buffer is a cursor and not a `Vec` you `drain`
+///
+/// The obvious implementation — `buf.windows(2).position(|w| w == b"\r\n")` to
+/// find a size line, `buf.drain(..n)` to consume a token — is quadratic in two
+/// separate ways, and both are per-read costs on the byte path:
+///
+/// * `windows(2).position` restarts at offset 0 of the buffer on every call, so
+///   a size line that has not arrived yet costs a full rescan of everything
+///   buffered, once per read, until it does.
+/// * `drain(..n)` memmoves the entire residual tail down to offset 0 on every
+///   token consumed — and a chunked body has three tokens per chunk.
+///
+/// Measured on an 8 MiB body with 64 KiB reads: 1.01 GiB/s at 1 KiB chunks
+/// against 59.5 GiB/s at 1 MiB chunks. Since the payload is identical, that 59x
+/// spread is entirely framing overhead — the small-chunk case pays it thousands
+/// of times. Servers that stream 1-4 KiB chunks are common (nginx proxying a
+/// dynamic backend, jsDelivr), so this is the realistic case, not the corner.
+///
+/// The rewrite keeps one `Vec` and a `head` cursor marking consumed bytes.
+/// Consuming is `head += n`, an integer add. Space is reclaimed by compacting
+/// only when the consumed prefix is worth reclaiming, so the memmove cost is
+/// amortized to O(1) per byte instead of O(1) per token. The CRLF search
+/// resumes from `scan`, so no byte is examined twice across reads, and it uses
+/// `memchr` to find the `\r` rather than stepping a two-byte window.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn stream_chunked<S>(
+    mut s: S,
+    conn: usize,
+    lo: u64,
+    hi: u64,
+    initial: &[u8],
+    sink: Arc<SparseSink>,
+    tx: mpsc::UnboundedSender<Arrival>,
+    t0: Instant,
+    pace: Pace,
+) -> io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    enum St {
+        Size,
+        Data(u64),
+        AfterData,
+        Done,
+    }
+    let mut buf = framebuf::FrameBuf::with_initial(initial);
+    let mut state = St::Size;
+    let mut off = lo;
+    let mut last = Instant::now();
+    let mut read_buf = vec![0u8; READ_BUF];
+    // Contiguous run of decoded payload not yet reported to the scheduler.
+    // Flushed once per read, and before returning, so no bytes go uncredited.
+    let mut pend_off = lo;
+    let mut pend_bytes = 0u64;
+    macro_rules! flush_pending {
+        () => {
+            if pend_bytes > 0 {
+                let now = Instant::now();
+                let _ = tx.send(Arrival {
+                    conn,
+                    off: pend_off,
+                    bytes: pend_bytes,
+                    at: now.duration_since(t0).as_secs_f64(),
+                    dt: now.duration_since(last).as_secs_f64().max(1e-6),
+                });
+                // Both are dead stores on the final expansion (the one before a
+                // `return`), which is what the unused-assignment warning reports.
+                // They are load-bearing on every other expansion, so the write
+                // stays and the lint is silenced at the site.
+                #[allow(unused_assignments)]
+                {
+                    last = now;
+                    pend_bytes = 0;
+                }
+            }
+        };
+    }
+
+    loop {
+        loop {
+            match &mut state {
+                St::Size => {
+                    let Some(nl) = buf.find_crlf() else {
+                        break;
+                    };
+                    // A chunk-extension may follow a semicolon; the size is before it.
+                    // Parsed from bytes rather than through `String::from_utf8_lossy`,
+                    // which allocated a String per chunk purely to read a hex number.
+                    let line = &buf.data()[..nl];
+                    let hex_end = line.iter().position(|&b| b == b';').unwrap_or(line.len());
+                    let hex = trim_ascii(&line[..hex_end]);
+                    let size = parse_hex_u64(hex).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "bad chunk size line {:?}",
+                                String::from_utf8_lossy(&line[..line.len().min(64)])
+                            ),
+                        )
+                    })?;
+                    buf.consume(nl + 2);
+                    state = if size == 0 { St::Done } else { St::Data(size) };
+                }
+                St::Data(remaining) => {
+                    if buf.is_empty() {
+                        break;
+                    }
+                    let take = (*remaining as usize).min(buf.len());
+                    // Never write past the requested range: a server may answer a
+                    // range request with more than was asked for.
+                    let room = (hi.saturating_sub(off)) as usize;
+                    let write = take.min(room);
+                    if write > 0 {
+                        sink.write_at(off, &buf.data()[..write])?;
+                        // Accumulate rather than sending one Arrival per chunk.
+                        //
+                        // Every send allocates a node in the unbounded channel, and
+                        // a chunked body has one chunk per few KiB: measured at
+                        // 1 KiB chunks, that was 1027 allocations per MiB
+                        // transferred, against 65 at 16 KiB — i.e. one allocation
+                        // per chunk, entirely from this send. Consecutive chunks are
+                        // contiguous in file offset, so the run [pend_off, off) is
+                        // describable by a single Arrival and the scheduler credits
+                        // it identically: `on_bytes_at` advances one cursor by the
+                        // byte count and cares only that the run starts at that
+                        // cursor. Flushed once per read below, so the scheduler
+                        // still sees progress at read granularity — the rate
+                        // sampler already accumulates over a 0.2s window, so it
+                        // loses no fidelity it was using.
+                        if pend_bytes == 0 {
+                            pend_off = off;
+                        }
+                        pend_bytes += write as u64;
+                        off += write as u64;
+                    }
+                    buf.consume(take);
+                    *remaining -= take as u64;
+                    if *remaining == 0 {
+                        state = St::AfterData;
+                    }
+                }
+                St::AfterData => {
+                    if buf.len() < 2 {
+                        break;
+                    }
+                    if &buf.data()[..2] != b"\r\n" {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "chunk not terminated by CRLF",
+                        ));
+                    }
+                    buf.consume(2);
+                    state = St::Size;
+                }
+                St::Done => {
+                    flush_pending!();
+                    return Ok(());
+                }
+            }
+        }
+        // One Arrival per read, covering every chunk decoded from it.
+        flush_pending!();
+        // Shape the same way the unframed path does: cap the read size so one
+        // pause stays short, then pay for the bytes as they come off the wire.
+        // The charge is against RAW bytes read, framing included — that is what
+        // crossed the link, and a cap that only counted payload would exceed the
+        // configured rate on a body with many small chunks.
+        let want = pace.read_size(read_buf.len());
+        let n = s.read(&mut read_buf[..want]).await?;
+        if n > 0 {
+            pace.wait(n as u64).await;
+        }
+        if n == 0 {
+            // A truncated chunked body is an error, not a completed transfer.
+            // Pending bytes are still real bytes that reached the sink, so they
+            // are credited before reporting the failure: the retry must re-request
+            // only what genuinely never arrived.
+            flush_pending!();
+            return match state {
+                St::Done => Ok(()),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "chunked body ended early: {} of {} bytes",
+                        off - lo,
+                        hi - lo
+                    ),
+                )),
+            };
+        }
+        buf.extend(&read_buf[..n]);
+    }
+}
+
+/// Trim ASCII whitespace from both ends of a byte slice.
+///
+/// `[u8]::trim_ascii` exists on recent toolchains; this is spelled out so the
+/// crate does not acquire an MSRV requirement for one call site.
+#[inline]
+fn trim_ascii(mut b: &[u8]) -> &[u8] {
+    while let [f, rest @ ..] = b {
+        if f.is_ascii_whitespace() {
+            b = rest;
+        } else {
+            break;
+        }
+    }
+    while let [rest @ .., l] = b {
+        if l.is_ascii_whitespace() {
+            b = rest;
+        } else {
+            break;
+        }
+    }
+    b
+}
+
+/// Parse a hex chunk-size directly from bytes.
+///
+/// Replaces `u64::from_str_radix` on a `String::from_utf8_lossy` copy, which
+/// allocated once per chunk to read at most 16 digits. Returns `None` for an
+/// empty field, a non-hex byte, or a value that would overflow — all of which
+/// the caller reports as a malformed size line rather than guessing.
+#[inline]
+fn parse_hex_u64(b: &[u8]) -> Option<u64> {
+    if b.is_empty() || b.len() > 16 {
+        return None;
+    }
+    let mut v: u64 = 0;
+    for &c in b {
+        let d = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            b'A'..=b'F' => c - b'A' + 10,
+            _ => return None,
+        };
+        v = (v << 4) | d as u64;
+    }
+    Some(v)
+}
+
+pub async fn fetch_range_retry<C: Connector>(
+    c: Arc<C>,
+    t: Target,
+    lo: u64,
+    hi: u64,
+    sink: Arc<SparseSink>,
+    max_tries: u32,
+    per_try_timeout_s: f64,
+) -> io::Result<()> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<Arrival>();
+    let t0 = Instant::now();
+    let mut off = lo;
+    let mut t = t;
+    let mut redirects: u32 = 0;
+    for attempt in 0..max_tries {
+        if off >= hi {
+            return Ok(());
+        }
+        let fut = fetch_range(
+            c.clone(),
+            0,
+            t.clone(),
+            off,
+            hi,
+            sink.clone(),
+            tx.clone(),
+            t0,
+            // This entry point carries no cap parameter, so it is explicitly
+            // unshaped rather than silently inheriting one.
+            Pace::unlimited(),
+        );
+        tokio::pin!(fut);
+        loop {
+            let step = tokio::time::timeout(
+                tokio::time::Duration::from_secs_f64(per_try_timeout_s),
+                async {
+                    tokio::select! {
+                        r = &mut fut => Some(Ok(r)),
+                        Some(a) = rx.recv() => Some(Err(a)),
+                    }
+                },
+            )
+            .await;
+            match step {
+                Err(_) => break, // stalled: retry from `off`
+                Ok(Some(Err(a))) => off = off.max(a.off + a.bytes),
+                // The future COMPLETED -- but completing is not succeeding. An
+                // earlier version returned Ok here unconditionally, so a
+                // protocol error (a 200 to a mid-object Range, a Content-Range
+                // starting at the wrong offset) was reported as a successful
+                // fetch and the caller wrote a corrupt file. Propagate the
+                // inner result.
+                Ok(Some(Ok(inner))) => match inner {
+                    Ok(()) => return Ok(()),
+                    Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                        // A server that ignores Range or mislabels its offsets
+                        // will do so again: retrying cannot help, and retrying
+                        // is how a client ends up hammering a broken mirror.
+                        return Err(e);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // 429/503 with a Retry-After. Honour it, with jitter so
+                        // several connections do not resynchronise onto the same
+                        // instant and hammer the server in waves.
+                        let secs = parse_secs_from(&e.to_string()).unwrap_or(1.0);
+                        let d = crate::polite::backoff_with_jitter(
+                            attempt,
+                            std::time::Duration::from_secs_f64(secs.max(0.05)),
+                            std::time::Duration::from_secs(60),
+                            (lo ^ attempt as u64).wrapping_mul(2_654_435_761),
+                        );
+                        tokio::time::sleep(d).await;
+                        break;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotConnected => {
+                        // A redirect. The hop budget is bounded so a loop costs a
+                        // bounded number of `delta` rather than spinning forever.
+                        let msg = e.to_string();
+                        let loc = msg.strip_prefix("redirect:").unwrap_or("").to_string();
+                        if redirects >= crate::polite::MAX_REDIRECTS || loc.is_empty() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("redirect budget exhausted after {redirects} hops"),
+                            ));
+                        }
+                        match retarget(&t, &loc) {
+                            Some(next) => {
+                                t = next;
+                                redirects += 1;
+                                break;
+                            }
+                            None => {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("unusable redirect target: {loc}"),
+                                ))
+                            }
+                        }
+                    }
+                    Err(_) => break, // transient: retry from `off`
+                },
+                Ok(None) => break,
+            }
+        }
+        while let Ok(a) = rx.try_recv() {
+            off = off.max(a.off + a.bytes);
+        }
+    }
+    if off >= hi {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "part never completed",
+        ))
+    }
+}
+
+/// Seconds embedded in a throttle error message.
+fn parse_secs_from(msg: &str) -> Option<f64> {
+    msg.split("retry after ")
+        .nth(1)?
+        .split('s')
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Rewrite a target for a redirect `Location`, preserving proxy routing.
+///
+/// Only plaintext HTTP is followed. An `https://` target is refused rather than
+/// silently downgraded: TLS is not implemented in this transport, and pretending
+/// otherwise would corrupt a transfer.
+fn retarget(prev: &Target, location: &str) -> Option<Target> {
+    let loc = location.trim();
+    if loc.starts_with("https://") {
+        return None;
+    }
+    if let Some(rest) = loc.strip_prefix("http://") {
+        let (auth, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, "/"),
+        };
+        return Some(match &prev.origin {
+            Some(_) => Target::via_proxy(&prev.host, prev.port, auth, path),
+            None => {
+                let (h, p) = match auth.rsplit_once(':') {
+                    Some((h, p)) => (h.to_string(), p.parse().unwrap_or(80)),
+                    None => (auth.to_string(), 80),
+                };
+                Target::direct(&h, p, path)
+            }
+        });
+    }
+    if loc.starts_with('/') {
+        let mut next = prev.clone();
+        next.path = loc.to_string();
+        return Some(next);
+    }
+    None
+}
+
+/// Wall-clock seconds since the epoch, for `Retry-After` HTTP-date arithmetic.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Case-insensitive header lookup over a raw header block.
+/// Value of a named header in a raw response head, case-insensitively.
+///
+/// Public so the CLI can answer a `-H NAME` query from a probe it already made,
+/// rather than reimplementing header parsing or issuing a second request.
+pub fn header_lookup(head: &str, name: &str) -> Option<String> {
+    header_value(head, name)
+}
+
+pub(crate) fn header_value(head: &str, name: &str) -> Option<String> {
+    head.split("\r\n")
+        .skip(1)
+        .find(|l| {
+            l.len() > name.len()
+                && l.as_bytes()[name.len()] == b':'
+                && l[..name.len()].eq_ignore_ascii_case(name)
+        })
+        .map(|l| l[name.len() + 1..].trim().to_string())
+}
+
+/// First byte position of a `Content-Range: bytes <first>-<last>/<len>` header.
+fn parse_content_range_start(v: &str) -> Option<u64> {
+    let rest = v.trim().strip_prefix("bytes")?.trim_start();
+    let first = rest.split('-').next()?.trim();
+    first.parse().ok()
+}
+
+/// Offset of the first CRLF, or None. Used for chunk-size lines.
+///
+/// `memchr` for the `\r` rather than a two-byte `windows` walk: the scan is
+/// vectorized with runtime dispatch (AVX2/SSE2 on x86-64, NEON on aarch64) and
+/// falls back to a scalar loop on targets with neither, so the same source is
+/// correct everywhere and fast where the hardware allows.
+pub(crate) fn find_crlf(b: &[u8]) -> Option<usize> {
+    let mut from = 0usize;
+    while let Some(i) = memchr::memchr(b'\r', &b[from..]) {
+        let at = from + i;
+        match b.get(at + 1) {
+            None => return None,
+            Some(&b'\n') => return Some(at),
+            // A bare `\r`: not a boundary, keep looking past it.
+            Some(_) => from = at + 1,
+        }
+    }
+    None
+}
+
+/// Offset just past the blank line that ends a header block.
+///
+/// Called once per read while the response head accumulates, so a full rescan
+/// per call is quadratic in the number of reads the head takes to arrive. This
+/// is bounded by the head size rather than the object size, which is why it is
+/// merely wasteful and not pathological — but the vectorized form costs nothing
+/// extra. `memchr` locates candidate `\r` bytes; only positions that could start
+/// `\r\n\r\n` are compared.
+pub(crate) fn find_crlf2(b: &[u8]) -> Option<usize> {
+    if b.len() < 4 {
+        return None;
+    }
+    let mut from = 0usize;
+    while from + 4 <= b.len() {
+        let i = memchr::memchr(b'\r', &b[from..b.len() - 3])?;
+        let at = from + i;
+        if &b[at..at + 4] == b"\r\n\r\n" {
+            return Some(at + 4);
+        }
+        from = at + 1;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A server sending BOTH an ETag and a Last-Modified must keep its date.
+    ///
+    /// Regression test for `--remote-time`. The two headers were collapsed into a
+    /// single `validator` field as `etag.or(last_mod)`, which is the right choice
+    /// for resume and mirror assembly — but `--remote-time` read that same field
+    /// and called `parse_http_date` on it. Every server that sends both headers
+    /// (GitHub, S3, most CDNs: the common case) therefore had its date discarded
+    /// before the flag ran, and the tool reported "server gave no date-form
+    /// validator" about a response whose `Last-Modified` was right there.
+    #[test]
+    fn a_probe_keeps_last_modified_even_when_an_etag_is_present() {
+        const DATE: &str = "Sat, 06 Jan 2024 19:38:59 GMT";
+
+        // Both headers: the ETag wins the validator, the date is still kept.
+        let (v, weak, lm) = validator_from(Some("\"0x8DC0EEF\"".into()), Some(DATE.into()));
+        assert_eq!(v.as_deref(), Some("\"0x8DC0EEF\""));
+        assert!(!weak, "a strong ETag is not a weak validator");
+        assert_eq!(
+            lm.as_deref(),
+            Some(DATE),
+            "the date must survive an ETag: --remote-time has nothing else to read"
+        );
+        assert!(
+            crate::polite::parse_http_date(lm.as_deref().unwrap()).is_some(),
+            "the kept date must be the parseable form the flag needs"
+        );
+
+        // Date only: it serves as BOTH the validator and the date, and is weak.
+        let (v, weak, lm) = validator_from(None, Some(DATE.into()));
+        assert_eq!(v.as_deref(), Some(DATE));
+        assert!(weak, "a bare date is too weak to splice mirrors against");
+        assert_eq!(lm.as_deref(), Some(DATE));
+
+        // ETag only: no date to report, and the flag must say so rather than guess.
+        let (v, weak, lm) = validator_from(Some("\"abc\"".into()), None);
+        assert_eq!(v.as_deref(), Some("\"abc\""));
+        assert!(!weak);
+        assert_eq!(lm, None);
+
+        // A weak ETag stays weak, and still does not shadow the date.
+        let (v, weak, lm) = validator_from(Some("W/\"abc\"".into()), Some(DATE.into()));
+        assert_eq!(v.as_deref(), Some("W/\"abc\""));
+        assert!(weak, "W/ marks a weak validator");
+        assert_eq!(lm.as_deref(), Some(DATE));
+
+        // Neither header: nothing to resume against and nothing to date.
+        let (v, weak, lm) = validator_from(None, None);
+        assert_eq!(v, None);
+        assert!(!weak);
+        assert_eq!(lm, None);
+    }
+
+    /// The vectorized header scans must agree with the `windows` walks they
+    /// replaced on every input shape — including the ones that make a naive
+    /// memchr version wrong: a bare `\r`, a `\r` in the last three bytes, and
+    /// `\r\n\r` without the final `\n`.
+    #[test]
+    fn vectorized_header_scans_match_the_window_walks_they_replaced() {
+        fn ref_crlf(b: &[u8]) -> Option<usize> {
+            b.windows(2).position(|w| w == b"\r\n")
+        }
+        fn ref_crlf2(b: &[u8]) -> Option<usize> {
+            b.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+        }
+        let cases: Vec<&[u8]> = vec![
+            b"",
+            b"\r",
+            b"\n",
+            b"\r\n",
+            b"\r\r\n",
+            b"\r\n\r",
+            b"\r\n\r\n",
+            b"a\r\nb\r\n\r\nbody",
+            b"HTTP/1.1 200 OK\r\nA: 1\r\n\r\n",
+            b"no boundary at all",
+            b"trailing\r",
+            b"\n\r\n\r",
+            b"\r\r\r\r\n\r\n",
+            b"x\r\n\r\n",
+            b"\r\n\n\r\n\r\n",
+        ];
+        for c in cases {
+            assert_eq!(find_crlf(c), ref_crlf(c), "find_crlf on {c:?}");
+            assert_eq!(find_crlf2(c), ref_crlf2(c), "find_crlf2 on {c:?}");
+        }
+        // Exhaustive over short strings drawn from the alphabet that matters:
+        // any disagreement on 4 bytes of {\r, \n, x} would be a real bug.
+        let alpha = *b"\r\nx";
+        let mut buf = [0u8; 5];
+        for n in 0..=5usize {
+            let mut idx = vec![0usize; n];
+            loop {
+                for k in 0..n {
+                    buf[k] = alpha[idx[k]];
+                }
+                let c = &buf[..n];
+                assert_eq!(find_crlf(c), ref_crlf(c), "find_crlf on {c:?}");
+                assert_eq!(find_crlf2(c), ref_crlf2(c), "find_crlf2 on {c:?}");
+                let mut k = 0;
+                while k < n {
+                    idx[k] += 1;
+                    if idx[k] < alpha.len() {
+                        break;
+                    }
+                    idx[k] = 0;
+                    k += 1;
+                }
+                if k == n {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn content_range_total_is_the_size_fallback() {
+        // The number after the slash is the whole object, which is how a size is
+        // recovered when HEAD omits Content-Length — jsDelivr does exactly that,
+        // and without this fallback a 521 KiB object probes as 0 bytes.
+        assert_eq!(parse_content_range_total("bytes 0-0/533653"), Some(533653));
+        assert_eq!(parse_content_range_total("bytes 100-199/1000"), Some(1000));
+        // An unknown total must not be invented.
+        assert_eq!(parse_content_range_total("bytes 0-0/*"), None);
+        assert_eq!(parse_content_range_total("garbage"), None);
+    }
+
+    #[test]
+    fn header_lookup_is_case_insensitive() {
+        // Real servers mix cases: jsDelivr sends lowercase `etag` and capitalised
+        // `Content-Type` in the same response.
+        // Built with concat! rather than a `\` line continuation: the continuation
+        // swallows the following indentation INTO the string, which silently
+        // prefixed a header line with spaces and made this test fail against a
+        // function that was already correct.
+        let h = concat!(
+            "HTTP/1.1 206 Partial Content\r\n",
+            "content-range: bytes 0-9/100\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "\r\n"
+        );
+        assert_eq!(
+            header_value(h, "content-range").as_deref(),
+            Some("bytes 0-9/100")
+        );
+        assert_eq!(
+            header_value(h, "TRANSFER-ENCODING").as_deref(),
+            Some("chunked")
+        );
+        assert!(header_value(h, "etag").is_none());
+    }
+
+    /// A chunked body must be de-framed before it reaches the file.
+    #[tokio::test]
+    async fn chunked_bodies_are_deframed_including_split_boundaries() {
+        use tokio::io::duplex;
+
+        // "hello world!" split as 5 + 7 bytes, with a chunk extension on the first
+        // size line and the terminating zero chunk.
+        let body: &[u8] = b"5;ext=1\r\nhello\r\n7\r\n world!\r\n0\r\n\r\n";
+        for split in [0usize, 3, 9, 14, body.len()] {
+            let (mut server, client) = duplex(64);
+            let head = &body[..split];
+            let rest = body[split..].to_vec();
+            let writer = tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                // Feed the remainder one byte at a time so every boundary lands
+                // mid-read at least once across the parameter sweep.
+                for b in rest {
+                    let _ = server.write_all(&[b]).await;
+                }
+                let _ = server.shutdown().await;
+            });
+
+            let path = std::env::temp_dir().join(format!("hydra_chunk_{split}.bin"));
+            let path_s = path.to_string_lossy().to_string();
+            let sink = Arc::new(SparseSink::create(&path_s, 12).unwrap());
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let r = stream_chunked(
+                client,
+                0,
+                0,
+                12,
+                head,
+                sink.clone(),
+                tx,
+                Instant::now(),
+                Pace::unlimited(),
+            )
+            .await;
+            assert!(r.is_ok(), "split at {split} failed: {r:?}");
+            writer.await.unwrap();
+            drop(sink);
+
+            let got = std::fs::read(&path).unwrap();
+            assert_eq!(
+                got, b"hello world!",
+                "split at {split}: chunk framing leaked into the file"
+            );
+            let mut total = 0u64;
+            while let Ok(a) = rx.try_recv() {
+                total += a.bytes;
+            }
+            assert_eq!(total, 12, "split at {split}: arrivals must sum to the body");
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// A chunked body that stops early is an error, not a short success.
+    #[tokio::test]
+    async fn a_truncated_chunked_body_is_an_error() {
+        use tokio::io::duplex;
+        let (mut server, client) = duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            // Announces 12 bytes, sends 5, then hangs up.
+            let _ = server.write_all(b"c\r\nhello").await;
+            let _ = server.shutdown().await;
+        });
+        let path = std::env::temp_dir().join("hydra_chunk_trunc.bin");
+        let path_s = path.to_string_lossy().to_string();
+        let sink = Arc::new(SparseSink::create(&path_s, 12).unwrap());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let r = stream_chunked(
+            client,
+            0,
+            0,
+            12,
+            b"",
+            sink,
+            tx,
+            Instant::now(),
+            Pace::unlimited(),
+        )
+        .await;
+        assert!(
+            r.is_err(),
+            "a body that ends mid-chunk must not be reported as complete"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+}
