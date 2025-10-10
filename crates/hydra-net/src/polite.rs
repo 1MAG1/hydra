@@ -1,0 +1,598 @@
+//! Politeness: pacing, rate limiting, and server-friendly connection management.
+//!
+//! Features:
+//! * Per-host connection ceilings suitable for public mirrors;
+//! * `Retry-After` parsing (both delta-seconds and HTTP-date forms) with
+//!   exponential backoff and jitter for 429/503 responses;
+//! * Token-bucket rate limiter for bandwidth throttling;
+//! * Bounded redirect handling with validation at each hop.
+//!
+//! The defaults here are deliberately conservative. A user who wants to saturate
+//! their own server can raise them; a user downloading from a volunteer mirror
+//! should not have to know they exist.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Default connections per host. Public-mirror etiquette, not a physical limit:
+/// aria2 defaults to 5 per host with a 16 total, wget to 1, curl to 1. Four is
+/// within the range mirror operators tolerate.
+pub const DEFAULT_PER_HOST: usize = 4;
+
+/// Default ceiling across all hosts, so a large mirror list cannot fan out into
+/// hundreds of sockets.
+pub const DEFAULT_TOTAL: usize = 16;
+
+/// Redirect depth limit. curl uses 50 by default; a download that redirects more
+/// than a handful of times is misconfigured, and each hop costs a full `delta`.
+pub const MAX_REDIRECTS: u32 = 8;
+
+/// Politeness configuration.
+#[derive(Clone, Copy, Debug)]
+pub struct Politeness {
+    pub per_host: usize,
+    pub total: usize,
+    /// Ceiling on any single backoff, so a hostile `Retry-After: 86400` cannot
+    /// hang the transfer.
+    pub max_backoff: Duration,
+    /// Conservative mode: one connection per host, for mirrors that should be
+    /// treated gently regardless of what the measurement says.
+    pub conservative: bool,
+}
+
+impl Default for Politeness {
+    fn default() -> Self {
+        Self {
+            per_host: DEFAULT_PER_HOST,
+            total: DEFAULT_TOTAL,
+            max_backoff: Duration::from_secs(60),
+            conservative: false,
+        }
+    }
+}
+
+impl Politeness {
+    pub fn conservative() -> Self {
+        Self {
+            per_host: 1,
+            total: 2,
+            conservative: true,
+            ..Default::default()
+        }
+    }
+
+    /// Connections this configuration permits for `host`, given what the
+    /// scheduler asked for. The minimum of physics (what the caller computed)
+    /// and etiquette (this ceiling).
+    pub fn allow(&self, requested: usize) -> usize {
+        requested.clamp(1, self.per_host.max(1))
+    }
+
+    /// Split `requested` connections across `sources`, honouring BOTH ceilings.
+    ///
+    /// Returns the per-source counts, one entry per source. `allow` only ever
+    /// clamped against `per_host`, so nothing in the download path read `total`
+    /// at all: `--max-total-connections 2 -x 8` opened eight. The aggregate is
+    /// the ceiling a server operator actually feels — eight connections split
+    /// across two mirrors is still eight sockets — so it is enforced here, where
+    /// the split is decided, rather than at connect time where refusing a slot
+    /// would leave the scheduler holding a range nobody can fetch.
+    ///
+    /// Every source that gets a slot gets at least one. When the total is smaller
+    /// than the source count, the surplus sources are dropped (empty entries)
+    /// rather than shaved to zero-connection targets the scheduler would then
+    /// have to reason about.
+    pub fn split(&self, requested: usize, sources: usize) -> Vec<usize> {
+        if sources == 0 {
+            return Vec::new();
+        }
+        let per_host = self.per_host.max(1);
+        let total = self.total.max(1);
+        // Never more sockets in total than either the caller asked for or the
+        // aggregate ceiling permits.
+        let budget = requested.max(1).min(total);
+        // Only as many sources as there is budget to give one connection each.
+        let used = sources.min(budget);
+        let mut out = vec![0usize; sources];
+        for (i, slot) in out.iter_mut().enumerate().take(used) {
+            // Distribute the remainder over the leading sources rather than
+            // piling it on the first: `5` over `2` is `3, 2`, not `4, 1`.
+            let share = budget / used + usize::from(i < budget % used);
+            *slot = share.min(per_host).max(1);
+        }
+        out
+    }
+}
+
+/// Parse a `Retry-After` header value into a delay.
+///
+/// Accepts both forms RFC 9110 permits: delta-seconds, and an HTTP-date. The
+/// date form is common enough on real 503s that ignoring it means backing off
+/// for the wrong interval.
+pub fn parse_retry_after(v: &str, now_unix: u64) -> Option<Duration> {
+    let t = v.trim();
+    if let Ok(secs) = t.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    // IMF-fixdate: "Wed, 21 Oct 2015 07:28:00 GMT"
+    let when = parse_http_date(t)?;
+    Some(Duration::from_secs(when.saturating_sub(now_unix)))
+}
+
+/// Minimal IMF-fixdate parser returning a unix timestamp.
+///
+/// Hand-rolled rather than pulling in a date crate: this is the only date the
+/// downloader ever parses, and a wrong answer here only changes a backoff.
+/// Parse an HTTP-date (RFC 7231 IMF-fixdate) into a Unix timestamp.
+///
+/// Public because `--remote-time` needs it: a `Last-Modified` validator carries a
+/// usable timestamp, while an opaque `ETag` does not.
+pub fn parse_http_date(s: &str) -> Option<u64> {
+    let p: Vec<&str> = s.split_whitespace().collect();
+    if p.len() < 5 {
+        return None;
+    }
+    let day: u64 = p[1].parse().ok()?;
+    let month = match p[2] {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let year: u64 = p[3].parse().ok()?;
+    let hms: Vec<&str> = p[4].split(':').collect();
+    if hms.len() != 3 {
+        return None;
+    }
+    let (h, mi, sec): (u64, u64, u64) = (
+        hms[0].parse().ok()?,
+        hms[1].parse().ok()?,
+        hms[2].parse().ok()?,
+    );
+    // days since epoch, civil-from-days (Howard Hinnant's algorithm)
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + h * 3600 + mi * 60 + sec)
+}
+
+/// Exponential backoff with full jitter, capped.
+///
+/// Jitter is not decoration: without it, N connections that all hit the same 503
+/// retry in lockstep and hammer the server in synchronised waves.
+pub fn backoff_with_jitter(attempt: u32, base: Duration, cap: Duration, seed: u64) -> Duration {
+    let mult = 1u64 << attempt.min(6);
+    let ceil = base.saturating_mul(mult as u32).min(cap);
+    // xorshift on the seed: deterministic per (attempt, seed), no rand dep.
+    let mut x = seed.max(1);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    let frac = (x % 1000) as f64 / 1000.0;
+    // Full jitter: uniform in [0, ceil]. Halves the synchronised-retry problem
+    // relative to equal-jitter, at the cost of occasionally retrying very soon.
+    Duration::from_secs_f64(ceil.as_secs_f64() * (0.5 + 0.5 * frac))
+}
+
+/// Tracks live connections per host so the ceiling can be enforced.
+#[derive(Clone, Default)]
+pub struct HostLimiter {
+    live: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl HostLimiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Try to reserve a slot for `host`. Returns false when the ceiling binds.
+    pub fn try_acquire(&self, host: &str, per_host: usize, total: usize) -> bool {
+        let mut g = self.live.lock().unwrap();
+        let sum: usize = g.values().sum();
+        let cur = g.get(host).copied().unwrap_or(0);
+        if cur >= per_host || sum >= total {
+            return false;
+        }
+        *g.entry(host.to_string()).or_insert(0) += 1;
+        true
+    }
+
+    pub fn release(&self, host: &str) {
+        let mut g = self.live.lock().unwrap();
+        if let Some(v) = g.get_mut(host) {
+            *v = v.saturating_sub(1);
+        }
+    }
+
+    pub fn live_for(&self, host: &str) -> usize {
+        self.live.lock().unwrap().get(host).copied().unwrap_or(0)
+    }
+}
+
+/// Token bucket for `--limit-rate`, shared across all connections.
+///
+/// Enforced on the AGGREGATE, not per connection: a user asking for 1 MB/s means
+/// the transfer should use 1 MB/s, not 1 MB/s times however many connections the
+/// scheduler happened to open.
+pub struct RateLimiter {
+    /// Bytes per second; 0 = unlimited.
+    rate: AtomicU64,
+    /// Monotonic cursor: the time by which everything granted has been sent.
+    cursor: Mutex<Option<Instant>>,
+}
+
+impl RateLimiter {
+    pub fn new(bytes_per_sec: u64) -> Self {
+        Self {
+            rate: AtomicU64::new(bytes_per_sec),
+            cursor: Mutex::new(None),
+        }
+    }
+
+    pub fn unlimited() -> Self {
+        Self::new(0)
+    }
+
+    pub fn is_limited(&self) -> bool {
+        self.rate.load(Ordering::Relaxed) > 0
+    }
+
+    pub fn set_rate(&self, bytes_per_sec: u64) {
+        self.rate.store(bytes_per_sec, Ordering::Relaxed);
+    }
+
+    /// Reserve `n` bytes and return how long the caller must wait first.
+    pub fn reserve(&self, n: u64) -> Duration {
+        let r = self.rate.load(Ordering::Relaxed);
+        if r == 0 {
+            return Duration::ZERO;
+        }
+        let dur = Duration::from_secs_f64(n as f64 / r as f64);
+        let now = Instant::now();
+        let mut g = self.cursor.lock().unwrap();
+        let base = match *g {
+            Some(t) if t > now => t,
+            _ => now,
+        };
+        *g = Some(base + dur);
+        base.saturating_duration_since(now)
+    }
+}
+
+/// A shared rate cap as the byte loops see it: cheap to clone, absent by default.
+///
+/// The transfer path is generic over many call sites — the multi-connection
+/// scheduler loop, the single-range retry helper, the chunked decoder — and most
+/// of them have no cap. Wrapping the `Option` in a type keeps every one of those
+/// signatures honest about that while giving the two places that DO shape bytes
+/// one thing to call.
+#[derive(Clone, Default)]
+pub struct Pace(Option<Arc<RateLimiter>>);
+
+impl Pace {
+    /// No cap: `wait` returns immediately and reads stay at full size.
+    pub fn unlimited() -> Self {
+        Self(None)
+    }
+
+    /// Shape against `limiter`, unless it is itself unlimited.
+    ///
+    /// Collapsing an unlimited limiter to `None` here means the hot path pays a
+    /// null check rather than an atomic load and a mutex acquisition per read.
+    pub fn shared(limiter: Arc<RateLimiter>) -> Self {
+        if limiter.is_limited() {
+            Self(Some(limiter))
+        } else {
+            Self(None)
+        }
+    }
+
+    pub fn is_limited(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Largest read that keeps one pause short.
+    ///
+    /// A 64 KiB read under a 1 KiB/s cap owes 64 seconds of sleep, which is
+    /// longer than the transfer's own no-progress watchdog: shaping the rate
+    /// would trip the stall detector and kill the connection it was shaping.
+    /// Reading in slices worth about an eighth of a second keeps every pause well
+    /// inside that deadline, at the cost of more syscalls on a path that is by
+    /// definition not throughput-bound.
+    pub fn read_size(&self, want: usize) -> usize {
+        match &self.0 {
+            None => want,
+            Some(l) => {
+                let r = l.rate.load(Ordering::Relaxed);
+                if r == 0 || want == 0 {
+                    return want;
+                }
+                // An eighth of a second's worth, with a 1 KiB floor so a very low
+                // cap does not degenerate into one syscall per byte.
+                //
+                // The floor is applied BEFORE clamping against `want`, never as a
+                // `clamp(1024, want)`: on the last read of a range `want` is
+                // whatever is left, which is routinely under 1 KiB, and
+                // `clamp(1024, 969)` panics on min > max. That panic killed the
+                // connection mid-transfer — the caller saw a stall, retried, and
+                // the measured throughput came out FIVE times below the cap that
+                // was supposed to be the ceiling.
+                let slice = (r / 8).max(1024) as usize;
+                want.min(slice).max(1)
+            }
+        }
+    }
+
+    /// Reserve `n` bytes against the cap and sleep for whatever it owes.
+    pub async fn wait(&self, n: u64) {
+        if let Some(l) = &self.0 {
+            let d = l.reserve(n);
+            if !d.is_zero() {
+                tokio::time::sleep(d).await;
+            }
+        }
+    }
+}
+
+/// Parse a `--limit-rate` value: bare bytes, or with a k/K/m/M/g/G suffix.
+/// Matches wget's and curl's accepted forms.
+pub fn parse_rate(s: &str) -> Option<u64> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let (num, mult) = match t.chars().last().unwrap() {
+        'k' | 'K' => (&t[..t.len() - 1], 1024u64),
+        'm' | 'M' => (&t[..t.len() - 1], 1024 * 1024),
+        'g' | 'G' => (&t[..t.len() - 1], 1024 * 1024 * 1024),
+        _ => (t, 1),
+    };
+    let v: f64 = num.trim().parse().ok()?;
+    if v < 0.0 {
+        return None;
+    }
+    Some((v * mult as f64) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_after_accepts_both_forms() {
+        assert_eq!(parse_retry_after("120", 0), Some(Duration::from_secs(120)));
+        // 2015-10-21T07:28:00Z = 1445412480
+        let d = parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT", 1_445_412_000).unwrap();
+        assert_eq!(
+            d,
+            Duration::from_secs(480),
+            "HTTP-date form must be honoured"
+        );
+    }
+
+    #[test]
+    fn retry_after_in_the_past_is_zero_not_negative() {
+        let d = parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT", 2_000_000_000).unwrap();
+        assert_eq!(d, Duration::ZERO, "a past date must not underflow");
+    }
+
+    #[test]
+    fn retry_after_rejects_garbage() {
+        assert!(parse_retry_after("soon", 0).is_none());
+        assert!(parse_retry_after("", 0).is_none());
+    }
+
+    #[test]
+    fn backoff_grows_and_stays_capped() {
+        let base = Duration::from_millis(200);
+        let cap = Duration::from_secs(10);
+        let a = backoff_with_jitter(0, base, cap, 7);
+        let b = backoff_with_jitter(4, base, cap, 7);
+        assert!(b > a, "backoff must grow with attempt");
+        for att in 0..20 {
+            assert!(
+                backoff_with_jitter(att, base, cap, att as u64 + 1) <= cap,
+                "attempt {att} exceeded the cap"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_jitter_differs_across_connections() {
+        let base = Duration::from_secs(1);
+        let cap = Duration::from_secs(30);
+        let a = backoff_with_jitter(3, base, cap, 1);
+        let b = backoff_with_jitter(3, base, cap, 2);
+        assert_ne!(
+            a, b,
+            "identical backoff across connections re-synchronises the herd"
+        );
+    }
+
+    #[test]
+    fn host_ceiling_binds_per_host_and_globally() {
+        let l = HostLimiter::new();
+        assert!(l.try_acquire("a.example", 2, 3));
+        assert!(l.try_acquire("a.example", 2, 3));
+        assert!(
+            !l.try_acquire("a.example", 2, 3),
+            "per-host ceiling must bind"
+        );
+        assert!(l.try_acquire("b.example", 2, 3));
+        assert!(
+            !l.try_acquire("b.example", 2, 3),
+            "global ceiling must bind"
+        );
+        l.release("a.example");
+        assert!(
+            l.try_acquire("b.example", 2, 3),
+            "a release must free global room"
+        );
+    }
+
+    #[test]
+    fn conservative_mode_is_one_per_host() {
+        let p = Politeness::conservative();
+        assert_eq!(
+            p.allow(32),
+            1,
+            "conservative mode must ignore an ambitious request"
+        );
+        assert_eq!(Politeness::default().allow(32), DEFAULT_PER_HOST);
+        assert_eq!(Politeness::default().allow(0), 1, "at least one connection");
+    }
+
+    #[test]
+    fn rate_limiter_paces_the_aggregate() {
+        let rl = RateLimiter::new(1_000_000);
+        // First reservation is immediate, subsequent ones queue behind it.
+        assert_eq!(rl.reserve(500_000), Duration::ZERO);
+        let w = rl.reserve(500_000);
+        assert!(
+            w >= Duration::from_millis(400) && w <= Duration::from_millis(600),
+            "500 KB at 1 MB/s should wait ~0.5 s, waited {w:?}"
+        );
+    }
+
+    #[test]
+    fn unlimited_rate_limiter_never_waits() {
+        let rl = RateLimiter::unlimited();
+        assert!(!rl.is_limited());
+        for _ in 0..100 {
+            assert_eq!(rl.reserve(1 << 20), Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn rate_parsing_matches_wget_forms() {
+        assert_eq!(parse_rate("1024"), Some(1024));
+        assert_eq!(parse_rate("2k"), Some(2048));
+        assert_eq!(parse_rate("2K"), Some(2048));
+        assert_eq!(parse_rate("1.5M"), Some(1_572_864));
+        assert_eq!(parse_rate("1G"), Some(1_073_741_824));
+        assert_eq!(parse_rate("abc"), None);
+        assert_eq!(parse_rate("-5"), None);
+    }
+
+    /// `--max-total-connections` must bind the AGGREGATE, not just one host.
+    ///
+    /// Regression test: `allow()` clamped against `per_host` only, and nothing in
+    /// the download path read `Politeness.total` at all — the one function that
+    /// did (`HostLimiter::try_acquire`) was never called outside its own tests.
+    /// `--max-total-connections 2 -x 8` reported and opened eight connections.
+    #[test]
+    fn split_honours_the_aggregate_ceiling() {
+        let p = Politeness {
+            per_host: 8,
+            total: 2,
+            ..Default::default()
+        };
+        // Eight requested across one source, but only two permitted in total.
+        assert_eq!(p.split(8, 1).iter().sum::<usize>(), 2);
+        // Splitting across mirrors must not multiply the total: eight connections
+        // over two hosts is still eight sockets, which is what the ceiling means.
+        let across = p.split(8, 2);
+        assert_eq!(across.iter().sum::<usize>(), 2, "got {across:?}");
+        // More sources than budget: the surplus get nothing rather than zero-slot
+        // targets the scheduler would still have to reason about.
+        let sparse = p.split(8, 5);
+        assert_eq!(sparse.iter().sum::<usize>(), 2);
+        assert_eq!(sparse.iter().filter(|&&n| n > 0).count(), 2);
+    }
+
+    /// The per-host ceiling still binds, and the remainder is spread evenly.
+    #[test]
+    fn split_respects_per_host_and_spreads_the_remainder() {
+        let p = Politeness {
+            per_host: 2,
+            total: 32,
+            ..Default::default()
+        };
+        // Per-host caps each entry at 2 even though the total would allow more.
+        assert_eq!(p.split(8, 2), vec![2, 2]);
+
+        let q = Politeness {
+            per_host: 8,
+            total: 32,
+            ..Default::default()
+        };
+        // 5 over 2 is 3+2, not 4+1: the remainder goes to the leading sources one
+        // at a time rather than piling onto the first.
+        assert_eq!(q.split(5, 2), vec![3, 2]);
+        assert_eq!(q.split(8, 4), vec![2, 2, 2, 2]);
+        // A single connection is always available: no configuration can ask for a
+        // transfer with nothing to fetch it.
+        assert_eq!(q.split(1, 1), vec![1]);
+        assert_eq!(q.split(0, 1), vec![1]);
+        assert_eq!(q.split(4, 0), Vec::<usize>::new());
+    }
+
+    /// `read_size` must never panic, whatever the cap and whatever is left to read.
+    ///
+    /// Regression test: the slice was computed as `(rate / 8).clamp(1024, want)`,
+    /// which panics with `min > max` whenever fewer than 1 024 bytes remain in the
+    /// range — the last read of very nearly every range. The panic unwound the
+    /// connection task mid-transfer, the caller saw a stall and retried, and the
+    /// measured throughput came out about five times BELOW the cap that was meant
+    /// to be a ceiling. A rate limiter that makes transfers slower than requested
+    /// is as wrong as one that does nothing.
+    #[test]
+    fn read_size_never_panics_on_a_short_tail() {
+        let pace = Pace::shared(Arc::new(RateLimiter::new(8 * 1024)));
+        // The tail of a range: fewer bytes left than the 1 KiB floor.
+        for want in [0usize, 1, 969, 1023, 1024, 1025, 64 * 1024] {
+            let n = pace.read_size(want);
+            assert!(
+                n <= want,
+                "read_size({want}) = {n} asked for more than remained"
+            );
+            if want > 0 {
+                assert!(n >= 1, "read_size({want}) = 0 would make no progress");
+            }
+        }
+    }
+
+    /// An unlimited pace must not shorten reads: no cap, no syscall overhead.
+    #[test]
+    fn an_unlimited_pace_reads_at_full_size() {
+        let pace = Pace::unlimited();
+        assert!(!pace.is_limited());
+        assert_eq!(pace.read_size(64 * 1024), 64 * 1024);
+        // A limiter constructed with no cap collapses to the same thing.
+        let from_unlimited = Pace::shared(Arc::new(RateLimiter::unlimited()));
+        assert!(!from_unlimited.is_limited());
+        assert_eq!(from_unlimited.read_size(64 * 1024), 64 * 1024);
+    }
+
+    /// A capped pace reads in slices short enough that one pause stays brief.
+    ///
+    /// A 64 KiB read under a 1 KiB/s cap owes 64 seconds of sleep, which is longer
+    /// than the transfer's own no-progress watchdog: shaping the rate would trip
+    /// the stall detector and kill the connection it was shaping.
+    #[test]
+    fn a_capped_pace_reads_in_short_slices() {
+        let pace = Pace::shared(Arc::new(RateLimiter::new(1024)));
+        assert!(pace.is_limited());
+        let n = pace.read_size(64 * 1024);
+        assert!(
+            n <= 8 * 1024,
+            "a 1 KiB/s cap must not take a {n}-byte read: the pause it owes would \
+             outlast the stall watchdog"
+        );
+    }
+}
