@@ -1,0 +1,30 @@
+[package]
+name = "hydra-cli"
+version.workspace = true
+edition.workspace = true
+# Deliberately NOT `license.workspace = true`. This crate is the distributed
+# binary and is copyleft; the two library crates it links stay permissive so they
+# remain usable as dependencies. `ring` (via rustls) is Apache-2.0, which is
+# incompatible with GPL-2.0 and compatible with GPL-3.0 -- hence "3.0", not "2.0".
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "hydra"
+path = "src/main.rs"
+
+[dependencies]
+hydra-core = { workspace = true }
+hydra-net = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+crossterm = { workspace = true }
+sha2 = { workspace = true }
+md-5 = { workspace = true }
+sha1 = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap_complete = { workspace = true }
+
+[lints]
+workspace = true
