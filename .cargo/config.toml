@@ -1,0 +1,42 @@
+# Build configuration.
+#
+# This file deliberately sets NO `target-cpu`, and that is the load-bearing
+# decision in it.
+#
+# The tempting line here is `rustflags = ["-C", "target-cpu=native"]`, which
+# would let LLVM use AVX2 and friends in the autovectorized paths (hex encoding,
+# the digest loops). It is wrong for this project for a specific reason: a
+# binary built with `target-cpu=native` runs only on CPUs that have every
+# feature the build machine had. Built on a modern developer laptop and copied
+# to an older server or an Intel Mac, it does not run slowly — it dies with
+# SIGILL on the first instruction the target lacks. hydra is meant to be
+# distributed and to work as a drop-in for wget/curl, which run everywhere, so
+# the DEFAULT build must assume the base x86-64 / aarch64 ISA.
+#
+# Nothing is given up by that. The genuinely hot code is vectorized at RUNTIME,
+# not at compile time:
+#
+#   * `memchr` detects AVX2/SSE2/NEON at first use and dispatches accordingly,
+#     so the byte scans in `framebuf` and the header parsers use the widest
+#     instructions the CPU running the binary actually has.
+#   * `sha2` and `blake3` do the same via `cpufeatures` — SHA-NI on x86-64,
+#     the ARMv8 SHA-2 extensions on aarch64, with portable fallbacks.
+#   * `reed-solomon-simd` selects its own kernels at runtime.
+#
+# So the portable binary already reaches hardware-accelerated code paths on
+# modern hardware while still starting on old hardware. `target-cpu` would only
+# affect the autovectorized scalar loops, which are not the bottleneck.
+#
+# If you are building for one known machine and want that last increment:
+#
+#   RUSTFLAGS="-C target-cpu=native" cargo build --release
+#
+# Do not commit that. For a distributable build that still assumes a 2013-era
+# baseline (AVX2, BMI2 — Haswell and later, which excludes pre-2013 Intel Macs):
+#
+#   RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release
+#
+# Note on glibc: a Linux binary links against the glibc of the machine that
+# built it and will not start on a system with an older one. Build release
+# artifacts on the OLDEST distribution you intend to support, or target
+# `x86_64-unknown-linux-musl` for a static binary that runs anywhere.
