@@ -1,0 +1,189 @@
+.\" hydra-interactive(1)
+.TH HYDRA\-INTERACTIVE 1 "2026-08-16" "hydra 0.1.0" "User Commands"
+.
+.SH NAME
+hydra-interactive \- download manager with a persistent queue
+.
+.SH SYNOPSIS
+.B hydra interactive
+.RI [ options ]
+.RI [ URL ...]
+.
+.SH DESCRIPTION
+Runs a full-screen queue manager, or \(em with
+.B \-\-headless
+\(em works the same queue with no screen and one log line per event.
+.PP
+Any URLs on the command line are enqueued at startup.
+The queue persists across sessions in a state file, so a later invocation
+reattaches to it.
+.PP
+The subcommand declares its own options rather than borrowing the top-level
+ones.
+A subcommand competing with a variadic positional URL list is ambiguous in
+both orders: with borrowed options
+.B "hydra interactive \-\-queue\-file X"
+rejects the flag, and
+.B "hydra \-\-queue\-file X URL interactive"
+swallows the word "interactive" as a URL.
+.
+.SH OPTIONS
+.TP
+.BI \-\-queue\-file " FILE"
+Queue file.
+Defaults to a per-user state directory \(em see
+.BR FILES .
+.TP
+.B \-\-headless
+Work the queue with no screen, one log line per event, checkpointing the
+queue on start and every 2 seconds.
+.TP
+\fB\-n\fI N\fR, \fB\-\-max\-active\fI N\fR How many transfers run at once.
+Default 2.
+Adjustable live with
+.B +
+and
+.BR \- ,
+in the range 1-16.
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.
+.SH KEYS
+.TP
+.B Enter
+Open the per-connection detail view for the selected item.
+.TP
+.B Esc
+Leave the detail view.
+Never quits.
+.TP
+.B a
+Add a URL.
+.B Backspace
+edits while typing;
+.B Esc
+abandons the entry.
+.TP
+.BR j ", " k ", " Down ", " Up
+Move the selection.
+.TP
+.BR p ", " r
+Pause / resume the selected transfer.
+.TP
+.BR d ", " Delete
+Cancel the selected transfer.
+.TP
+.BR J ", " K
+Move the selected item down / up in the queue.
+.TP
+.B c
+Clear finished and cancelled items.
+.TP
+.BR + ", " =
+Raise queue parallelism by one.
+.TP
+.B \-
+Lower queue parallelism by one.
+.TP
+.BR ? ", " h
+Help overlay.
+.TP
+.B b
+Background: leave the UI, transfers keep running.
+.TP
+.B q
+Quit: stop the running transfers and exit.
+.TP
+.B Ctrl\-C
+Leave the UI immediately.
+.
+.SS Parallelism is not connection count
+.B +
+and
+.B \-
+set how many
+.I queued items
+may transfer simultaneously.
+Each item still opens as many
+.I connections
+as the scheduler measures to be useful for its own mirrors, which is a
+separate number chosen per path: on a link already saturated by one
+connection, more connections add no speed, so the scheduler declines to open
+them.
+Raising this setting multiplies total connections; on a shared or metered
+link it is the setting to lower first.
+.
+.SS Background and quit are different on purpose
+.B b
+detaches and leaves transfers running;
+.B q
+stops them.
+Binding one key to both is how a large download gets lost by reflex, which
+is also why
+.B Esc
+is never a quit key.
+.PP
+Backgrounding cannot mean merely leaving the event loop: the transfers are
+tasks in the same process, so exiting would kill them and a reattaching
+session would find everything stopped.
+.B b
+therefore re-executes the binary in headless queue mode inside a
+.I new session
+and streams its output to a log beside the queue file.
+The headless worker checkpoints the queue on start and every 2 seconds, so a
+reattaching UI sees live state along with the owning PID.
+.PP
+Queue items record their owner PID for that reason.
+A reloaded queue demotes a
+.B Running
+item back to
+.B Queued
+only when that process is really gone \(em demoting a live one would put two
+writers on one output file.
+.
+.SH FILES
+.TP
+.I $XDG_STATE_HOME/hydra/queue.json
+Default queue state.
+Falls back to
+.I $HOME/.local/state/hydra/queue.json
+and then to
+.I ./hydra/queue.json
+when neither variable is set.
+Override with
+.BR \-\-queue\-file .
+.TP
+.I queue.log
+Written beside the queue file (same path, extension replaced) by a
+backgrounded headless worker.
+.
+.SH ENVIRONMENT
+.TP
+.B XDG_STATE_HOME
+Base directory for the default queue file.
+.TP
+.B HOME
+Used when
+.B XDG_STATE_HOME
+is unset.
+.
+.SH EXAMPLES
+Start the manager with two URLs queued:
+.PP
+.RS 4
+.nf
+hydra interactive https://a.example/x.iso https://b.example/y.iso
+.fi
+.RE
+.PP
+Run a queue on a server with no terminal, four at a time:
+.PP
+.RS 4
+.nf
+hydra interactive \-\-headless \-n 4 \-\-queue\-file /srv/dl/queue.json
+.fi
+.RE
+.
+.SH SEE ALSO
+.BR hydra (1)

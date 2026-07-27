@@ -1,0 +1,1074 @@
+'\" t
+.\" hydra(1) - adaptive multi-source file retriever
+.\" Written for man(7): renders on groff (Linux) and mandoc (macOS, *BSD,
+.\" illumos) alike. No GNU-only macros, no UTF-8 in the source.
+.TH HYDRA 1 "2026-08-16" "hydra 0.1.0" "User Commands"
+.
+.SH NAME
+hydra \- multi-source file retriever with reassignable byte ranges
+.
+.SH SYNOPSIS
+.B hydra
+.RI [ options ]
+.IR URL ...
+.br
+.B hydra interactive
+.RI [ options ]
+.RI [ URL ...]
+.br
+.B hydra checksum
+.RI [ options ]
+.IR URL ...
+.br
+.B hydra parity
+.BR make | repair
+.RI [ options ]
+.I FILE
+.br
+.B hydra formats
+.RI [ options ]
+.br
+.B hydra bench
+.RI [ options ]
+.br
+.B hydra completions
+.I SHELL
+.br
+.B hydra install\-completions
+.RI [ SHELL ]
+.RI [ options ]
+.
+.SH DESCRIPTION
+.B hydra
+retrieves an object over
+.BR http ,
+.BR https ,
+or
+.BR ftp ,
+and keeps the work reassignable while it runs instead of committing to a
+split up front.
+.PP
+The property it is built on is that a byte range is not a commitment.
+An HTTP range request has a server-side start but a
+.I client-side
+end: to shrink a laggard's range you stop reading, with no message to the
+server and no round trip.
+A source that dies or throttles mid-transfer therefore does not strand its
+share, which is what a static split cannot avoid.
+FTP does not have this property \(em
+.B REST
+says where a transfer starts and nothing says where it ends \(em so FTP
+transfers are single-source and sequential, and the cost is stated rather
+than hidden.
+See
+.BR PROTOCOLS ,
+below.
+.PP
+By default several URLs mean several
+.IR files ,
+matching
+.BR wget (1)
+and
+.BR curl (1).
+Pass
+.B \-\-mirrors
+to treat them as interchangeable copies of one object and assemble byte
+ranges across them; that is only sound when every source provably serves
+identical bytes, so sources that disagree on size or validator are dropped
+with a reason printed.
+.PP
+Concurrency is
+.I measured
+rather than assumed.
+With no
+.B \-x
+the client probes how many connections a path actually rewards and opens
+that many; on a link already saturated by one connection, more connections
+add no speed and none are opened.
+Pass
+.B \-\-no\-probe
+to take
+.B \-x
+on faith.
+.
+.SH OPTIONS
+.SS Output
+.TP
+\fB\-O\fI FILE\fR, \fB\-\-output\fI FILE\fR Write the object to
+.IR FILE .
+.TP
+.B \-\-remote\-name
+Name the output from the URL's last path component
+.RB ( curl " " \-O ).
+.TP
+.B \-\-content\-disposition
+Name the output from a
+.B Content\-Disposition
+response header
+.RB ( curl " " \-J ).
+Accepted but not implemented in this release; see
+.BR BUGS .
+.TP
+\fB\-P\fI DIR\fR, \fB\-\-output\-dir\fI DIR\fR Save into
+.IR DIR .
+The directory must exist unless
+.B \-\-create\-dirs
+is also given.
+.TP
+.B \-\-create\-dirs
+Create missing parent directories of the output path.
+.TP
+.B \-\-stdout
+Write the payload to standard output.
+Everything human moves to standard error, so the stream stays a single clean
+object.
+.TP
+.BR \-\-no\-save ", " \-\-discard
+Run the transfer but discard the bytes.
+Size, digest, format and timings are still measured and reported.
+Writes nothing at any point, including no resume sidecar, and so works in a
+directory with no write permission.
+Combine with
+.B \-\-json
+for a machine-readable probe.
+.TP
+.B \-\-no\-clobber
+Skip the download entirely if the output file already exists
+.RB ( wget " " \-nc ).
+The existing file is left byte-for-byte untouched.
+.TP
+.BR \-f ", " \-\-force
+Overwrite an existing output file without asking.
+.TP
+.BR \-y ", " \-\-sort\-by\-type
+File the finished object into a per-category subdirectory
+.RB ( Video ", " Music ", " Compressed ", " Documents ", " Programs ", ...),"
+the way IDM does.
+The category comes from the payload's magic bytes, not from the extension or
+the server's
+.BR Content\-Type ,
+both of which are frequently wrong.
+The full mapping is in
+.BR hydra\-formats (1).
+.PP
+When the output file already exists and neither
+.B \-\-force
+nor
+.B \-\-no\-clobber
+was given, an interactive run asks what to do
+.RB ( c
+continue,
+.B r
+start over,
+.B s
+skip).
+A non-interactive run \(em stdin closed, piped, or at EOF \(em never
+destroys the existing file: it writes to the first free name in the
+\fIpath\fR, \fIpath\fB.1\fR, \fIpath\fB.2\fR series, bounded at 9999.
+.
+.SS Transfer control
+.TP
+\fB\-x\fI N\fR, \fB\-\-max\-connection\-per\-server\fI N\fR Connections per
+source.
+Omit to measure the useful number.
+.TP
+\fB\-s\fI N\fR, \fB\-\-split\fI N\fR Alias for
+.BR \-x ,
+for
+.BR aria2c (1)
+muscle memory.
+.TP
+.BI \-\-max\-total\-connections " N"
+Total connections across all hosts.
+Default 16.
+This is an
+.I aggregate
+ceiling: splitting a transfer across mirrors does not multiply it, so
+.B \-\-max\-total\-connections 2
+with
+.B \-x 8
+over two hosts opens two sockets in total, not eight per host.
+The per-host limit still binds independently, and one connection is always
+available.
+.TP
+.B \-\-polite
+One connection per host, for volunteer mirrors.
+Overrides an ambitious
+.BR \-x .
+.TP
+.B \-\-no\-probe
+Do not measure the useful concurrency; open what
+.B \-x
+asked for.
+.TP
+.BI \-\-limit\-rate " RATE"
+Cap the aggregate transfer rate, e.g.\&
+.BR 500k ,
+.BR 2M .
+An unparsable value is a hard error, not a silent fallback to unlimited: a
+user who asked for a cap and did not get one may saturate a metered link.
+.TP
+.BR \-c ", " \-\-continue
+Continue a partially-downloaded file.
+Resume is refused, with the reason printed, when the object has changed
+underneath the partial copy \(em see
+.B FILES
+for the sidecar that makes that check possible.
+.TP
+\fB\-r\fI RANGE\fR, \fB\-\-range\fI RANGE\fR Retrieve only this byte range:
+.BR 0\-1023 ,
+.BR 1024\- ,
+or
+.B \-512
+for the last 512 bytes.
+The delivered file is the span itself, at offset 0 \(em not the span written
+into a file of the object's full extent.
+.TP
+.BI \-\-start\-pos " OFFSET"
+Begin at this byte offset
+.RB ( wget " " \-\-start\-pos ", " curl " " "\-C N" ).
+.TP
+.BI \-\-max\-filesize " BYTES"
+Refuse an object larger than this.
+.TP
+\fB\-t\fI N\fR, \fB\-\-tries\fI N\fR Retries per range before giving up on a
+source.
+Default 4.
+.TP
+.BI \-\-retry\-delay " SECS"
+Seconds between retries.
+Default 0.5.
+Accepted but not implemented in this release; see
+.BR BUGS .
+.TP
+\fB\-T\fI SECS\fR, \fB\-\-timeout\fI SECS\fR Per-request timeout.
+Default 30.
+.TP
+.BI \-\-connect\-timeout " SECS"
+Connection timeout.
+Accepted but not implemented in this release; see
+.BR BUGS .
+.TP
+.BI \-\-wait " SECS"
+Seconds to wait between separate URLs.
+Default 0.
+.
+.SS Several URLs
+.TP
+.BI \-\-mode " MODE"
+How to treat several URLs.
+.B same
+(default) fetches them concurrently as separate files;
+.B queue
+fetches them one after another.
+Conflicts with
+.BR \-\-mirrors .
+.TP
+.B \-\-mirrors
+Treat every URL as a mirror of
+.I one
+object and assemble byte ranges across them.
+Requires that all sources agree on size and on a strong validator.
+.TP
+.BR \-Z ", " \-\-parallel
+Retrieve several URLs concurrently
+.RB ( curl " " \-Z ).
+Distinct objects, not mirrors.
+.TP
+.BI \-\-parallel\-max " N"
+Maximum concurrent transfers under
+.BR \-\-parallel .
+Default 4.
+Accepted but not implemented in this release; see
+.BR BUGS .
+.TP
+.BI \-\-input\-file " FILE"
+Read URLs from
+.IR FILE ,
+one per line.
+There is deliberately no
+.B \-i
+short form in native mode:
+.B \-i
+is boolean here (see
+.BR COMPATIBILITY ),
+so a value-taking
+.B \-i
+would make
+.B \-iv
+parse
+.B v
+as a filename.
+.
+.SH INTEGRITY
+.TP
+.BI \-\-checksum " HASH"
+Verify the finished file, e.g.\&
+.BR "\-\-checksum sha256:abc..." .
+Accepts
+.B sha256:
+followed by 64 hex digits, or the bare digest.
+A mismatch is reported and exits 1.
+An unparsable value is a
+.I usage
+error and exits 2 at argument parsing, rather than surviving to the comparison
+and being reported as wrong bytes \(em the exit code was right either way, but
+blaming the server for a malformed argument is the more expensive mistake.
+.TP
+.BI \-\-emit\-manifest " FILE"
+Write a per-chunk digest manifest for what arrived.
+The manifest localizes future corruption to a single chunk, which turns a
+whole-file re-download into one chunk refetch.
+It costs about 0.012% of the object at the default 4 MiB grid.
+Format:
+.IR docs/INTEGRITY.md .
+.TP
+.BI \-\-chunk\-digests " FILE"
+Verify each chunk against a manifest as it arrives, refetching mismatches.
+.TP
+.BI \-\-chunk\-size " BYTES"
+Chunk grid for
+.BR \-\-emit\-manifest .
+Default 4 MiB.
+.TP
+.BI \-\-etag\-compare " FILE"
+Compare against an ETag stored in
+.IR FILE .
+.TP
+.BI \-\-etag\-save " FILE"
+Save the object's ETag to
+.IR FILE .
+.PP
+A manifest read from a
+.I local path
+is trusted and may supply erasure positions for a repair.
+One fetched from the object's own origin may only
+.IR detect ,
+never repair: erasure decoding trusts its inputs completely, so positions
+chosen by whoever served the bytes would hand them control of the output.
+A refetch driven by an advertised manifest is self-correcting, because the
+refetched chunk is checked again; a repair is not.
+See
+.IR docs/INTEGRITY.md " \(sc1"
+and
+.BR hydra\-parity (1).
+.
+.SH REPORTING
+.TP
+.BR \-q ", " \-\-quiet
+Suppress all output except errors.
+.TP
+.B \-\-no\-verbose
+Reduce output without silencing it
+.RB ( wget " " \-nv ).
+Accepted but not implemented in this release; see
+.BR BUGS .
+.TP
+.BR \-v ", " \-\-verbose
+Verbose.
+Repeat
+.RB ( \-vv )
+for scheduler-level detail.
+.TP
+.B \-\-json
+Emit the result as JSON on standard output, and nothing else.
+Implies quiet: a machine-readable result must be the only thing on the
+stream or it cannot be piped to a parser.
+See
+.B JSON OUTPUT
+below.
+.TP
+.B \-\-no\-progress
+Suppress the live progress display but keep summaries.
+.TP
+.B \-\-show\-progress
+Force the progress display on even when stdout is not a terminal.
+Accepted but not implemented in this release; see
+.BR BUGS .
+.TP
+.BR \-S ", " \-i ", " \-\-server\-response ", " \-\-include
+Print the request and response headers.
+Works both on a real transfer and under
+.BR \-\-spider .
+Not
+.BR \-I :
+in curl that means "headers only, no body", which here is
+.BR \-\-spider .
+.TP
+.B \-\-spider
+Probe headers and report without retrieving the body
+.RB ( wget " " \-\-spider ", " curl " " \-I ).
+Writes no file.
+.TP
+.B \-\-fail
+Exit non-zero on an HTTP error
+.RB ( curl " " \-f ).
+Note that in this release the error body is still written to the output path
+before the non-zero exit, where curl's
+.B \-f
+writes nothing.
+Check the exit status; do not read the absence of a file as the signal.
+See
+.BR BUGS .
+.TP
+.B \-\-show\-error
+Show errors even when quiet.
+The failure reason goes to stderr under
+.BR \-q ,
+as curl's
+.B \-sS
+pair does; without it a quiet run that failed is indistinguishable from one
+that succeeded except by its exit status.
+.TP
+\fB\-o\fI FILE\fR, \fB\-\-logfile\fI FILE\fR Log to
+.I FILE
+instead of the terminal, truncating it.
+The animated progress frame is suppressed and no ANSI escapes are written, so
+the file is greppable; the summary line, verbose events and post-transfer
+notes all land there.
+.TP
+.BI \-\-logfile\-append " FILE"
+Append to
+.I FILE
+instead of truncating.
+.
+.SH NETWORK
+.TP
+\fB\-H\fI LINE\fR, \fB\-\-header\fI LINE\fR With a value
+.RB ( "\-H 'Name: value'" ),
+send that request header.
+With
+.I no
+value \(em
+.B \-H Name
+or
+.B "\-H Name:"
+\(em ask what the server answered with: the value is printed and the program
+exits without transferring the body.
+A trailing colon is punctuation, not a value, so both spellings mean the
+same thing.
+.IP
+Header arguments are validated during parsing, not at send time, because
+they are written onto the wire verbatim: a malformed one produces a request
+the server never answers, which presents to the user as a hang.
+A field-name must be an RFC 9110 token, and a CR or LF anywhere is refused
+as header injection rather than as a typo.
+.IP
+The cost of the query spelling is that an intentionally empty request header
+(curl's
+.BR "\-H 'Name;'" )
+cannot be sent.
+.TP
+\fB\-U\fI STRING\fR, \fB\-A\fI STRING\fR, \fB\-\-user\-agent\fI STRING\fR
+User-Agent to send.
+Default
+.BR hydra/0.1 .
+.TP
+.BI \-\-proxy " URL"
+Proxy to use
+.RB ( curl " " \-x ).
+Accepts
+.BR http:// ,
+.BR socks4:// ,
+.BR socks4a:// ,
+.BR socks5:// ,
+and
+.BR socks5h:// ,
+with optional
+.BI user:pass@
+credentials.
+SOCKS is a different mechanism, not a different spelling: an HTTP proxy
+rewrites requests or opens a
+.B CONNECT
+tunnel, while SOCKS forwards a raw TCP stream and lets the proxy resolve DNS
+\(em which is what
+.B "ssh \-D"
+and Tor expose, and the only option when local DNS cannot resolve the origin
+at all.
+.TP
+.B \-\-no\-proxy
+Ignore any proxy in the environment.
+.TP
+.BR \-L ", " \-\-location
+Follow redirects.
+On by default; the flag exists so scripts can be explicit.
+.TP
+.BI \-\-max\-redirs " N"
+Maximum redirects to follow.
+Default 8.
+.B 0
+refuses to follow any redirect, naming the location it declined; exhausting
+the budget fails with the flag named.
+The limit applies to the transfer and the header-report path alike.
+.TP
+.B \-\-insecure
+Allow certificates that do not verify
+.RB ( curl " " \-k ", " wget " " \-\-no\-check\-certificate ).
+.TP
+.BR \-4 ", " \-\-ipv4
+Resolve names to IPv4 only.
+A host with no address of the requested family is an
+.IR error ,
+never a silent fallback to the family excluded \(em refusing is what the flag
+is for.
+.TP
+.BR \-6 ", " \-\-ipv6
+Resolve names to IPv6 only.
+Conflicts with
+.BR \-4 :
+the combination has no satisfiable reading, so it is rejected rather than
+resolved in favour of one of them.
+.PP
+Through a proxy the restriction applies to the hop this client opens, which is
+the one to the proxy; beyond a SOCKS proxy the origin is resolved by the proxy
+and this client has no say.
+.
+.SH GENERAL
+.TP
+.BI \-\-compat " DIALECT"
+Command-line dialect:
+.BR native ", " wget ", or " curl .
+Also inferred from the name the binary is invoked as.
+See
+.BR COMPATIBILITY .
+.TP
+.BI \-\-queue\-file " FILE"
+Queue file for interactive mode.
+See
+.BR hydra\-interactive (1).
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.B \-h
+gives a summary,
+.B \-\-help
+the long form.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.
+.SH PROTOCOLS
+.TS
+tab(@) box;
+lb lb lb lb
+l  l  l  l .
+Scheme@Ranged@Preempt cost@Validator
+_
+http, https@yes, client-bounded@0 RTT@strong ETag
+ftp@yes (REST)@2 RTT@none usable
+.TE
+.PP
+.B http
+and
+.B https
+are the case the scheduler is designed for: shrinking a range costs nothing,
+so work is reassignable at any moment.
+.PP
+.B ftp
+supports ranged reads through
+.BR REST ,
+but nothing says where a transfer
+.I ends
+\(em
+.B RETR
+runs to end-of-file \(em so shrinking a range means
+.BR ABOR ,
+draining the reply, and a fresh
+.B PASV
+for the next one: two control round trips where HTTP pays zero.
+Two consequences, both deliberate.
+FTP transfers are
+.B single-source
+\(em
+.B SIZE
+plus
+.B MDTM
+cannot prove two mirrors serve identical bytes, and a file spliced from two
+versions passes every length check while being silently wrong \(em and
+.BR sequential ,
+since with preemption costing round trips there is nothing to gain from
+splitting one source.
+Resume still works, because
+.B REST
+is a ranged read.
+A server without
+.B SIZE
+and
+.B REST
+(both RFC 3659 extensions, not RFC 959) is refused rather than guessed at.
+.PP
+FTP authentication is part of the URL \(em
+.BI ftp:// user : pass @ host / path
+\(em unlike HTTP where it is a header.
+Credentials are percent-decoded, split on the
+.I last
+.RB ` @ '
+so a password may contain one, and kept out of debug output, error messages,
+and the exchange that
+.B \-S
+prints.
+HTTP URLs carrying userinfo discard it: it never reaches an endpoint, a
+request line, or a proxy
+.BR CONNECT .
+.PP
+.B sftp://
+and
+.B scp://
+are recognised by name so the refusal can say
+.I why
+rather than "unsupported scheme".
+SFTP is the best fit of any protocol for this scheduler and is unbuilt only
+because it needs an SSH transport; SCP streams a whole file with no offsets,
+so there are no ranges to schedule and it will not be built.
+.
+.SH COMPATIBILITY
+.B wget
+and
+.B curl
+assign incompatible meanings to 15 of 19 commonly-used short flags, so no
+single namespace can be compatible with both.
+.PP
+Native mode resolves each letter by one rule: whichever tool's meaning is
+expressible in a downloader that does not crawl and does not upload wins the
+letter.
+.TS
+tab(@) box;
+lb lb lb lb
+l  l  l  l .
+Flag@wget@curl@native
+_
+\-O@output file@remote\-name@wget
+\-o@log file@output file@wget
+\-c@continue@cookie\-jar@wget
+\-q@quiet@no .curlrc@wget
+\-H@span\-hosts@header@curl
+\-U@user\-agent@proxy\-user@wget
+\-A@accept list@user\-agent@curl
+\-t@tries@telnet\-option@wget
+\-T@timeout@upload\-file@wget
+\-r@recursive@byte range@curl
+\-L@relative\-only@follow redirects@curl
+\-i@input file@include headers@curl
+\-N@timestamping@no\-buffer@wget
+\-P@directory\-prefix@ftp\-port@wget
+\-x@force\-directories@proxy@curl
+.TE
+.PP
+A second criterion overrides the first when they disagree: a short flag that
+takes a value cannot be clustered, so when one tool's meaning is boolean and
+the other's takes a value, the boolean wins.
+.B \-i
+is the case that proves it \(em with wget's meaning,
+.B "hydra \-iv URL"
+read
+.B v
+as an input filename and failed with a message about
+.BR \-\-input\-file ,
+which is a silent misinterpretation rather than an error about the flag.
+.PP
+For exact fidelity to either tool, select a dialect:
+.PP
+.RS 4
+.nf
+hydra \-\-compat=wget \-O out.bin URL
+hydra \-\-compat=curl \-o out.bin URL
+.fi
+.RE
+.PP
+or install the binary under the other tool's name, after which existing
+scripts work unchanged:
+.PP
+.RS 4
+.nf
+ln \-s hydra wget
+ln \-s hydra curl
+.fi
+.RE
+.PP
+The names
+.BR hydra\-wget ", " hydra\-curl ", " hydra_wget ", and " hydra_curl
+are recognised too, as is a
+.B .exe
+suffix.
+Precedence is:
+.B \-\-compat
+on the command line, then the invoked name, then native.
+.PP
+Under a dialect, a flag hydra cannot honour is
+.B refused with a reason,
+never ignored.
+A silently-ignored
+.B \-\-limit\-rate
+can saturate a metered link; a silently-ignored
+.B \-\-post\-data
+sends a request the user did not ask for.
+Refused categories include recursive crawling
+.RB ( \-r ", " \-\-mirror ", " \-\-accept ", " \-\-span\-hosts "),"
+request bodies and non-GET methods
+.RB ( \-\-post\-data ", " \-\-form ", " \-X "),"
+cookies, authentication
+.RB ( \-\-user ", " \-\-netrc ", " \-\-oauth2\-bearer "),"
+WARC archiving, and content encoding
+.RB ( \-\-compressed ).
+That last one is refused on a structural ground rather than an effort one: a
+compressed body cannot be assembled from byte ranges fetched in parallel,
+because the ranges are of the
+.I compressed
+stream and the client cannot know where they fall in the decoded object.
+Only flags that are genuinely inert for a downloader \(em
+.BR \-\-no\-dns\-cache ,
+.B \-\-tcp\-nodelay
+\(em are accepted and dropped, and each is listed explicitly rather than
+matched by a catch-all; at
+.B \-v
+they are reported as accepted with no effect.
+.PP
+This refusal discipline applies to the dialects only.
+Native mode has its own inert flags, which are
+.I not
+refused; they are listed in
+.BR BUGS .
+.
+.SH JSON OUTPUT
+.B \-\-json
+prints one pretty-printed document and nothing else, so
+.B "hydra \-\-json URL | jq .size"
+works.
+A single-URL run emits an object with these fields:
+.PP
+.RS 4
+.nf
+url               requested URL
+output            path written, or the discard sink
+size              bytes delivered
+elapsed_s         wall time for the whole invocation
+transfer_s        wall time for the byte transfer alone
+setup_s           wall time spent probing beforehand
+throughput_bps    bytes per second
+requests          range requests issued
+connections       connections actually used
+delta_s           scheduler tick
+sha256            digest of what arrived, if computed
+checksum_ok       true/false against \-\-checksum, else null
+resumed_from      bytes already present at start
+ok                whether the transfer succeeded
+note              human note, if any
+format            detected format, e.g. "gzip"
+category          detected category, e.g. "archive"
+format_conflict   payload vs. name vs. Content\-Type disagreement
+format_label      short label, e.g. "gzip\-compressed tar"
+format_description    one sentence about the format
+category_description  what the category is and what to do with it
+.fi
+.RE
+.PP
+.I elapsed_s
+and
+.I transfer_s
+are reported separately on purpose: they differ by seconds on a slow path,
+and a single figure next to a progress bar reading "1.7s" looks like two
+clocks disagreeing.
+Setup is a per-path cost a real client caches; transfer is the steady-state
+figure.
+.PP
+A multi-file run wraps them:
+.B files
+is the array of per-file objects above,
+.B count
+their number, and
+.B ok
+whether every one succeeded.
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+Every requested transfer completed and any checksum verified.
+.TP
+.B 1
+Runtime failure: a transfer failed, a checksum mismatched, TLS setup failed,
+or an HTTP error status was returned.
+.TP
+.B 2
+Usage error: an unrecognised or malformed argument, an unparsable
+.B \-\-limit\-rate
+or
+.BR \-\-range ,
+no URL given, an unreadable
+.BR \-\-input\-file ,
+an unknown
+.B bench
+harness, or a flag refused by the active compatibility dialect.
+.PP
+The distinction is load-bearing for scripts: exit 2 means the command was
+wrong and retrying it verbatim cannot help, while exit 1 means the command
+was right and the network or the server was not.
+.
+.SH ENVIRONMENT
+.TP
+.BR http_proxy ", " HTTP_PROXY
+Proxy to use when
+.B \-\-proxy
+is not given, checked in that order.
+Only these two are read; the value is parsed as
+.RI [ scheme ://] host : port
+and a port is required.
+.B \-\-no\-proxy
+suppresses them.
+.TP
+.B XDG_STATE_HOME
+Base directory for the interactive queue file.
+Falls back to
+.IR $HOME/.local/state ,
+then to the current directory.
+.TP
+.B HOME
+Used for the queue path when
+.B XDG_STATE_HOME
+is unset.
+.PP
+Note that the
+.B no_proxy
+environment variable is
+.I not
+consulted; per-host proxy exemption must be expressed with the
+.B \-\-no\-proxy
+flag.
+.
+.SH FILES
+.TP
+.IB output .hydra
+Resume sidecar, written beside the output file as JSON: the object's size,
+the validator it was served with
+.RB ( ETag ,
+else
+.BR Last\-Modified ),
+the byte ranges already written, and the URL.
+Resume compares the validator before reusing a single byte, because resuming
+across a server-side update would splice two versions of a file together
+\(em a failure that produces a file of exactly the right length.
+Removed on successful completion, and never created under
+.BR \-\-no\-save .
+.TP
+.IB output .hydra.tmp
+Transient.
+The sidecar is written here and atomically renamed, so a crash mid-write
+cannot leave a sidecar describing a state the file was never in.
+.TP
+\fIoutput\fB.1\fR, \fIoutput\fB.2\fR, ...
+Non-destructive alternate output names, used when the target exists and the
+run is not interactive. wget's convention, bounded at 9999.
+.TP
+.I $XDG_STATE_HOME/hydra/queue.json
+Interactive queue state.
+See
+.BR hydra\-interactive (1).
+.TP
+.I $XDG_STATE_HOME/hydra/queue.log
+Log written by a backgrounded headless worker, beside its queue file.
+.TP
+.IB FILE .parity
+Default output of
+.BR "hydra parity make" .
+See
+.BR hydra\-parity (1).
+.
+.SH EXAMPLES
+Retrieve an object, measuring the useful concurrency:
+.PP
+.RS 4
+.nf
+hydra https://example.com/big.iso
+.fi
+.RE
+.PP
+Two replicas of one object, four connections each, into a named file:
+.PP
+.RS 4
+.nf
+hydra \-\-mirrors \-O out.iso \-x 4 \e
+      https://a.example/f https://b.example/f
+.fi
+.RE
+.PP
+Resume, capped at 2 MB/s:
+.PP
+.RS 4
+.nf
+hydra \-c \-\-limit\-rate 2M https://example.com/big.iso
+.fi
+.RE
+.PP
+Ask what a server answers with, without transferring the body:
+.PP
+.RS 4
+.nf
+hydra \-H ETag https://example.com/f
+.fi
+.RE
+.PP
+Check what a URL really serves, leaving nothing behind:
+.PP
+.RS 4
+.nf
+hydra \-\-no\-save \-\-json https://example.com/f | jq '.sha256, .format'
+.fi
+.RE
+.PP
+Pipe the payload while keeping the stream clean:
+.PP
+.RS 4
+.nf
+hydra \-\-stdout https://example.com/f.tar.gz | tar xz
+.fi
+.RE
+.PP
+Download and record a chunk manifest, so later corruption costs one chunk
+rather than the whole object:
+.PP
+.RS 4
+.nf
+hydra \-\-emit\-manifest f.manifest.json \-O f.bin https://example.com/f.bin
+.fi
+.RE
+.PP
+Install tab completion for the current shell:
+.PP
+.RS 4
+.nf
+hydra install\-completions
+.fi
+.RE
+.
+.SH NOTES
+.B \-\-json
+implies quiet, and
+.B \-\-stdout
+moves all human output to standard error.
+Both exist so the payload channel carries exactly one thing; do not expect
+progress on stdout when either is in effect.
+.PP
+In multi-file mode, output names are derived from each URL's last path
+component and are
+.I not
+deduplicated against each other.
+Two URLs whose basenames collide \(em
+.I .../4.17.21/package.json
+and
+.IR .../4.17.20/package.json ,
+say \(em both resolve to
+.IR package.json ,
+and the run reports two successful transfers while leaving one file on disk.
+Fetch colliding names into separate
+.B \-\-output\-dir
+runs, or one at a time with
+.BR \-O .
+.PP
+.B \-\-output\-dir
+does not imply
+.BR \-\-create\-dirs :
+a missing directory is an error, not something created for you.
+.PP
+Under
+.B \-\-mirrors
+a source that cannot be proven identical to the others is dropped with its
+reason printed, rather than mixed in.
+Two mirrors agreeing on
+.B Content\-Length
+while serving different builds is a case this project has actually observed.
+.PP
+The interactive UI's background key
+.RB ( b )
+re-executes the binary headless in a new session, so transfers survive the
+terminal closing.
+Exiting the event loop would otherwise kill them, since they are tasks in
+the same process.
+.
+.SH SEE ALSO
+.BR hydra\-interactive (1),
+.BR hydra\-checksum (1),
+.BR hydra\-parity (1),
+.BR hydra\-formats (1),
+.BR hydra\-bench (1),
+.BR hydra\-completions (1),
+.BR wget (1),
+.BR curl (1),
+.BR aria2c (1)
+.PP
+Project documentation:
+.IR docs/PROTOCOLS.md ,
+.IR docs/INTEGRITY.md ,
+.IR docs/test/CLI_CONFORMANCE.md .
+.
+.SH STANDARDS
+RFC 9110 (HTTP semantics, range requests and field syntax), RFC 9530 (digest
+fields), RFC 959 and RFC 3659 (FTP, and the
+.BR SIZE / REST / MDTM
+extensions).
+.
+.SH BUGS
+Several flags are accepted by the parser but have no effect in this release.
+They are documented in place rather than removed, because a script that
+passes one is not told:
+.BR \-\-no\-verbose ,
+.BR \-\-show\-progress ,
+.BR \-\-content\-disposition ,
+.BR \-\-retry\-delay ,
+.BR \-\-connect\-timeout ,
+and
+.BR \-\-parallel\-max .
+This is the one place the project's stated rule \(em a flag that cannot be
+honoured is refused with a reason, never ignored \(em does not hold; it
+holds for the compatibility dialects only.
+.PP
+.B \-\-fail
+exits non-zero on an HTTP error but still writes the error body to the
+output path, where curl's
+.B \-f
+writes nothing.
+A 404 leaves a short file of response text, or on the range path a
+zero-filled file of the error body's length.
+Do not treat the presence of an output file as evidence of success; check
+the exit status.
+.PP
+Multi-file runs do not deduplicate output names against each other, so URLs
+with colliding basenames overwrite one another while both report success.
+See
+.BR NOTES .
+.PP
+The long help for
+.B \-\-proxy
+mentions
+.BR $all_proxy ;
+this release reads only
+.B http_proxy
+and
+.BR HTTP_PROXY .
+.PP
+Report defects with the exact argv, the exit status, and whether the failure
+was on stdout, stderr, or the filesystem \(em the four are asserted
+separately by the conformance matrix, and a defect usually shows on only
+one.
+.SH COPYRIGHT
+Copyright \(co 2026 Javad Rajabzadeh.
+.PP
+.B hydra
+is free software licensed
+.BR GPL\-3.0\-or\-later :
+GNU General Public License version 3 or later
+.RB < https://gnu.org/licenses/gpl.html >.
+There is NO WARRANTY, to the extent permitted by law.
+.PP
+The
+.B hydra\-core
+and
+.B hydra\-net
+libraries linked into this binary are
+.BR "MIT OR Apache\-2.0" ,
+not GPL, so they remain usable as dependencies by permissively licensed crates;
+copyleft on a statically linked Rust library would propagate to every downstream
+crate. See
+.B LICENSING.md
+in the source distribution for the reasoning, and
+.B THIRD\-PARTY\-NOTICES.md
+for the terms of the 109 crates linked into the binary.

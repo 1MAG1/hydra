@@ -1,0 +1,169 @@
+.\" hydra-completions(1)
+.TH HYDRA\-COMPLETIONS 1 "2026-08-16" "hydra 0.1.0" "User Commands"
+.
+.SH NAME
+hydra-completions, hydra-install-completions \- shell tab-completion scripts
+.
+.SH SYNOPSIS
+.B hydra completions
+.I SHELL
+.br
+.B hydra install-completions
+.RI [ SHELL ]
+.RI [ \-\-system ]
+.RI [ \-\-dry\-run ]
+.
+.SH DESCRIPTION
+Both subcommands generate a completion script from the same
+.B clap
+argument definition the parser itself uses, so a flag added to hydra shows
+up in completions without a hand-written script kept in sync separately.
+.PP
+.B hydra completions
+prints the script for
+.I SHELL
+to stdout and does nothing else; redirect or pipe it wherever a completion
+system expects. This is the portable form \(em correct for any completion
+directory layout, including ones this command does not know about.
+.PP
+.B hydra install-completions
+additionally picks the standard per-user destination for
+.I SHELL
+(system-wide under
+.BR \-\-system ),
+writes the script there, and prints the one remaining manual step, if any,
+needed to make the shell actually load it. Not every shell auto-loads a
+dropped-in completion file, and none of them can be made to reload
+themselves from inside this process \(em see
+.B REMAINING STEPS
+below.
+.
+.SH ARGUMENTS
+.TP
+.I SHELL
+One of
+.BR bash ,
+.BR zsh ,
+.BR fish ,
+.BR elvish ,
+.BR powershell .
+For
+.BR install\-completions ,
+omitting it detects the shell from the basename of
+.BR $SHELL ;
+an unset or unrecognised
+.B $SHELL
+is refused rather than guessed at, since a completion script installed for
+the wrong shell is silently useless.
+.
+.SH OPTIONS
+.TP
+.B \-\-system
+Install into the machine-wide completion directory
+.RI ( /usr/share/... )
+instead of the current user's home directory. Usually needs elevated
+privileges to write; this flag only picks the path, it does not escalate
+to get them.
+.TP
+.B \-\-dry\-run
+Print the destination path and the remaining step without writing
+anything. Useful for checking where a script would land before committing
+to it.
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.
+.SH DESTINATIONS
+.TS
+tab(@) box;
+lb lb lb
+l l l .
+Shell@User destination@Auto\-loaded?
+_
+bash@$XDG_DATA_HOME/bash\-completion/completions/hydra@only with bash\-completion (v2)
+zsh@~/.zfunc/_hydra@only once ~/.zfunc is on $fpath before compinit
+fish@$XDG_CONFIG_HOME/fish/completions/hydra.fish@yes
+elvish@$XDG_CONFIG_HOME/elvish/lib/hydra\-completion.elv@no, needs "use" in rc.elv
+powershell@$XDG_CONFIG_HOME/powershell/hydra\-completion.ps1@no, needs dot\-sourcing from $PROFILE
+.TE
+.PP
+.B $XDG_DATA_HOME
+and
+.B $XDG_CONFIG_HOME
+default to
+.B ~/.local/share
+and
+.B ~/.config
+respectively, per the XDG Base Directory spec.
+.
+.SH REMAINING STEPS
+.B fish
+scans its completions directory unconditionally, so a file dropped there is
+picked up on the very next invocation with nothing else to do.
+.PP
+.B bash
+has no such directory of its own; its per-file completion loading is
+provided by the external
+.B bash\-completion
+package (v2), which must already be installed and sourced from the shell's
+startup files. Without it, the installed file is inert.
+.PP
+.BR zsh 's
+completion system only looks at directories already on
+.B $fpath
+at the time
+.B compinit
+runs. The script is installed regardless, but loading it requires adding
+.B fpath+=(~/.zfunc)
+to
+.I ~/.zshrc
+.B before
+the
+.B compinit
+line, then starting a new shell.
+.PP
+.B elvish
+and
+.B powershell
+have no completion-directory convention at all; their scripts must be
+sourced explicitly from the shell's own startup file
+.RI ( rc.elv
+or
+.BR $PROFILE ).
+.PP
+None of these steps can be performed by
+.B hydra
+itself: a running shell cannot be made to reload its own completion state
+from a child process, and editing another program's startup file
+automatically is a bigger promise than "add tab completion" should carry.
+.
+.SH EXIT STATUS
+.TP
+.B 0
+The script was printed (or installed).
+.TP
+.B 2
+Unrecognised
+.I SHELL
+argument, or none given and
+.B $SHELL
+could not be resolved to a supported shell.
+.TP
+.B 1
+The destination directory or file could not be created or written (e.g.
+.B \-\-system
+without permission to write there).
+.
+.SH EXAMPLES
+.RS 4
+.nf
+hydra completions zsh > ~/.zfunc/_hydra
+hydra install\-completions                 # detect $SHELL, install for this user
+hydra install\-completions fish
+hydra install\-completions bash \-\-system   # needs root
+hydra install\-completions \-\-dry\-run       # see the destination, write nothing
+.fi
+.RE
+.
+.SH SEE ALSO
+.BR hydra (1)

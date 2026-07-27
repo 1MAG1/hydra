@@ -1,0 +1,185 @@
+.\" hydra-parity(1)
+.TH HYDRA\-PARITY 1 "2026-08-16" "hydra 0.1.0" "User Commands"
+.
+.SH NAME
+hydra-parity \- local Reed-Solomon parity for an at-rest file
+.
+.SH SYNOPSIS
+.B hydra parity make
+.BI \-\-manifest " FILE"
+.RI [ options ]
+.I FILE
+.br
+.B hydra parity repair
+.BI \-\-manifest " FILE"
+.RI [ options ]
+.I FILE
+.
+.SH DESCRIPTION
+For the
+.B at-rest
+case only: a file whose source is gone and whose bytes may have rotted.
+.PP
+While the source is still reachable, do not use this.
+A targeted refetch driven by
+.B "hydra \-\-chunk\-digests"
+is roughly 400x cheaper, and coding buys no download speed at all \(em on a
+mirror set that honours
+.BR Range ,
+measured makespan is identical with and without parity.
+Parity is generated
+.I after
+a download has verified, never fetched during one.
+.
+.SS Digests first, parity second
+The order is not a preference.
+Reed-Solomon erasure decoding handed an
+.I unflagged
+corrupt shard reported success in 100% of 200 trials per corruption size
+while producing correct bytes in 0% \(em a single flipped byte sufficed.
+Parity without digests therefore makes a client
+.I less
+trustworthy than no parity at all: a whole-object hash mismatch at least
+says something is wrong, whereas an unflagged RS "repair" returns corrupt
+data with a success code.
+.PP
+So the manifest is the prerequisite and supplies the erasure positions.
+Without them there is no repair, because a decoder cannot tell a corrupt
+shard from a good one.
+There is no mode that guesses them, and positions are only accepted from a
+manifest read off a
+.I local path
+\(em the trusted level in
+.IR docs/INTEGRITY.md " \(sc1."
+.
+.SH make
+Generate parity for
+.I FILE
+alongside its manifest, and record the code
+.I in
+that manifest \(em including the parity shards' own digests, since a corrupt
+parity shard fed into a repair produces a silently wrong result.
+.PP
+Shard size equals the manifest's chunk size.
+A download chunk straddling two shards would mean one corrupt chunk destroys
+two shards, halving effective parity.
+.TP
+.I FILE
+The file to protect.
+.TP
+.BI \-\-manifest " FILE"
+Manifest describing the file's chunk grid, as written by
+.BR "hydra \-\-emit\-manifest" .
+Required.
+It is updated in place.
+.TP
+.BI \-\-parity " N"
+Number of parity shards.
+Repair succeeds if and only if damaged shards
+.RI <= " N" .
+Default 2.
+.TP
+.BI \-\-out " FILE"
+Where to write the parity.
+Defaults to
+.IB FILE .parity .
+Prefer a
+.B separate device:
+drive checksum errors show strong spatial locality, so parity stored beside
+its data can die with it.
+.TP
+.BI \-\-window " BYTES"
+Repair window.
+Memory is O(n * window), not O(file), so resident memory is independent of
+file size.
+Default 65536.
+.PP
+On success the command reports the shard geometry, the window, the
+destination, how many damaged shards it can repair, and the resident memory
+the repair will need.
+.
+.SH repair
+Repair a damaged file using its manifest and parity.
+The file is scanned chunk by chunk against the manifest; mismatching chunks
+become the erasure positions.
+.TP
+.I FILE
+The damaged file.
+.TP
+.BI \-\-manifest " FILE"
+Manifest recording the chunk grid and, from
+.BR make ,
+the parity metadata.
+Required.
+.TP
+.BI \-\-parity\-file " FILE"
+Parity to use.
+Defaults to what the manifest recorded.
+.TP
+.B \-\-dry\-run
+Report what would be repaired without writing.
+.PP
+If every chunk verifies, the command says so and exits 0 without touching
+the file.
+If more chunks are damaged than there are parity shards, it names both
+counts and refuses rather than attempting a decode that cannot succeed.
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Parity generated, repair completed, or nothing needed repairing.
+.TP
+.B 1
+Generation or repair failed, or the damage exceeds the parity available.
+.TP
+.B 2
+Usage error: the manifest could not be read or parsed, the geometry is
+invalid, or the manifest records no parity for a
+.B repair
+run.
+.
+.SH FILES
+.TP
+.IB FILE .parity
+Default parity output.
+.TP
+.I manifest
+Rewritten by
+.B make
+to add a
+.B parity
+block:
+.BR algo ,
+.B field
+.RB ( gf16 ),
+.BR k ,
+.BR parity_shards ,
+.BR window ,
+.BR file ,
+and per-shard digests.
+.
+.SH EXAMPLES
+Protect an archived file whose source is gone:
+.PP
+.RS 4
+.nf
+hydra \-\-emit\-manifest cold.json \-O cold.bin https://example.com/cold.bin
+hydra parity make cold.bin \-\-manifest cold.json \e
+      \-\-parity 3 \-\-out /other\-disk/cold.parity
+.fi
+.RE
+.PP
+Years later, check and repair:
+.PP
+.RS 4
+.nf
+hydra parity repair cold.bin \-\-manifest cold.json \-\-dry\-run
+hydra parity repair cold.bin \-\-manifest cold.json
+.fi
+.RE
+.
+.SH SEE ALSO
+.BR hydra (1),
+.BR hydra\-checksum (1)
+.PP
+.IR docs/INTEGRITY.md .

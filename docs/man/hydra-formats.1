@@ -1,0 +1,111 @@
+'\" t
+.\" hydra-formats(1)
+.TH HYDRA\-FORMATS 1 "2026-08-16" "hydra 0.1.0" "User Commands"
+.
+.SH NAME
+hydra-formats \- list the file formats this build recognises
+.
+.SH SYNOPSIS
+.B hydra formats
+.RI [ \-\-json ]
+.RI [ \-\-category " NAME" ]
+.RI [ \-\-what " NAME" ]
+.
+.SH DESCRIPTION
+Prints the format catalogue this build classifies against, with a short
+label and a one-sentence description for each.
+Text by default;
+.B \-\-json
+emits the same catalogue for a GUI to render as tooltips or a type filter.
+.PP
+Classification is by the payload's
+.B magic bytes,
+not by the file extension and not by the server's
+.BR Content\-Type .
+Both of those are frequently wrong, and the project's own test corpus
+contains a case where the documentation was wrong too: a page describing its
+extensionless sample as MP4 serves a file whose magic bytes are FLV,
+byte-identical to the FLV sample beside it.
+Magic-byte precedence is what makes
+.B "hydra \-y"
+file that object correctly.
+.PP
+When the payload, the name, and the server's declared type disagree, the
+disagreement is reported rather than resolved silently \(em as
+.B format_conflict
+in
+.BR "hydra \-\-json" .
+.
+.SH OPTIONS
+.TP
+.B \-\-json
+Machine-readable output: an object with a
+.B formats
+array, each entry carrying
+.BR format ,
+.BR label ,
+and
+.BR description .
+.TP
+.BI \-\-category " NAME"
+Show only one category.
+One of
+.BR video ,
+.BR audio ,
+.BR image ,
+.BR archive ,
+.BR document ,
+.BR application ,
+.BR "disk image" ,
+.BR font ,
+.BR data ,
+.BR markup .
+.TP
+.BI \-\-what " NAME"
+Describe one format or extension and exit, e.g.\&
+.BR "hydra formats \-\-what tar.gz" .
+A leading dot is accepted.
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.
+.SH CATEGORIES AND DIRECTORIES
+Under
+.BR "hydra \-y" / \-\-sort\-by\-type ,
+each category maps to a destination subdirectory, following IDM's
+convention:
+.TS
+tab(@) box;
+lb lb
+l  l .
+Category@Directory
+_
+video@Video
+audio@Music
+image@Images
+archive@Compressed
+document@Documents
+application@Programs
+disk image@Images/Disk
+font@Fonts
+data@Data
+markup@Web
+(unrecognised)@Other
+.TE
+.
+.SH EXIT STATUS
+Always 0 for a well-formed invocation; 2 for an unrecognised argument.
+.
+.SH EXAMPLES
+.RS 4
+.nf
+hydra formats
+hydra formats \-\-category video
+hydra formats \-\-what .mkv
+hydra formats \-\-json | jq '.formats | length'
+.fi
+.RE
+.
+.SH SEE ALSO
+.BR hydra (1),
+.BR file (1)

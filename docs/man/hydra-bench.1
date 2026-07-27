@@ -1,0 +1,105 @@
+.\" hydra-bench(1)
+.TH HYDRA\-BENCH 1 "2026-08-16" "hydra 0.1.0" "User Commands"
+.
+.SH NAME
+hydra-bench \- measurement harnesses for scheduler and transport
+.
+.SH SYNOPSIS
+.B hydra bench
+.RI [ \-\-real ]
+.RI [ \-\-reps " N" ]
+.RI [ \-\-which " HARNESS" ]
+.
+.SH DESCRIPTION
+Runs the measurement harnesses the project's results were produced with.
+This is a development and validation tool, not part of the download path.
+.PP
+Without
+.BR \-\-real ,
+harnesses run against an in-process origin over a duplex pipe: hermetic,
+repeatable, and unaffected by whatever the network is doing.
+With
+.BR \-\-real ,
+objects are fetched over the network from public mirrors, which is the only
+way to check that a simulator result survives contact with a real server.
+.
+.SH OPTIONS
+.TP
+.B \-\-real
+Download real objects over the network instead of running a simulated
+harness.
+Ignores
+.BR \-\-which .
+.TP
+.BI \-\-reps " N"
+Repetitions.
+Default 3.
+.TP
+.BI \-\-which " HARNESS"
+Which harness to run.
+Default
+.BR xval .
+.RS
+.TP
+.B xval
+Cross-validation: simulator against real HTTP, on matched parameters.
+.TP
+.B memprofile
+Resident memory against object size.
+The transport uses positioned writes and holds no reassembly buffer, so this
+is the measurement that shows memory not tracking file size.
+.TP
+.B ticksweep
+Makespan against the scheduler tick.
+.TP
+.B sizesweep
+Detection-lag amortisation against object size.
+.TP
+.B detectab
+A/B comparison of the collapse detector.
+.RE
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.
+.SH EXIT STATUS
+.TP
+.B 0
+The harness ran.
+.TP
+.B 2
+Unknown harness name.
+.PP
+Note that the exit status reports whether the harness
+.I ran,
+not whether the numbers it produced were good.
+Read the output.
+.
+.SH NOTES
+.B \-\-real
+requires outbound network access and, in a proxied environment, a proxy in
+.B http_proxy
+or
+.BR HTTP_PROXY :
+the real-network harness targets mirrors through it and fails without one.
+.PP
+A measurement taken over an in-process pipe does not measure latency.
+Where a protocol cost is inherently about round trips \(em FTP preemption,
+for instance \(em the project reports round-trip
+.I counts
+rather than durations, because a count is a protocol property that carries
+to a real network while a duration measured over a pipe does not.
+.
+.SH EXAMPLES
+.RS 4
+.nf
+hydra bench                          # xval, 3 reps
+hydra bench \-\-which memprofile
+hydra bench \-\-real \-\-reps 5
+.fi
+.RE
+.
+.SH SEE ALSO
+.BR hydra (1)
+.PP
+.IR docs/results/ ", " crossvalidation.md .

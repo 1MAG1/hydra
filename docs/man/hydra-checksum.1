@@ -1,0 +1,209 @@
+.\" hydra-checksum(1)
+.TH HYDRA\-CHECKSUM 1 "2026-08-16" "hydra 0.1.0" "User Commands"
+.
+.SH NAME
+hydra-checksum \- report the digests a server advertises
+.
+.SH SYNOPSIS
+.B hydra checksum
+.RI [ options ]
+.IR URL ...
+.
+.SH DESCRIPTION
+A checksum is a function of the bytes, so this subcommand cannot compute one
+for bytes it has not received.
+No protocol lets a client ask a server to hash an object on demand: RFC 9530
+defines
+.B Want\-Digest
+for exactly that, and measurement across four representative hosts found
+zero support.
+.PP
+What
+.B "hydra checksum"
+does instead is retrieve a digest the
+.I publisher
+already computed.
+That is a different and weaker claim.
+It verifies the bytes you eventually download against what the publisher
+says they should be, and it lets you compare a local file against a remote
+object without transferring it.
+It does
+.I not
+verify the server: a host that serves wrong bytes can serve a matching wrong
+digest, unless the digest comes from somewhere else \(em an index, a
+signature, another host.
+.
+.SS Sources, in descending order of trust
+.TP
+.B 1. Response headers
+.BR Repr\-Digest / Content\-Digest
+(RFC 9530), the older
+.B Digest
+(RFC 3230),
+.BR Content\-MD5 ,
+and the cloud-store forms
+.BR x\-amz\-checksum\-sha256 ,
+.BR x\-amz\-checksum\-crc32 ,
+.BR x\-goog\-hash ,
+.BR x\-ms\-blob\-content\-md5 .
+These arrive on a HEAD: one round trip, no body.
+.TP
+.B 2. A sidecar file
+.IB name .sha256 ", " .md5 ", " .sha1 ", " CHECKSUMS ", " SHA256SUMS .
+Tens of bytes and very common for releases \(em but served by the same host,
+so it proves integrity, not authenticity.
+.TP
+.B 3. An ecosystem index
+PyPI's JSON API and the crates.io sparse index publish per-file digests from
+a
+.I different
+endpoint than the artifact, so they carry some authenticity weight.
+.
+.SS What an ETag is not
+An
+.B ETag
+is an opaque validator.
+It is frequently a hash of something, which invites the assumption that it
+is a hash of the
+.IR content .
+It is not, and treating it as one reports false mismatches: measured on a
+real host whose ETag is exactly 64 hex characters, it equalled neither the
+content SHA-256 nor the git blob id.
+A weak ETag
+.RB ( W/\(dq...\(dq )
+is weaker still, since the specification permits it to compare equal across
+representations that are merely
+.IR equivalent .
+This subcommand therefore prints an ETag labelled as a validator and
+explicitly not a content digest, and the JSON carries
+.B validator_is_not_a_digest
+for the same reason.
+.
+.SH OPTIONS
+.TP
+.BI \-\-verify " FILE"
+Compare
+.I FILE
+against the advertised digest.
+This is the fast way to answer "is my copy current?" without refetching.
+The verdict is
+.BR MATCH ,
+.BR MISMATCH ,
+or an explicit statement that nothing comparable was advertised \(em which
+is
+.I not
+reported as a pass.
+.TP
+.B \-\-json
+Machine-readable output.
+.TP
+.B \-\-sidecars
+Also try sidecar and manifest files, not just headers (one extra request
+each).
+On by default, and see
+.BR BUGS .
+.TP
+.B \-\-download\-if\-needed
+Compute the digest by streaming the body when nothing is advertised.
+Off by default, because transferring the object is the opposite of what this
+subcommand is for; on, it is the honest fallback rather than a silent
+absence.
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.
+.SH OUTPUT
+Human output names each digest, its source, and whether the algorithm is
+collision-resistant \(em
+.B sha256
+and
+.B sha512
+are;
+.B sha1
+and
+.B md5
+are flagged
+.BR "[not collision-resistant]" .
+When nothing is advertised, the output says so and points at
+.BR \-\-download\-if\-needed ,
+rather than printing nothing and letting silence read as success.
+.PP
+.B \-\-json
+emits
+.B objects
+(an array) and
+.BR ok .
+Each object carries
+.BR url ,
+.BR size ,
+.BR validator ,
+.BR validator_is_not_a_digest ,
+.B advertised
+(each with
+.BR algo ,
+.BR hex ,
+.BR source ,
+.BR collision_resistant ),
+.BR computed_sha256 ,
+and
+.BR verify .
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Every URL was inspected and, if
+.B \-\-verify
+was given, matched.
+.TP
+.B 1
+A verification mismatched, or a local file could not be read.
+.
+.SH EXAMPLES
+Ask what a release server advertises:
+.PP
+.RS 4
+.nf
+hydra checksum https://example.com/release.tar.gz
+.fi
+.RE
+.PP
+Check a local copy against the publisher's digest without refetching:
+.PP
+.RS 4
+.nf
+hydra checksum \-\-verify ./release.tar.gz \e
+      https://example.com/release.tar.gz
+.fi
+.RE
+.PP
+Machine-readable, falling back to a streamed digest when the server
+advertises none:
+.PP
+.RS 4
+.nf
+hydra checksum \-\-json \-\-download\-if\-needed URL | jq '.objects[0]'
+.fi
+.RE
+.
+.SH BUGS
+.B \-\-sidecars
+is on by default and this release provides no way to switch it off.
+It is declared as taking no value, so
+.B "\-\-sidecars false"
+prints a parse complaint about
+.BR false ,
+then proceeds with sidecars enabled.
+.
+.SH SEE ALSO
+.BR hydra (1),
+.BR hydra\-parity (1)
+.PP
+.IR docs/INTEGRITY.md .
+.
+.SH STANDARDS
+RFC 9530 (digest fields,
+.BR Want\-Digest ),
+RFC 3230 (the older
+.B Digest
+header), RFC 9110 (validators and
+.BR ETag ).
