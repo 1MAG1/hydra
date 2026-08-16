@@ -1,0 +1,117 @@
+<p align="center">
+  <img src="docs/logo.png" alt="HYDRA Logo" width="180">
+</p>
+
+<h1 align="center">HYDRA</h1>
+
+<p align="center">
+  <strong>A fast, resilient, multi-source file retriever and download engine.</strong>
+</p>
+
+<p align="center">
+  <a href="https://crates.io/crates/hydra-core"><img src="https://img.shields.io/crates/v/hydra-core.svg?style=flat-square" alt="crates.io"></a>
+  <a href="https://docs.rs/hydra-core"><img src="https://img.shields.io/docsrs/hydra-core?style=flat-square" alt="docs.rs"></a>
+  <a href="https://codecov.io/gh/ja7ad/hydra"><img src="https://codecov.io/gh/ja7ad/hydra/graph/badge.svg?token=bQuMUwagma" alt="Coverage"/></a>
+  <a href="https://github.com/ja7ad/hydra/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ja7ad/hydra/ci.yml?branch=main&label=CI&style=flat-square" alt="CI Status"></a>
+  <a href="LICENSING.md"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later%20%7C%20MIT%2FApache--2.0-blue?style=flat-square" alt="License"></a>
+  <img src="https://img.shields.io/badge/rust-2021%20edition-orange?style=flat-square" alt="Rust Edition">
+</p>
+
+---
+
+## Overview
+
+**HYDRA** is a high-performance network file retriever designed for speed, resilience, and adaptability. It dynamically partitions downloads across multiple connections and independent mirror sources, continuously rebalancing work to maximize throughput without stalling on slow peers.
+
+## Key Features
+
+- **Multi-Source & Adaptive Concurrency**: Saturates high-bandwidth links by dynamically distributing byte ranges across connections and mirrors.
+- **Dynamic Range Stealing**: Automatically detects laggard connections and redistributes remaining work to faster peers with zero server coordination overhead.
+- **Collapse & Stall Detection**: Uses two-sided CUSUM and dual-window statistical estimators to swiftly identify degraded connections before traditional timeouts expire.
+- **`curl` & `wget` Compatibility**: Direct drop-in support for common `wget` and `curl` command-line flags and dialect personalities.
+- **Protocols & Proxies**: Supports HTTP/1.1, HTTPS (via `rustls` with Mozilla roots), FTP (RFC 959 / REST), HTTP CONNECT tunneling, and SOCKS4 / SOCKS4a / SOCKS5 proxies.
+- **Interactive Queue Manager**: Full-screen terminal UI (TUI) for managing, pausing, resuming, and monitoring queued downloads.
+- **Format Sniffing & Smart Sorting**: Content-based magic byte inspection for accurate file type detection and optional category-based directory sorting (`--sort-by-type`).
+- **Integrity & Offline Parity**: Per-chunk checksum manifest verification (`--emit-manifest`, `--chunk-digests`) and local Reed–Solomon erasure coding for bitrot protection.
+- **Constant Memory Footprint**: Positioned writes (`pwrite`) stream data directly to disk, keeping resident memory usage flat regardless of file size.
+
+---
+
+## Installation
+
+### From Source
+
+Ensure you have Rust (1.80+) installed:
+
+```bash
+git clone https://github.com/ja7ad/hydra.git
+cd hydra
+cargo build --release
+```
+
+The compiled binary will be located at `target/release/hydra`.
+
+---
+
+## Usage
+
+### Basic Download
+
+```bash
+# Retrieve a file with automatic concurrency discovery
+hydra https://example.com/archive.tar.gz
+
+# Specify output destination
+hydra https://example.com/archive.tar.gz -o output.tar.gz
+```
+
+### Multi-Connection & Mirror Sources
+
+```bash
+# Explicit connection count (e.g., 8 connections)
+hydra -x 8 https://example.com/largefile.iso
+
+# Fetch across multiple mirror origins serving identical files
+hydra https://mirror1.example.org/file.iso https://mirror2.example.org/file.iso
+```
+
+### CLI Compatibility (`wget` / `curl` Mode)
+
+HYDRA can seamlessly emulate `wget` or `curl` flags:
+
+```bash
+# wget dialect
+hydra --compat=wget -c -O myfile.zip https://example.com/file.zip
+
+# curl dialect
+hydra --compat=curl -C - -o myfile.zip https://example.com/file.zip
+```
+
+### Interactive Queue Manager (TUI)
+
+```bash
+# Launch interactive terminal UI
+hydra interactive
+
+# Add multiple downloads into the queue
+hydra interactive https://example.com/file1.iso https://example.com/file2.zip
+```
+
+### Remote Checksum Lookup & Verification
+
+```bash
+# Check remote advertised checksums without downloading the object
+hydra checksum https://example.com/release.tar.gz
+
+# Download with target hash verification
+hydra --checksum sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 https://example.com/file.tar.gz
+```
+
+---
+
+## License
+
+- The `hydra` CLI binary is licensed under the **GNU General Public License v3.0 or later** ([GPL-3.0-or-later](LICENSE)).
+- The `hydra-core` and `hydra-net` libraries are dual-licensed under **MIT** or **Apache-2.0** ([LICENSE-MIT](LICENSE-MIT) / [LICENSE-APACHE](LICENSE-APACHE)).
+
+For more details, see [LICENSING.md](LICENSING.md) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
