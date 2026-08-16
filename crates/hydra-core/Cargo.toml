@@ -3,6 +3,8 @@ name = "hydra-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "I/O-free multi-source download scheduler: interval algebra, divergence-triggered repair, liveness"
 
 [dependencies]
