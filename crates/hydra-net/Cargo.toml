@@ -8,7 +8,7 @@ homepage.workspace = true
 description = "HTTP/1.1 range transport driving the hydra-core scheduler"
 
 [dependencies]
-hydra-core = { workspace = true }
+hya-core = { workspace = true }
 tokio = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }

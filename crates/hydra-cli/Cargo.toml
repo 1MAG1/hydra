@@ -13,7 +13,7 @@ name = "hydra"
 path = "src/main.rs"
 
 [dependencies]
-hydra-core = { workspace = true }
+hya-core = { workspace = true }
 hydra-net = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }

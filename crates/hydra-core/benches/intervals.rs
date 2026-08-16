@@ -7,7 +7,7 @@
 //! where an O(n) insert becomes O(n^2) over the transfer.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use hydra_core::intervals::{IntervalSet, Range};
+use hya_core::intervals::{IntervalSet, Range};
 use std::hint::black_box;
 
 fn bench_insert(c: &mut Criterion) {

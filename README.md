@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://crates.io/crates/hydra-core"><img src="https://img.shields.io/crates/v/hydra-core.svg?style=flat-square" alt="crates.io"></a>
-  <a href="https://docs.rs/hydra-core"><img src="https://img.shields.io/docsrs/hydra-core?style=flat-square" alt="docs.rs"></a>
+  <a href="https://crates.io/crates/hya-core"><img src="https://img.shields.io/crates/v/hya-core.svg?style=flat-square" alt="crates.io"></a>
+  <a href="https://docs.rs/hya-core"><img src="https://img.shields.io/docsrs/hya-core?style=flat-square" alt="docs.rs"></a>
   <a href="https://codecov.io/gh/ja7ad/hydra"><img src="https://codecov.io/gh/ja7ad/hydra/graph/badge.svg?token=bQuMUwagma" alt="Coverage"/></a>
   <a href="https://github.com/ja7ad/hydra/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ja7ad/hydra/ci.yml?branch=main&label=CI&style=flat-square" alt="CI Status"></a>
   <a href="LICENSING.md"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later%20%7C%20MIT%2FApache--2.0-blue?style=flat-square" alt="License"></a>

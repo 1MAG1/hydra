@@ -6,7 +6,7 @@
 //! * Multi-origin downloads from independent hosts serving identical files;
 //! * Comparison against single-stream baseline transfers.
 
-use hydra_core::{Admission, Admit, DeltaEstimator, Scheduler, Source};
+use hya_core::{Admission, Admit, DeltaEstimator, Scheduler, Source};
 use hydra_net::{fetch_range_retry, run_transfer_tick, SparseSink, Target, TcpConnector};
 use std::sync::Arc;
 use std::time::Instant;

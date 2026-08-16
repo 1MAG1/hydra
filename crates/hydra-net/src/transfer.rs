@@ -9,7 +9,7 @@ use crate::http::fetch_range;
 use crate::polite::Pace;
 use crate::sink::SparseSink;
 use crate::{Arrival, Connector, Target};
-use hydra_core::{Action, Scheduler};
+use hya_core::{Action, Scheduler};
 use std::io;
 use std::sync::Arc;
 use std::time::Instant;

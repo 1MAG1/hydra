@@ -491,6 +491,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hya-core"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "proptest",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -507,7 +515,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "crossterm",
- "hydra-core",
+ "hya-core",
  "hydra-net",
  "md-5",
  "serde",
@@ -518,20 +526,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "hydra-core"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "proptest",
-]
-
-[[package]]
 name = "hydra-net"
 version = "0.1.0"
 dependencies = [
  "blake3",
  "criterion",
- "hydra-core",
+ "hya-core",
  "memchr",
  "reed-solomon-simd",
  "rustls",

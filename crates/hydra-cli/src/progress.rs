@@ -9,7 +9,7 @@
 //! Everything degrades to plain lines when stdout is not a terminal, so piping
 //! to a file or a CI log produces something readable rather than escape soup.
 
-use hydra_core::Health;
+use hya_core::Health;
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};

@@ -7,7 +7,7 @@
 
 use crate::progress::{ConnView, Counters, Progress};
 use crate::url::{proxy_from_env, Sidecar, Url};
-use hydra_core::{detect_format, Admission, Admit, Category, DeltaEstimator, Scheduler, Source};
+use hya_core::{detect_format, Admission, Admit, Category, DeltaEstimator, Scheduler, Source};
 use hydra_net::polite::{Politeness, RateLimiter};
 use hydra_net::{fetch_range_retry, probe, probe_via_get, SparseSink, Target, TlsCapableConnector};
 use sha2::{Digest, Sha256};
@@ -599,7 +599,7 @@ async fn ftp_fetch(job: &Job, u: &Url, p: &mut Progress, outs: String) -> Outcom
                         host: u.host.clone(),
                         range: Some((start, done, probe.size)),
                         rate,
-                        health: hydra_core::detect::Health::Healthy,
+                        health: hya_core::detect::Health::Healthy,
                     }];
                     p.draw(done, &views, Counters { requests: 1, ..Default::default() });
                 }

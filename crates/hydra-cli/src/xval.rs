@@ -11,7 +11,7 @@
 //! reassigned), `StealOnIdle` is aria2's. IDM itself is Windows-only and cannot
 //! be executed here; the comparison is a statement about the policy.
 
-use hydra_core::{Scheduler, Source};
+use hya_core::{Scheduler, Source};
 use hydra_net::origin::{byte_at, OriginControl, OriginSet};
 use hydra_net::{run_transfer_tick, Target};
 use std::sync::atomic::Ordering;

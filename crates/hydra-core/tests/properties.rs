@@ -6,8 +6,8 @@
 //! livelocked with coverage intact, because a fully-stolen range left a
 //! connection idle while holding a pipelined queue it would never start.
 
-use hydra_core::intervals::{IntervalSet, Range};
-use hydra_core::sched::{greedy_concurrency, Scheduler, Source};
+use hya_core::intervals::{IntervalSet, Range};
+use hya_core::sched::{greedy_concurrency, Scheduler, Source};
 use proptest::prelude::*;
 
 fn src(gamma: f64) -> Source {

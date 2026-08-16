@@ -372,7 +372,42 @@ pub fn pid_alive(pid: u32) -> bool {
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn pid_alive(pid: u32) -> bool {
+    // The Win32 existence probe: open the process with the weakest right and ask
+    // whether it is still running. Declared directly rather than pulling in a crate
+    // for three calls, mirroring the unix `kill` block above.
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(desired_access: u32, inherit_handle: i32, pid: u32) -> isize;
+        fn GetExitCodeProcess(process: isize, exit_code: *mut u32) -> i32;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    const ERROR_ACCESS_DENIED: i32 = 5;
+
+    // PID 0 is the System Idle Process, never a user transfer; reject it up front so a
+    // zeroed owner field reads as dead, matching the unix path.
+    if pid == 0 {
+        return false;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle == 0 {
+        // ACCESS_DENIED means the process exists but belongs to another user — alive,
+        // the same carve-out as EPERM on unix. Any other failure (typically
+        // ERROR_INVALID_PARAMETER for a recycled or never-existing PID) means dead.
+        return std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ACCESS_DENIED);
+    }
+    // A handle can still be opened on an exited process while something holds it open,
+    // so "openable" is not "alive": only STILL_ACTIVE confirms it is running.
+    let mut code: u32 = 0;
+    let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
+    unsafe { CloseHandle(handle) };
+    ok != 0 && code == STILL_ACTIVE
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn pid_alive(_pid: u32) -> bool {
     // Without a probe, assume alive: wrongly demoting a live transfer causes two writers
     // on one file, which is worse than a stale slot.

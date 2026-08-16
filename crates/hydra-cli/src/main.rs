@@ -43,7 +43,7 @@ mod tui;
 mod url;
 mod xval;
 
-use hydra_core::{Scheduler, Source};
+use hya_core::{Scheduler, Source};
 use hydra_net::origin::OriginSet;
 use hydra_net::{run_transfer, Target};
 use std::sync::Arc;
@@ -163,7 +163,7 @@ async fn memprofile() {
 /// The point of `--json` is that a GUI should not have to scrape text to build its
 /// tooltips or its file-type filter; it reads the same table the classifier uses.
 fn print_formats(as_json: bool, category: Option<&str>, what: Option<&str>) {
-    use hydra_core::{catalogue, describe, from_extension_pub as by_ext};
+    use hya_core::{catalogue, describe, from_extension_pub as by_ext};
 
     // A single lookup: "what is a .tar.gz?" is the question a user actually asks.
     if let Some(query) = what {

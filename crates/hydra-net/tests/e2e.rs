@@ -7,7 +7,7 @@
 //! Every test verifies CONTENT, not just byte count: the origin serves a
 //! deterministic function of offset, so a mis-assembled file is detected.
 
-use hydra_core::{Scheduler, Source};
+use hya_core::{Scheduler, Source};
 use hydra_net::origin::{byte_at, OriginSet};
 use hydra_net::{probe, run_transfer, Target};
 use std::sync::atomic::Ordering;

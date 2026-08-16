@@ -53,9 +53,9 @@ async fn main() {
         let net = Arc::new(OriginSet::new());
         let (port, _ctl) = net.spawn(size, 256 * 1024);
         let t = hydra_net::Target::direct("127.0.0.1", port, "/obj");
-        let sched = hydra_core::Scheduler::new(
+        let sched = hya_core::Scheduler::new(
             size,
-            vec![hydra_core::Source {
+            vec![hya_core::Source {
                 gamma_est: 256.0 * 1024.0,
                 delta_est: 0.005,
                 ..Default::default()
@@ -73,7 +73,7 @@ async fn main() {
             sink,
             sched,
             tick_ms,
-            &mut |_: &hydra_core::Scheduler, _: u64| {},
+            &mut |_: &hya_core::Scheduler, _: u64| {},
             // Unshaped: this harness measures the cost of the tick loop itself,
             // so a rate cap would add sleeps and confound exactly the CPU-time
             // reading it exists to take.
