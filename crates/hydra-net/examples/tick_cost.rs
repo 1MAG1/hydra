@@ -16,6 +16,7 @@ use hya_net::origin::OriginSet;
 use std::sync::Arc;
 
 /// CPU time (user + system) consumed by this process, in seconds.
+#[cfg(unix)]
 fn cpu_seconds() -> f64 {
     #[repr(C)]
     #[derive(Default)]
@@ -41,6 +42,47 @@ fn cpu_seconds() -> f64 {
         + ru.utime.usec as f64 / 1e6
         + ru.stime.sec as f64
         + ru.stime.usec as f64 / 1e6
+}
+
+/// CPU time (user + system) consumed by this process, in seconds.
+///
+/// `GetProcessTimes` reports kernel and user time as FILETIME — 100 ns units.
+/// Declared directly rather than pulling in a crate for one call, matching the
+/// unix `getrusage` block above.
+#[cfg(windows)]
+fn cpu_seconds() -> f64 {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn GetProcessTimes(
+            process: isize,
+            creation: *mut u64,
+            exit: *mut u64,
+            kernel: *mut u64,
+            user: *mut u64,
+        ) -> i32;
+    }
+    let (mut creation, mut exit, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+    let ok = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok == 0 {
+        return 0.0;
+    }
+    (kernel + user) as f64 / 1e7
+}
+
+/// Fallback: no per-process CPU clock we know how to read; the measurement
+/// degrades to zeros rather than failing the build.
+#[cfg(not(any(unix, windows)))]
+fn cpu_seconds() -> f64 {
+    0.0
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]

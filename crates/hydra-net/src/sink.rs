@@ -125,12 +125,42 @@ impl SparseSink {
                     use std::os::unix::fs::FileExt;
                     file.write_all_at(buf, off)?;
                 }
-                #[cfg(not(unix))]
+                // Windows: `seek_write` is a positional write (WriteFile with an
+                // explicit OVERLAPPED offset) — the offset travels with each call,
+                // so concurrent disjoint writes are safe, same as pwrite. A
+                // seek-then-write pair is NOT: `seek` moves the ONE cursor all
+                // clones of this handle share, so two connections interleave as
+                // A-seek, B-seek, A-write and A's block lands at B's offset. That
+                // was a real defect: every multi-connection transfer corrupted at
+                // block-aligned offsets while single-connection tests stayed green.
+                // `seek_write` can write short, so loop like write_all would.
+                #[cfg(windows)]
                 {
-                    use std::io::{Seek, SeekFrom, Write};
-                    let mut f = file;
-                    f.seek(SeekFrom::Start(off))?;
-                    f.write_all(buf)?;
+                    use std::os::windows::fs::FileExt;
+                    let (mut buf, mut off) = (buf, off);
+                    while !buf.is_empty() {
+                        match file.seek_write(buf, off) {
+                            Ok(0) => {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::WriteZero,
+                                    "seek_write returned 0 bytes",
+                                ));
+                            }
+                            Ok(n) => {
+                                buf = &buf[n..];
+                                off += n as u64;
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+                #[cfg(not(any(unix, windows)))]
+                {
+                    compile_error!(
+                        "hydra needs a positional write (pwrite/seek_write): a shared-cursor \
+                         seek+write fallback silently corrupts multi-connection transfers"
+                    );
                 }
             }
         }

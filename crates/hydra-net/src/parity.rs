@@ -158,12 +158,36 @@ fn read_window(
             use std::os::unix::fs::FileExt;
             f.read_exact_at(&mut buf[..want], start)?;
         }
-        #[cfg(not(unix))]
+        // Positional read, offset per call — never the handle's shared cursor
+        // (see sink::write_at for the interleaving this prevents). `seek_read`
+        // can return short, so loop like read_exact would.
+        #[cfg(windows)]
         {
-            use std::io::{Read as _, Seek as _, SeekFrom};
-            let mut fh = f;
-            fh.seek(SeekFrom::Start(start))?;
-            fh.read_exact(&mut buf[..want])?;
+            use std::os::windows::fs::FileExt;
+            let (mut done, mut at) = (0usize, start);
+            while done < want {
+                match f.seek_read(&mut buf[done..want], at) {
+                    Ok(0) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "seek_read hit EOF before the shard span was read",
+                        ));
+                    }
+                    Ok(n) => {
+                        done += n;
+                        at += n as u64;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            compile_error!(
+                "hydra needs a positional read (pread/seek_read): a shared-cursor \
+                 seek+read fallback races against concurrent positional writers"
+            );
         }
     }
     Ok(buf)
@@ -317,12 +341,36 @@ pub fn repair(
                 use std::os::unix::fs::FileExt;
                 out.write_all_at(&bytes[..want], start)?;
             }
-            #[cfg(not(unix))]
+            // Positional write, offset per call — never the shared cursor
+            // (see sink::write_at). Loops because `seek_write` can go short.
+            #[cfg(windows)]
             {
-                use std::io::{Seek as _, SeekFrom, Write as _};
-                let mut fh = &out;
-                fh.seek(SeekFrom::Start(start))?;
-                fh.write_all(&bytes[..want])?;
+                use std::os::windows::fs::FileExt;
+                let (mut src, mut at) = (&bytes[..want], start);
+                while !src.is_empty() {
+                    match out.seek_write(src, at) {
+                        Ok(0) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::WriteZero,
+                                "seek_write returned 0 bytes",
+                            )
+                            .into());
+                        }
+                        Ok(n) => {
+                            src = &src[n..];
+                            at += n as u64;
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                compile_error!(
+                    "hydra needs a positional write (pwrite/seek_write): a shared-cursor \
+                     seek+write fallback silently corrupts repaired shards"
+                );
             }
         }
     }
