@@ -297,9 +297,7 @@ async fn a_lone_black_holing_source_fails_instead_of_idling_forever() {
     let _ = std::fs::remove_file(&out);
 
     let inner = r.unwrap_or_else(|_| {
-        panic!(
-            "a transfer with one dead source hung past 20s instead of failing"
-        )
+        panic!("a transfer with one dead source hung past 20s instead of failing")
     });
     let e = inner.expect_err("a source that delivers nothing cannot yield a complete file");
     eprintln!("lone blackhole: failed after {waited:.2}s with {e}");

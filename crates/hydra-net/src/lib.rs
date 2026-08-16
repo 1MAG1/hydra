@@ -39,6 +39,7 @@
 //!   AVX2/AVX-512/NEON, and `reed-solomon-simd` to its own kernels. These are
 //!   the genuinely compute-bound operations and they are already
 //!   hardware-accelerated by crates that test those paths on real silicon.
+//!
 //! Vectorized paths are covered by differential tests against scalar references,
 //! maintaining safety and high performance across architectures.
 
