@@ -97,8 +97,6 @@ jobs:
           # Publish in topological dependency order:
           # 1. hydra-core (pure algorithmic foundation, no intra-workspace deps)
           # 2. hydra-net (depends on hydra-core)
-          # 3. hydra-cli (depends on hydra-core and hydra-net)
           publish_crate hydra-core
           publish_crate hydra-net
-          publish_crate hydra-cli
 
