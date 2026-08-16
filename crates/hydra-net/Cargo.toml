@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "HTTP/1.1 range transport driving the hya-core scheduler"
+readme = "README.md"
 
 [dependencies]
 hya-core = { workspace = true }
