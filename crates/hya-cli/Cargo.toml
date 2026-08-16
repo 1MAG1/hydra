@@ -1,5 +1,5 @@
 [package]
-name = "hydra-cli"
+name = "hya-cli"
 version.workspace = true
 edition.workspace = true
 license = "GPL-3.0-or-later"
@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 hya-core = { workspace = true }
-hydra-net = { workspace = true }
+hya-net = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 crossterm = { workspace = true }

@@ -96,7 +96,7 @@ jobs:
 
           # Publish in topological dependency order:
           # 1. hya-core (pure algorithmic foundation, no intra-workspace deps)
-          # 2. hydra-net (depends on hya-core)
+          # 2. hya-net (depends on hya-core)
           publish_crate hya-core
-          publish_crate hydra-net
+          publish_crate hya-net
 

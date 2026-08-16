@@ -4,7 +4,7 @@
 //! scheme, authority, and path. Parsing that by hand is a dozen lines and avoids
 //! a dependency that would imply support for schemes this client cannot honour.
 
-use hydra_net::Target;
+use hya_net::Target;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -69,7 +69,7 @@ impl Url {
     pub fn parse(s: &str) -> Option<Self> {
         let (scheme, rest) = s.split_once("://")?;
         let scheme = scheme.to_ascii_lowercase();
-        if !hydra_net::scheme::supported().contains(&scheme.as_str()) {
+        if !hya_net::scheme::supported().contains(&scheme.as_str()) {
             return None;
         }
         let (auth, path) = match rest.find('/') {
@@ -117,8 +117,8 @@ impl Url {
     }
 
     /// Build a protocol-neutral endpoint for the scheme layer.
-    pub fn to_endpoint(&self, proxy: Option<(&str, u16)>) -> hydra_net::scheme::Endpoint {
-        let mut e = hydra_net::scheme::Endpoint::new(&self.host, self.port, &self.path);
+    pub fn to_endpoint(&self, proxy: Option<(&str, u16)>) -> hya_net::scheme::Endpoint {
+        let mut e = hya_net::scheme::Endpoint::new(&self.host, self.port, &self.path);
         e.tls = self.scheme == "https";
         e.origin = proxy.map(|(h, p)| (h.to_string(), p));
         // Credentials reach the endpoint only for FTP. Attaching them for HTTP would put

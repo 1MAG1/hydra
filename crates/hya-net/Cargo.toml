@@ -1,11 +1,11 @@
 [package]
-name = "hydra-net"
+name = "hya-net"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "HTTP/1.1 range transport driving the hydra-core scheduler"
+description = "HTTP/1.1 range transport driving the hya-core scheduler"
 
 [dependencies]
 hya-core = { workspace = true }

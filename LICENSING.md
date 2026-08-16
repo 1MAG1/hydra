@@ -4,7 +4,7 @@
 |---|---|---|
 | `hydra-cli` (the `hydra` binary) | `GPL-3.0-or-later` | The product surface. Copyleft here means a modified hydra distributed to users must ship its source. |
 | `hydra-core` | `MIT OR Apache-2.0` | An I/O-free scheduler built to be depended on. |
-| `hydra-net` | `MIT OR Apache-2.0` | Transport, same reasoning. |
+| `hya-net` | `MIT OR Apache-2.0` | Transport, same reasoning. |
 
 Files: `LICENSE` (GPL-3.0 text, verbatim), `LICENSE-MIT`, `LICENSE-APACHE`,
 `THIRD-PARTY-NOTICES.md`.

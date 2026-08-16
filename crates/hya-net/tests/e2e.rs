@@ -8,8 +8,8 @@
 //! deterministic function of offset, so a mis-assembled file is detected.
 
 use hya_core::{Scheduler, Source};
-use hydra_net::origin::{byte_at, OriginSet};
-use hydra_net::{probe, run_transfer, Target};
+use hya_net::origin::{byte_at, OriginSet};
+use hya_net::{probe, run_transfer, Target};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -149,7 +149,7 @@ async fn survives_a_mirror_that_throttles_mid_transfer() {
 /// status/Content-Range check can.
 #[tokio::test]
 async fn range_ignoring_server_is_rejected_not_silently_corrupted() {
-    use hydra_net::{fetch_range_retry, SparseSink};
+    use hya_net::{fetch_range_retry, SparseSink};
 
     const SIZE: u64 = 4 * 1024 * 1024;
     let net = Arc::new(OriginSet::new());
@@ -194,7 +194,7 @@ async fn range_ignoring_server_is_rejected_not_silently_corrupted() {
 /// a short file and calls it success.
 #[tokio::test]
 async fn truncating_origin_does_not_report_success() {
-    use hydra_net::{fetch_range_retry, SparseSink};
+    use hya_net::{fetch_range_retry, SparseSink};
     const SIZE: u64 = 2 * 1024 * 1024;
     let net = Arc::new(OriginSet::new());
     let (port, _ctl) = net.spawn_truncating(SIZE, 8_000_000);
@@ -213,7 +213,7 @@ async fn truncating_origin_does_not_report_success() {
 /// protocol error that abandons the mirror permanently.
 #[tokio::test]
 async fn overloaded_origin_backs_off_then_gives_up_cleanly() {
-    use hydra_net::{fetch_range_retry, SparseSink};
+    use hya_net::{fetch_range_retry, SparseSink};
     const SIZE: u64 = 1024 * 1024;
     let net = Arc::new(OriginSet::new());
     let (port, _ctl) = net.spawn_overloaded(SIZE, 8_000_000);
@@ -235,7 +235,7 @@ async fn overloaded_origin_backs_off_then_gives_up_cleanly() {
 /// A redirect loop must terminate within the hop budget.
 #[tokio::test]
 async fn redirect_loop_terminates_within_the_hop_budget() {
-    use hydra_net::{fetch_range_retry, SparseSink};
+    use hya_net::{fetch_range_retry, SparseSink};
     const SIZE: u64 = 1024 * 1024;
     let net = Arc::new(OriginSet::new());
     // Redirects to itself: a loop, which must be bounded rather than infinite.
@@ -257,7 +257,7 @@ async fn redirect_loop_terminates_within_the_hop_budget() {
 /// while the caller believed it was protected.
 #[tokio::test]
 async fn tls_against_a_plaintext_origin_fails_rather_than_downgrading() {
-    use hydra_net::{Target, TlsCapableConnector};
+    use hya_net::{Target, TlsCapableConnector};
     const SIZE: u64 = 64 * 1024;
     let net = Arc::new(OriginSet::new());
     let (port, _ctl) = net.spawn(SIZE, 8_000_000);
@@ -311,7 +311,7 @@ async fn a_lone_black_holing_source_fails_instead_of_idling_forever() {
 /// did not regress http://.
 #[tokio::test]
 async fn the_tls_capable_connector_still_speaks_plaintext() {
-    use hydra_net::TlsCapableConnector;
+    use hya_net::TlsCapableConnector;
     const SIZE: u64 = 64 * 1024;
     let net = Arc::new(OriginSet::new());
     let (port, _ctl) = net.spawn(SIZE, 8_000_000);
@@ -356,7 +356,7 @@ async fn the_observer_sees_the_final_byte_count() {
     let mut observe = move |_: &Scheduler, done: u64| {
         s2.fetch_max(done, Ordering::Relaxed);
     };
-    hydra_net::run_transfer_observed(
+    hya_net::run_transfer_observed(
         net.clone(),
         vec![tgt(port)],
         &[4],
@@ -391,7 +391,7 @@ async fn the_observer_sees_the_final_byte_count() {
 /// arithmetic instead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn limit_rate_shapes_the_aggregate_transfer() {
-    use hydra_net::polite::{Pace, RateLimiter};
+    use hya_net::polite::{Pace, RateLimiter};
     const SIZE: u64 = 256 * 1024;
     const CAP: u64 = 128 * 1024; // bytes/sec: the object must take about 2s
 
@@ -405,7 +405,7 @@ async fn limit_rate_shapes_the_aggregate_transfer() {
     let sched = Scheduler::new(SIZE, vec![src(16e6)], &[4]).with_stall_timeout(30.0);
 
     let t0 = std::time::Instant::now();
-    hydra_net::run_transfer_paced(
+    hya_net::run_transfer_paced(
         net.clone(),
         vec![tgt(port)],
         &[4],

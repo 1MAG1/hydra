@@ -112,6 +112,6 @@ hydra --checksum sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b
 ## License
 
 - The `hydra` CLI binary is licensed under the **GNU General Public License v3.0 or later** ([GPL-3.0-or-later](LICENSE)).
-- The `hydra-core` and `hydra-net` libraries are dual-licensed under **MIT** or **Apache-2.0** ([LICENSE-MIT](LICENSE-MIT) / [LICENSE-APACHE](LICENSE-APACHE)).
+- The `hydra-core` and `hya-net` libraries are dual-licensed under **MIT** or **Apache-2.0** ([LICENSE-MIT](LICENSE-MIT) / [LICENSE-APACHE](LICENSE-APACHE)).
 
 For more details, see [LICENSING.md](LICENSING.md) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

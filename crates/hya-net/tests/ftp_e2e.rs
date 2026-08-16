@@ -12,10 +12,10 @@
 //! reported as a round-trip COUNT, which is a protocol property and carries over to a real
 //! network, rather than a duration, which would not.
 
-use hydra_net::ftp::FtpFetcher;
-use hydra_net::ftp_origin::{byte_at, FtpOriginSet};
-use hydra_net::scheme::{Endpoint, Fetcher};
-use hydra_net::SparseSink;
+use hya_net::ftp::FtpFetcher;
+use hya_net::ftp_origin::{byte_at, FtpOriginSet};
+use hya_net::scheme::{Endpoint, Fetcher};
+use hya_net::SparseSink;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 

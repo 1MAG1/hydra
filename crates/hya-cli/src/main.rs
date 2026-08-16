@@ -44,8 +44,8 @@ mod url;
 mod xval;
 
 use hya_core::{Scheduler, Source};
-use hydra_net::origin::OriginSet;
-use hydra_net::{run_transfer, Target};
+use hya_net::origin::OriginSet;
+use hya_net::{run_transfer, Target};
 use std::sync::Arc;
 
 /// Peak resident set size in bytes, via `getrusage(RUSAGE_SELF)`.
@@ -517,7 +517,7 @@ async fn main() -> std::process::ExitCode {
             .clone()
             .map(|p| (p, true))
             .or_else(|| args.logfile.clone().map(|p| (p, false))),
-        ip_family: hydra_net::IpFamily::from_flags(args.ipv4, args.ipv6),
+        ip_family: hya_net::IpFamily::from_flags(args.ipv4, args.ipv6),
         tries: args.tries,
         timeout_s: args.timeout,
         checksum: args.checksum.clone(),
@@ -579,8 +579,8 @@ async fn checksum_report(
     download_if_needed: bool,
     args: &cli::Cli,
 ) -> std::process::ExitCode {
-    use hydra_net::digest::{self, Advertised};
-    let conn = match hydra_net::TlsCapableConnector::with_insecure(args.insecure) {
+    use hya_net::digest::{self, Advertised};
+    let conn = match hya_net::TlsCapableConnector::with_insecure(args.insecure) {
         Ok(c) => std::sync::Arc::new(c),
         Err(e) => {
             eprintln!("hydra: tls setup failed: {e}");
@@ -637,7 +637,7 @@ async fn checksum_report(
                 let Ok(t2) = side.to_target(px.as_ref().map(|(h, p)| (h.as_str(), *p))) else {
                     continue;
                 };
-                if let Ok(body) = hydra_net::fetch_small(conn.as_ref(), &t2, 1 << 20).await {
+                if let Ok(body) = hya_net::fetch_small(conn.as_ref(), &t2, 1 << 20).await {
                     let text = String::from_utf8_lossy(&body);
                     let name = parsed
                         .path
@@ -809,9 +809,9 @@ async fn checksum_report(
 /// parallel.
 fn local_digests(
     path: &std::path::Path,
-    advertised: &[hydra_net::digest::Advertised],
-) -> std::io::Result<Vec<(hydra_net::digest::Algo, String)>> {
-    use hydra_net::digest::Algo;
+    advertised: &[hya_net::digest::Advertised],
+) -> std::io::Result<Vec<(hya_net::digest::Algo, String)>> {
+    use hya_net::digest::Algo;
     use md5::Digest as _;
     use std::io::Read;
     let want: Vec<Algo> = advertised
@@ -1078,8 +1078,8 @@ async fn run_many(
 
 /// `hydra parity make|repair` — local Reed-Solomon parity generation and repair.
 fn run_parity(what: &cli::ParityCmd) -> i32 {
-    use hydra_net::manifest::Manifest;
-    use hydra_net::parity::{generate, repair, Layout, DEFAULT_WINDOW};
+    use hya_net::manifest::Manifest;
+    use hya_net::parity::{generate, repair, Layout, DEFAULT_WINDOW};
     use std::path::PathBuf;
 
     match what {
@@ -1132,7 +1132,7 @@ fn run_parity(what: &cli::ParityCmd) -> i32 {
             // Record the code in the manifest, including the parity shards' own
             // digests: a corrupt parity shard fed into a repair produces a
             // silently wrong result.
-            m.parity = Some(hydra_net::manifest::ParityMeta {
+            m.parity = Some(hya_net::manifest::ParityMeta {
                 algo: "reed-solomon".into(),
                 field: "gf16".into(),
                 k: lay.k,
@@ -1192,7 +1192,7 @@ fn run_parity(what: &cli::ParityCmd) -> i32 {
             // Erasure positions come from digest mismatches against the trusted manifest.
             let bad;
             {
-                use hydra_net::manifest::{ChunkVerifier, Trust};
+                use hya_net::manifest::{ChunkVerifier, Trust};
                 let mut v = ChunkVerifier::new(m.clone(), Trust::Trusted);
                 let mut f = match std::fs::File::open(file) {
                     Ok(f) => f,
@@ -1252,7 +1252,7 @@ fn run_parity(what: &cli::ParityCmd) -> i32 {
             // decoding from rotted parity damages chunks that were intact — turning
             // one recoverable chunk into several. Checked here rather than trusting
             // the length, which a rotted file of the right size passes.
-            match hydra_net::parity::verify_parity(&pp.to_string_lossy(), &lay, &pm.shard_digests) {
+            match hya_net::parity::verify_parity(&pp.to_string_lossy(), &lay, &pm.shard_digests) {
                 Ok(bad_shards) if !bad_shards.is_empty() => {
                     eprintln!(
                         "hydra: {} is itself damaged (parity shard(s) {:?} fail their digests); \
@@ -1273,7 +1273,7 @@ fn run_parity(what: &cli::ParityCmd) -> i32 {
             match repair(&file.to_string_lossy(), &pp.to_string_lossy(), &lay, &bad) {
                 Ok(n) => {
                     // Re-verify repaired object against manifest chunks.
-                    use hydra_net::manifest::{ChunkVerifier, Trust};
+                    use hya_net::manifest::{ChunkVerifier, Trust};
                     let mut v = ChunkVerifier::new(m.clone(), Trust::Trusted);
                     let mut f = std::fs::File::open(file).expect("just repaired");
                     // A read error surfaces as unverified chunks below, which is
@@ -1316,7 +1316,7 @@ fn run_parity(what: &cli::ParityCmd) -> i32 {
 /// the object would be work nobody asked for — this is `--spider` with a
 /// projection.
 async fn report_header_values(urls: &[String], args: &cli::Cli) -> std::process::ExitCode {
-    let conn = match hydra_net::TlsCapableConnector::with_insecure(args.insecure) {
+    let conn = match hya_net::TlsCapableConnector::with_insecure(args.insecure) {
         Ok(c) => std::sync::Arc::new(c),
         Err(e) => {
             eprintln!("hydra: tls setup failed: {e}");
@@ -1348,7 +1348,7 @@ async fn report_header_values(urls: &[String], args: &cli::Cli) -> std::process:
         };
 
         for name in &args.header_queries {
-            match hydra_net::header_lookup(&pr.raw_head, name) {
+            match hya_net::header_lookup(&pr.raw_head, name) {
                 Some(v) if multi => println!("{name}: {v}"),
                 Some(v) => println!("{v}"),
                 None => {

@@ -12,7 +12,7 @@
 //! origin slow enough that the tick loop, not the network, dominates the CPU
 //! time. The number to watch is CPU-seconds per wall-second.
 
-use hydra_net::origin::OriginSet;
+use hya_net::origin::OriginSet;
 use std::sync::Arc;
 
 /// CPU time (user + system) consumed by this process, in seconds.
@@ -52,7 +52,7 @@ async fn main() {
     for tick_ms in [20u64, 50, 100, 250] {
         let net = Arc::new(OriginSet::new());
         let (port, _ctl) = net.spawn(size, 256 * 1024);
-        let t = hydra_net::Target::direct("127.0.0.1", port, "/obj");
+        let t = hya_net::Target::direct("127.0.0.1", port, "/obj");
         let sched = hya_core::Scheduler::new(
             size,
             vec![hya_core::Source {
@@ -62,10 +62,10 @@ async fn main() {
             }],
             &[2],
         );
-        let sink = Arc::new(hydra_net::SparseSink::discarding());
+        let sink = Arc::new(hya_net::SparseSink::discarding());
         let c0 = cpu_seconds();
         let w0 = std::time::Instant::now();
-        hydra_net::run_transfer_into(
+        hya_net::run_transfer_into(
             net.clone(),
             vec![t],
             &[2],
@@ -77,7 +77,7 @@ async fn main() {
             // Unshaped: this harness measures the cost of the tick loop itself,
             // so a rate cap would add sleeps and confound exactly the CPU-time
             // reading it exists to take.
-            hydra_net::polite::Pace::unlimited(),
+            hya_net::polite::Pace::unlimited(),
         )
         .await
         .expect("transfer must complete");

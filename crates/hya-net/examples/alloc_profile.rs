@@ -20,7 +20,7 @@
 //! with the origin serving an unframed body and subtract. What matters for the
 //! client is the DELTA between chunk sizes after that subtraction.
 
-use hydra_net::origin::OriginSet;
+use hya_net::origin::OriginSet;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -84,16 +84,16 @@ async fn main() {
         // traffic per byte, not the origin's token bucket.
         let (port, ctl) = net.spawn(size, 8 * 1024 * 1024 * 1024);
         ctl.chunked.store(chunk as u64, Ordering::Relaxed);
-        let t = hydra_net::Target::direct("127.0.0.1", port, "/obj");
+        let t = hya_net::Target::direct("127.0.0.1", port, "/obj");
         // Discarding sink isolates decode-path allocation from the filesystem.
-        let sink = Arc::new(hydra_net::SparseSink::discarding());
+        let sink = Arc::new(hya_net::SparseSink::discarding());
 
         // Reset after setup so the counts describe the transfer, not the server.
         ALLOCS.store(0, Ordering::Relaxed);
         BYTES.store(0, Ordering::Relaxed);
         PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
 
-        hydra_net::fetch_range_retry(net.clone(), t, 0, size, sink.clone(), 2, 120.0)
+        hya_net::fetch_range_retry(net.clone(), t, 0, size, sink.clone(), 2, 120.0)
             .await
             .expect("chunked transfer must complete");
 

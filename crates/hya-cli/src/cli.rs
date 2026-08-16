@@ -6,7 +6,7 @@
 //! what a user already expects.
 
 use clap::{Parser, Subcommand};
-use hydra_net::polite::{parse_rate, Politeness, DEFAULT_PER_HOST, DEFAULT_TOTAL};
+use hya_net::polite::{parse_rate, Politeness, DEFAULT_PER_HOST, DEFAULT_TOTAL};
 use std::path::PathBuf;
 
 /// Validate a `--header/-H` argument as an RFC 9110 field line.
@@ -371,7 +371,7 @@ pub struct Cli {
         visible_short_alias = 'A',
         long = "user-agent",
         value_name = "STRING",
-        default_value = hydra_net::DEFAULT_USER_AGENT
+        default_value = hya_net::DEFAULT_USER_AGENT
     )]
     pub user_agent: String,
 

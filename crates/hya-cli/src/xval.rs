@@ -12,8 +12,8 @@
 //! be executed here; the comparison is a statement about the policy.
 
 use hya_core::{Scheduler, Source};
-use hydra_net::origin::{byte_at, OriginControl, OriginSet};
-use hydra_net::{run_transfer_tick, Target};
+use hya_net::origin::{byte_at, OriginControl, OriginSet};
+use hya_net::{run_transfer_tick, Target};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -197,7 +197,7 @@ async fn run_equal_static(sc: &Scenario, size: u64, conns: usize) -> Option<(f64
     let n = sc.rates.len() * conns;
     let out = std::env::temp_dir().join(format!("static_xval_{}.bin", sc.name));
     let outs = out.to_string_lossy().to_string();
-    let sink = Arc::new(hydra_net::SparseSink::create(&outs, size).ok()?);
+    let sink = Arc::new(hya_net::SparseSink::create(&outs, size).ok()?);
     let t0 = std::time::Instant::now();
 
     // Each part is fetched independently and retried in place: no stealing.
@@ -208,7 +208,7 @@ async fn run_equal_static(sc: &Scenario, size: u64, conns: usize) -> Option<(f64
         let t = targets[k % targets.len()].clone();
         let (sk, nt) = (sink.clone(), net.clone());
         handles.push(tokio::spawn(async move {
-            hydra_net::fetch_range_retry(nt, t, lo, hi, sk, 6, 0.6).await
+            hya_net::fetch_range_retry(nt, t, lo, hi, sk, 6, 0.6).await
         }));
     }
     let mut all_ok = true;

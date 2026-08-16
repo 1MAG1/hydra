@@ -8,8 +8,8 @@
 use crate::progress::{ConnView, Counters, Progress};
 use crate::url::{proxy_from_env, Sidecar, Url};
 use hya_core::{detect_format, Admission, Admit, Category, DeltaEstimator, Scheduler, Source};
-use hydra_net::polite::{Politeness, RateLimiter};
-use hydra_net::{fetch_range_retry, probe, probe_via_get, SparseSink, Target, TlsCapableConnector};
+use hya_net::polite::{Politeness, RateLimiter};
+use hya_net::{fetch_range_retry, probe, probe_via_get, SparseSink, Target, TlsCapableConnector};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -88,7 +88,7 @@ pub struct Job {
     /// Redirect hops permitted before giving up. `0` refuses to follow any.
     pub max_redirs: u32,
     /// `-4` / `-6`: restrict every connection to one IP version.
-    pub ip_family: hydra_net::IpFamily,
+    pub ip_family: hya_net::IpFamily,
     /// `--show-error`: print failure reasons to stderr even under `-q`.
     pub show_error: bool,
     /// `--logfile` (truncate) or `--logfile-append`: human output goes to this
@@ -218,7 +218,7 @@ fn targets_for(
     let px = if no_proxy {
         None
     } else if let Some(spec) = proxy {
-        match hydra_net::Proxy::parse(spec) {
+        match hya_net::Proxy::parse(spec) {
             // SOCKS: handled by the connector, so the target is built as if direct.
             Ok(p) if p.kind.is_socks() => None,
             Ok(p) => Some((p.host, p.port)),
@@ -237,12 +237,12 @@ fn targets_for(
                 match u.split_once("://") {
                     Some((s, _)) => format!(
                         "{u}: {} (supported: {})",
-                        hydra_net::scheme::unsupported_reason(&s.to_ascii_lowercase()),
-                        hydra_net::scheme::supported().join(", ")
+                        hya_net::scheme::unsupported_reason(&s.to_ascii_lowercase()),
+                        hya_net::scheme::supported().join(", ")
                     ),
                     None => format!(
                         "unparsable URL: {u} (supported schemes: {})",
-                        hydra_net::scheme::supported().join(", ")
+                        hya_net::scheme::supported().join(", ")
                     ),
                 }
             })?;
@@ -252,7 +252,7 @@ fn targets_for(
             // returned an error BEFORE the FTP branch was ever reached, which is why an
             // ftp:// fetch failed silently with exit 1 and no message.
             if parsed.is_ftp() {
-                let t = hydra_net::Target::direct(&parsed.host, parsed.port, &parsed.path);
+                let t = hya_net::Target::direct(&parsed.host, parsed.port, &parsed.path);
                 return Ok((parsed, t));
             }
             let t = parsed
@@ -368,7 +368,7 @@ fn scratch_name() -> String {
 /// object, and the tail is where a truncated write leaves damage.
 ///
 /// Returns the number of verified bytes, or `None` when the prefix does not match.
-async fn verify_prefix<C: hydra_net::Connector>(
+async fn verify_prefix<C: hya_net::Connector>(
     c: &Arc<C>,
     t: &Target,
     path: &Path,
@@ -431,7 +431,7 @@ async fn verify_prefix<C: hydra_net::Connector>(
 
 /// Print the probe exchange the way `curl -iv` does: request with `>`, response with
 /// `<`, so a pasted transcript is unambiguous about direction.
-fn print_exchange(pr: &hydra_net::Probe) {
+fn print_exchange(pr: &hya_net::Probe) {
     for line in pr.raw_request.lines() {
         if !line.is_empty() {
             println!("> {line}");
@@ -464,12 +464,12 @@ async fn ftp_fetch(job: &Job, u: &Url, p: &mut Progress, outs: String) -> Outcom
             return failed(job, 0, why);
         }};
     }
-    use hydra_net::scheme::Fetcher;
+    use hya_net::scheme::Fetcher;
     let t_all = Instant::now();
     let px = proxy_for(u);
     let ep = u.to_endpoint(px.as_ref().map(|(h, pt)| (h.as_str(), *pt)));
-    let conn = Arc::new(hydra_net::TcpConnector);
-    let f = hydra_net::ftp::FtpFetcher::new(conn);
+    let conn = Arc::new(hya_net::TcpConnector);
+    let f = hya_net::ftp::FtpFetcher::new(conn);
 
     p.phase("connecting and logging in");
     let probe = match f.probe(&ep).await {
@@ -531,7 +531,7 @@ async fn ftp_fetch(job: &Job, u: &Url, p: &mut Progress, outs: String) -> Outcom
     if start >= probe.size {
         return Outcome::stopped(job, outs.clone(), probe.size, true, "already complete");
     }
-    let sink = match hydra_net::SparseSink::create(&outs, probe.size) {
+    let sink = match hya_net::SparseSink::create(&outs, probe.size) {
         Ok(s) => Arc::new(s),
         Err(e) => {
             bail!("cannot create {outs}: {e}");
@@ -643,7 +643,7 @@ async fn ftp_fetch(job: &Job, u: &Url, p: &mut Progress, outs: String) -> Outcom
                     Err(_) => return None,
                 }
             }
-            Some(hydra_net::digest::to_lower_hex(&h.finalize()))
+            Some(hya_net::digest::to_lower_hex(&h.finalize()))
         })
     };
     let elapsed = t_all.elapsed().as_secs_f64();
@@ -696,7 +696,7 @@ pub fn proxy_for_public(_u: &Url, proxy: Option<&str>, no_proxy: bool) -> Option
         return None;
     }
     match proxy {
-        Some(spec) => match hydra_net::Proxy::parse(spec) {
+        Some(spec) => match hya_net::Proxy::parse(spec) {
             Ok(px) if !px.kind.is_socks() => Some((px.host, px.port)),
             _ => None,
         },
@@ -714,18 +714,18 @@ pub fn default_job() -> Job {
         resume: false,
         limit_rate: 0,
         max_redirs: 8,
-        ip_family: hydra_net::IpFamily::Any,
+        ip_family: hya_net::IpFamily::Any,
         show_error: false,
         logfile: None,
         tries: 3,
         timeout_s: 30.0,
         checksum: None,
         headers: Vec::new(),
-        user_agent: hydra_net::DEFAULT_USER_AGENT.into(),
+        user_agent: hya_net::DEFAULT_USER_AGENT.into(),
         verbose: 0,
         quiet: true,
         no_progress: true,
-        polite: hydra_net::polite::Politeness::default(),
+        polite: hya_net::polite::Politeness::default(),
         adaptive: true,
         to_stdout: false,
         no_clobber: false,
@@ -792,11 +792,11 @@ fn proxy_for(u: &Url) -> Option<(String, u16)> {
 /// (unclean TLS close, `Content-Length: 0`) answer the GET correctly.
 ///
 /// Returns the final probe and the URL it came from.
-pub async fn probe_public<C: hydra_net::Connector>(
+pub async fn probe_public<C: hya_net::Connector>(
     c: &C,
     u: &Url,
     args: &crate::cli::Cli,
-) -> Result<(hydra_net::Probe, Url), String> {
+) -> Result<(hya_net::Probe, Url), String> {
     let mut cur = u.clone();
     let mut hops = 0u32;
     loop {
@@ -804,12 +804,12 @@ pub async fn probe_public<C: hydra_net::Connector>(
         let target = cur
             .to_target(px.as_ref().map(|(h, p)| (h.as_str(), *p)))?
             .with_headers(args.headers.clone(), Some(args.user_agent.clone()));
-        let pr = match hydra_net::probe(c, &target).await {
+        let pr = match hya_net::probe(c, &target).await {
             Ok(pr) if !pr.is_redirect() && pr.size == 0 => {
-                hydra_net::probe_via_get(c, &target).await.unwrap_or(pr)
+                hya_net::probe_via_get(c, &target).await.unwrap_or(pr)
             }
             Ok(pr) => pr,
-            Err(e) => match hydra_net::probe_via_get(c, &target).await {
+            Err(e) => match hya_net::probe_via_get(c, &target).await {
                 Ok(g) => g,
                 Err(_) => return Err(e.to_string()),
             },
@@ -835,9 +835,9 @@ async fn probe_resolving<C>(
     t: &Target,
     p: &mut Progress,
     max_redirs: u32,
-) -> Result<(hydra_net::Probe, Target), String>
+) -> Result<(hya_net::Probe, Target), String>
 where
-    C: hydra_net::Connector,
+    C: hya_net::Connector,
 {
     // The hop budget is the CLI's, not a constant. `--max-redirs` was parsed,
     // validated, and listed in `--help`, but the resolver used a hardcoded
@@ -900,9 +900,9 @@ async fn probe_all(
     pairs: &[(Url, Target)],
     p: &mut Progress,
     max_redirs: u32,
-) -> Result<(hydra_net::Probe, Vec<usize>, Vec<(usize, Target)>), String> {
+) -> Result<(hya_net::Probe, Vec<usize>, Vec<(usize, Target)>), String> {
     let c = conn.clone();
-    let mut first: Option<hydra_net::Probe> = None;
+    let mut first: Option<hya_net::Probe> = None;
     let mut keep = Vec::new();
     // Targets after redirect resolution, paired with the index they came from.
     let mut resolved_targets: Vec<(usize, Target)> = Vec::new();
@@ -1117,7 +1117,7 @@ async fn verify_and_repair_chunks(
     job: &Job,
     p: &mut Progress,
 ) -> Result<String, String> {
-    use hydra_net::manifest::{ChunkVerifier, Manifest, Trust};
+    use hya_net::manifest::{ChunkVerifier, Manifest, Trust};
 
     let text = std::fs::read_to_string(manifest_path)
         .map_err(|e| format!("cannot read manifest {}: {e}", manifest_path.display()))?;
@@ -1150,7 +1150,7 @@ async fn verify_and_repair_chunks(
     );
 
     let sink = Arc::new(
-        hydra_net::SparseSink::create(&out_path.to_string_lossy(), v.manifest().object.size)
+        hya_net::SparseSink::create(&out_path.to_string_lossy(), v.manifest().object.size)
             .map_err(|e| format!("cannot reopen {} to repair: {e}", out_path.display()))?,
     );
 
@@ -1162,7 +1162,7 @@ async fn verify_and_repair_chunks(
         let alt = if usable.len() > 1 { 1 } else { 0 };
         let t = usable[alt.min(usable.len() - 1)].1.clone();
         p.event(1, &format!("refetching chunk {idx} [{lo},{hi})"));
-        hydra_net::fetch_range_retry(
+        hya_net::fetch_range_retry(
             conn.clone(),
             t,
             lo,
@@ -1204,7 +1204,7 @@ fn sha256_file(path: &Path) -> Option<String> {
     let data = std::fs::read(path).ok()?;
     let mut h = Sha256::new();
     h.update(&data);
-    Some(hydra_net::digest::to_lower_hex(&h.finalize()))
+    Some(hya_net::digest::to_lower_hex(&h.finalize()))
 }
 
 pub async fn run(job: Job) -> Outcome {
@@ -1276,7 +1276,7 @@ pub async fn run(job: Job) -> Outcome {
     // the request). Conflating them sends a CONNECT to the origin, or an absolute-form
     // request to a SOCKS port.
     let socks = match &job.proxy {
-        Some(raw) => match hydra_net::Proxy::parse(raw) {
+        Some(raw) => match hya_net::Proxy::parse(raw) {
             Ok(px) if px.kind.is_socks() => Some(px),
             Ok(_) => None,
             Err(e) => return failed(&job, 0, format!("--proxy: {e}")),
@@ -1364,7 +1364,7 @@ pub async fn run(job: Job) -> Outcome {
     let usable: Vec<(Url, Target)> = keep.iter().map(|&i| pairs[i].clone()).collect();
     if size == 0 && !job.spider {
         // `keep` holds the indices that probed consistently; any of them can answer.
-        match hydra_net::probe_size_via_range(conn.as_ref(), &pairs[keep[0]].1).await {
+        match hya_net::probe_size_via_range(conn.as_ref(), &pairs[keep[0]].1).await {
             Ok(n) if n > 0 => {
                 p.event(1, &format!("size from Content-Range: {n} bytes"));
                 size = n;
@@ -1392,7 +1392,7 @@ pub async fn run(job: Job) -> Outcome {
         p.end_phase();
         let outs = out_path.to_string_lossy().to_string();
         let t0 = Instant::now();
-        return match hydra_net::fetch_streaming(conn.as_ref(), &usable[0].1, &outs).await {
+        return match hya_net::fetch_streaming(conn.as_ref(), &usable[0].1, &outs).await {
             Ok(0) => failed(&job, 0, "the server sent no body".into()),
             Ok(n) => {
                 let el = t0.elapsed().as_secs_f64();
@@ -1706,9 +1706,7 @@ pub async fn run(job: Job) -> Outcome {
     // ---- the discarding sink, created once -------------------------------
     // Created before the concurrency probe so probe bytes are recorded by the digest sink.
     let discard_sink = discarding.then(|| {
-        Arc::new(
-            SparseSink::discarding().with_digest(hydra_net::stream_digest::DEFAULT_REORDER_CAP),
-        )
+        Arc::new(SparseSink::discarding().with_digest(hya_net::stream_digest::DEFAULT_REORDER_CAP))
     });
 
     // ---- concurrency ----------------------------------------------------
@@ -2008,10 +2006,10 @@ pub async fn run(job: Job) -> Outcome {
         // `--limit-rate 1M` means the transfer uses 1 MB/s, not 1 MB/s per
         // connection. `--no-save` is capped too — the bytes still cross the
         // network, which is what the flag is about.
-        let pace = hydra_net::polite::Pace::shared(limiter.clone());
+        let pace = hya_net::polite::Pace::shared(limiter.clone());
         match &sink {
             Some(sk) => {
-                let r = hydra_net::run_transfer_into(
+                let r = hya_net::run_transfer_into(
                     c,
                     tgts,
                     &per,
@@ -2027,7 +2025,7 @@ pub async fn run(job: Job) -> Outcome {
                 r
             }
             None => {
-                hydra_net::run_transfer_paced(
+                hya_net::run_transfer_paced(
                     c,
                     tgts,
                     &per,
@@ -2346,7 +2344,7 @@ pub async fn run(job: Job) -> Outcome {
         match last_modified
             .as_deref()
             .or(validator.as_deref())
-            .and_then(hydra_net::polite::parse_http_date)
+            .and_then(hya_net::polite::parse_http_date)
         {
             Some(secs) => {
                 let _ = set_mtime(&out_path, secs);
@@ -2412,12 +2410,12 @@ pub async fn run(job: Job) -> Outcome {
         if complete && checksum_ok != Some(false) && !discarding {
             let cs = job
                 .chunk_size
-                .unwrap_or(hydra_net::manifest::DEFAULT_CHUNK)
+                .unwrap_or(hya_net::manifest::DEFAULT_CHUNK)
                 .max(1);
-            match hydra_net::manifest::from_file(
+            match hya_net::manifest::from_file(
                 &out_path.to_string_lossy(),
                 cs,
-                hydra_net::manifest::ChunkAlgo::Blake3,
+                hya_net::manifest::ChunkAlgo::Blake3,
                 Some(job.urls[0].clone()),
                 validator.clone(),
             ) {
@@ -2692,7 +2690,7 @@ mod tests {
     /// Ensure metadata probe follows redirects to the target object.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn public_probe_follows_a_redirect_to_the_object() {
-        let net = hydra_net::origin::OriginSet::new();
+        let net = hya_net::origin::OriginSet::new();
         let (real_port, _real) = net.spawn(64 * 1024, 1_000_000);
         let (hop_port, _hop) =
             net.spawn_redirecting(0, 1_000_000, &format!("http://127.0.0.1:{real_port}/obj"));

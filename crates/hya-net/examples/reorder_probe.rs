@@ -5,7 +5,7 @@
 //! reproduces the layout the scheduler actually produces — n connections each
 //! assigned a CONTIGUOUS span, all advancing at similar rates — and reports
 //! whether the digest survives.
-use hydra_net::stream_digest::{StreamDigest, DEFAULT_REORDER_CAP};
+use hya_net::stream_digest::{StreamDigest, DEFAULT_REORDER_CAP};
 
 fn main() {
     println!("size_mb,conns,peak_pending_mb,abandoned");

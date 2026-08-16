@@ -14,7 +14,7 @@
 //! merely runs, which is the only formulation that can catch a lost update: the
 //! racy version returns a plausible number, just a wrong one.
 
-use hydra_net::SparseSink;
+use hya_net::SparseSink;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
