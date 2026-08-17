@@ -26,5 +26,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 clap_complete = { workspace = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Cross-compiling to windows-msvc: MSVC's arm64_neon.h is not clang-parsable,
+# so blake3's C NEON path cannot build — the pure-Rust implementation is
+# feature-unified in for Windows targets only, same as hydra-gui. Portable
+# blake3 still hashes well above the network rates the scheduler works at.
+blake3 = { version = "1", features = ["pure"] }
+
 [lints]
 workspace = true
