@@ -732,11 +732,11 @@ impl Scheduler {
             // "after" charges the setup and credits only the improvement in the
             // WORST finishing time — because the makespan is a max, not a sum, and
             // improving anything other than the laggard buys nothing.
-            let makespan_now = self
-                .conns
-                .iter()
-                .map(|c| c.eta())
-                .fold(0.0f64, |a, b| if b > a { b } else { a });
+            let makespan_now =
+                self.conns
+                    .iter()
+                    .map(|c| c.eta())
+                    .fold(0.0f64, |a, b| if b > a { b } else { a });
             // The victim keeps `left - x` at its own rate; the taker takes on `x`
             // after paying `delta`, on top of what it already owes.
             let v_after = if rv > 0.0 {
@@ -1637,8 +1637,9 @@ mod tests {
             sc.on_bytes(0, 4_000, now, 0.1);
             sc.on_bytes(1, 400_000, now, 0.1);
             // Snapshot each victim's far end before the tick that may move it.
-            let before: Vec<Option<u64>> =
-                (0..sc.n_conns()).map(|j| sc.conn_range(j).map(|(_, _, hi)| hi)).collect();
+            let before: Vec<Option<u64>> = (0..sc.n_conns())
+                .map(|j| sc.conn_range(j).map(|(_, _, hi)| hi))
+                .collect();
             let acts = sc.tick(now);
             for a in &acts {
                 if let Action::Shrink { conn, hi } = a {

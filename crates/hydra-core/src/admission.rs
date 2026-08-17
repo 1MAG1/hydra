@@ -279,7 +279,11 @@ mod tests {
         // Saturated path: 1 -> 2 -> 4 all deliver the same, so the answer is 1.
         let mut a = Admission::new(0.15, 8);
         assert_eq!(a.observe_at(1, 1.00e6), Admit::Add);
-        assert_eq!(a.observe_at(2, 1.01e6), Admit::Stop, "1% per added conn is noise");
+        assert_eq!(
+            a.observe_at(2, 1.01e6),
+            Admit::Stop,
+            "1% per added conn is noise"
+        );
         assert_eq!(
             a.settled(),
             Some(1),
