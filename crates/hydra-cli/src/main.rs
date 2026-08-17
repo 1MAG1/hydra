@@ -322,7 +322,6 @@ fn main() -> std::process::ExitCode {
         .block_on(async_main())
 }
 
-
 async fn async_main() -> std::process::ExitCode {
     // Translate the invoking dialect into canonical native options BEFORE parsing.
     // Different CLI personalities disagree on short flag semantics, so the personality

@@ -2076,10 +2076,8 @@ pub async fn run(job: Job) -> Outcome {
             // pay, so the budget is a ceiling and reporting it would be reporting a
             // number the run did not use — the same defect that made
             // `--max-total-connections 2 -x 8` claim eight.
-            observed_requests_obs.fetch_max(
-                sc.stats.requests,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            observed_requests_obs
+                .fetch_max(sc.stats.requests, std::sync::atomic::Ordering::Relaxed);
             // FOUR different numbers, and conflating any two of them has already cost a
             // wrong diagnosis. The distinctions are not pedantic:
             //
@@ -2246,7 +2244,10 @@ pub async fn run(job: Job) -> Outcome {
         Ok((_, r)) => (true, *r),
         // The request count is a property of what the scheduler DID, not of
         // whether it finished. Sampled from the observer, which ran on every tick.
-        Err(_) => (false, observed_requests.load(std::sync::atomic::Ordering::Relaxed)),
+        Err(_) => (
+            false,
+            observed_requests.load(std::sync::atomic::Ordering::Relaxed),
+        ),
     };
     if let Some(why) = transfer_error.as_deref() {
         if !job.quiet || job.show_error {
