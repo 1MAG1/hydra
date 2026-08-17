@@ -282,8 +282,49 @@ fn parse_range(spec: &str) -> Option<download::RangeSpec> {
     Some(RangeSpec::Closed(lo, hi))
 }
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+/// Size the runtime to the WORKLOAD, not to the machine.
+///
+/// `#[tokio::main]` with no arguments starts one worker thread per CPU core. On a
+/// 12-core box that is 12 threads to service at most a couple of dozen sockets, and
+/// the work each one does per wakeup is a 64 KiB read and a positioned write — far
+/// too little to amortise being scheduled. The cost shows up as involuntary context
+/// switches: measured on an 11 MB transfer, hydra was preempted 1516 times at `-x 8`
+/// against curl's 33 (46x), while VOLUNTARY switches were essentially identical
+/// (2127 vs 2145). Voluntary switches are "waited for I/O", which is the work;
+/// involuntary switches are "used up a timeslice", which here is overhead.
+///
+/// **This is a resource-policy choice, not a measured optimisation.** The hypothesis
+/// above was tested and rejected: interleaved over five repetitions the paired ratio was
+/// 1.04 with Wilcoxon p = 0.81 and per-repetition deltas inconsistent in sign. An
+/// earlier apparent 1516 → 921 improvement was between-job noise — the two builds ran in
+/// separate jobs minutes apart, and curl's own switch count moved 33 → 96 across the same
+/// gap, which is what gave it away.
+///
+/// The cap is kept because sizing a thread pool to the workload is defensible on its own
+/// terms for a tool intended to run on servers, where many concurrent transfers share a
+/// box and a per-core pool per process multiplies. Four workers: enough that TLS
+/// handshakes and the digest can overlap the transfer, few enough that the pool is not
+/// fighting itself; capped by the machine so a single-core VM does not get four.
+///
+/// The remaining CPU gap is still open and is being investigated at the
+/// transport/executor boundary. See `docs/PERFORMANCE.md` for the hypotheses already
+/// rejected, so they are not re-tried: pool width, the fixed-rate tick loop, per-arrival
+/// channel traffic, task spawn/abort per request, and DNS resolution.
+fn main() -> std::process::ExitCode {
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get().min(4))
+        .unwrap_or(2)
+        .max(1);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(async_main())
+}
+
+
+async fn async_main() -> std::process::ExitCode {
     // Translate the invoking dialect into canonical native options BEFORE parsing.
     // wget and curl disagree on 15 of 19 common short flags, so there is no single
     // namespace that can serve both; the personality decides what `-O` means.
@@ -528,7 +569,8 @@ async fn main() -> std::process::ExitCode {
         quiet: args.quiet || args.json,
         no_progress: args.no_progress,
         polite: args.politeness(),
-        adaptive: !args.no_probe,
+        adaptive: args.adaptive,
+        probe: !args.no_probe,
         to_stdout: args.stdout,
         no_clobber: args.no_clobber,
         create_dirs: args.create_dirs,

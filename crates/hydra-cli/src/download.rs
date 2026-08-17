@@ -103,14 +103,23 @@ pub struct Job {
     pub quiet: bool,
     pub no_progress: bool,
     pub polite: Politeness,
-    /// Probe concurrency instead of taking `conns` on faith.
-    /// Measure the useful connection count instead of taking a number on faith.
+    /// Run the marginal-goodput search even though `conns` names a number,
+    /// treating that number as a ceiling rather than a target (`--adaptive`).
     ///
-    /// Only consulted when `conns` is None: an explicit `-x N` is honoured as
-    /// given, because a flag whose documented behaviour is "omit to measure" must
-    /// not measure when it was not omitted.
-    #[allow(dead_code)]
+    /// Separate from `probe` below because the two answer different questions.
+    /// `probe` is "no number was given, go and find one"; this is "a number was
+    /// given, but check how much of it is useful". Conflating them would either
+    /// make `-x N` silently measure — breaking a flag whose whole purpose is to
+    /// pin a value for a reproduction or a comparison against another client — or
+    /// leave `--adaptive` unable to express a ceiling.
     pub adaptive: bool,
+    /// Measure the useful connection count when no `-x` was given.
+    ///
+    /// True by default; `--no-probe` sets it false, in which case a run with no
+    /// `-x` takes ONE connection rather than guessing a multi-connection default.
+    /// Guessing is what produced transfers slower than a single stream on a
+    /// saturated access link.
+    pub probe: bool,
     /// Write to stdout rather than a file.
     pub to_stdout: bool,
     /// Skip entirely if the output already exists.
@@ -179,7 +188,11 @@ pub struct Outcome {
     pub setup_s: f64,
     pub throughput_bps: f64,
     pub requests: u64,
+    /// The connection count the transfer actually ran at.
     pub connections: usize,
+    /// The highest active limit reached, which under `--adaptive` is the top of the
+    /// search rather than the answer. Equal to `connections` for fixed `-x`.
+    pub peak_connections: usize,
     pub delta_s: f64,
     pub sha256: Option<String>,
     pub checksum_ok: Option<bool>,
@@ -675,6 +688,8 @@ async fn ftp_fetch(job: &Job, u: &Url, p: &mut Progress, outs: String) -> Outcom
         },
         requests: 1,
         connections: 1,
+        // No concurrency search on this path, so the peak is what it ran at.
+        peak_connections: 1,
         delta_s: 0.0,
         sha256: digest,
         checksum_ok: None,
@@ -726,7 +741,8 @@ pub fn default_job() -> Job {
         quiet: true,
         no_progress: true,
         polite: hya_net::polite::Politeness::default(),
-        adaptive: true,
+        adaptive: false,
+        probe: true,
         to_stdout: false,
         no_clobber: false,
         create_dirs: false,
@@ -990,8 +1006,23 @@ async fn learn_concurrency(
     sink: &Arc<SparseSink>,
     p: &mut Progress,
 ) -> (usize, f64, Vec<(u64, u64)>) {
-    const TOTAL: u64 = 768 * 1024;
-    if size <= TOTAL * 2 {
+    // How much to move at each probe level.
+    //
+    // A fixed slab is wrong in both directions, and the small-object direction was
+    // costing real time: at 768 KiB per level on a 3 MB object over a 0.3 MB/s
+    // link, three levels spent ~7.8 s measuring a transfer that takes ~5 s. The
+    // measurement has to be small enough that being wrong about it is cheaper than
+    // finding out — so it is capped at a fraction of the object as well.
+    //
+    // The floor keeps the sample large enough to time: below ~256 KiB the
+    // measurement is mostly setup noise, which would make the search's decisions
+    // arbitrary rather than merely imprecise.
+    const SLAB: u64 = 768 * 1024;
+    const MIN_SLAB: u64 = 256 * 1024;
+    // At most an eighth of the object per level, so a full search cannot consume
+    // more of the transfer than it can plausibly save.
+    let total = SLAB.min(size / 8).max(MIN_SLAB);
+    if size <= total * 2 {
         // Too small to probe: the measurement would cover most of the object, and on a
         // small object the answer is one connection anyway.
         return (1, 0.05, Vec::new());
@@ -1005,8 +1036,8 @@ async fn learn_concurrency(
     let mut base = 0u64;
     let mut filled: Vec<(u64, u64)> = Vec::new();
     loop {
-        let slice = TOTAL / level as u64;
-        if base + TOTAL >= size {
+        let slice = total / level as u64;
+        if base + total >= size {
             break;
         }
         let t0 = Instant::now();
@@ -1043,7 +1074,7 @@ async fn learn_concurrency(
         for x in &per {
             de.observe((x - slice as f64 / rate.max(1.0)).max(1e-3));
         }
-        base += TOTAL;
+        base += total;
         p.event(
             1,
             &format!(
@@ -1200,10 +1231,37 @@ async fn verify_and_repair_chunks(
     ))
 }
 
+/// Hash a file in fixed-size chunks.
+///
+/// # Why not `std::fs::read`
+///
+/// Reading the whole object into a `Vec` to hash it makes peak memory scale with the
+/// object, which is the one thing a downloader must never do: the transfer itself
+/// writes at exact offsets and holds no reassembly buffer, so the digest was the only
+/// part of the program that could not fetch a file larger than RAM.
+///
+/// Measured on a 121.7 MiB GitHub release asset: peak RSS 127 MB against curl's
+/// 14 MB and wget's 11 MB. The signature that identified it was that hydra's FAILED
+/// runs used 11 MB — a failed transfer skips the digest, so the footprint was
+/// entirely this function. A 1 GiB download would have needed 1 GiB of resident
+/// memory, on a tool intended to run on servers.
+///
+/// 1 MiB chunks: large enough that syscall overhead is negligible against disk
+/// throughput, small enough to stay in L2 and to keep the resident cost constant
+/// regardless of object size.
 fn sha256_file(path: &Path) -> Option<String> {
-    let data = std::fs::read(path).ok()?;
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
     let mut h = Sha256::new();
-    h.update(&data);
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => h.update(&buf[..n]),
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
     Some(hya_net::digest::to_lower_hex(&h.finalize()))
 }
 
@@ -1720,7 +1778,30 @@ pub async fn run(job: Job) -> Outcome {
     // `--adaptive` remains available to ask for measurement WITH a ceiling; the
     // probe is still what runs when no number is given at all.
     let (n_conns, delta, probe_filled) = match job.conns {
+        // An explicit `-x N` is honoured as given — but `--adaptive` asks for the
+        // measurement to run anyway, with N as a CEILING rather than a target.
+        //
+        // That distinction is what the measured slowdown needed. On four of five
+        // live objects a fixed multi-connection setting was slower than a single
+        // stream, because the access link saturated at one or two connections and
+        // every further connection added setup cost against a capacity that was
+        // already spoken for. The search that finds this is `Admission`, and it
+        // only ever ran when `-x` was omitted — which no benchmark does.
+        // `--adaptive` no longer probes. It opens the full connection budget but
+        // starts the scheduler with only ONE active, and the in-band ramp
+        // (`hya_core::ramp`) admits the rest while the aggregate rate says they pay
+        // for themselves. Measuring on the real transfer rather than on sample
+        // transfers is what removes the probe's cost: on a 3.15 MB object over a
+        // live path the climbing probe made the transfer 1.96x slower than not
+        // probing (18.2 s vs 8.3 s median, paired over 9 interleaved reps,
+        // p = 0.004), because the samples are paid for before the transfer starts
+        // and every byte they move is re-fetched work.
         Some(n) => (job.polite.allow(n), 0.05, Vec::new()),
+        // `--no-probe` with no `-x` at all: the user has asked not to measure and
+        // named no number, so take one connection rather than probing anyway.
+        // Guessing a multi-connection default here is what produced transfers
+        // slower than a single stream on a saturated link.
+        None if !job.probe => (job.polite.allow(1), 0.05, Vec::new()),
         _ => {
             // The probe writes into the same file the transfer will use, so it must
             // exist first. `run_transfer_observed` opens it again by path; both open
@@ -1737,11 +1818,20 @@ pub async fn run(job: Job) -> Outcome {
             match probe_sink {
                 Ok(sk) => {
                     p.phase("measuring useful connection count");
+                    // The search's ceiling: whatever `-x` asked for when it was
+                    // given (so `--adaptive -x 8` means "up to 8, and measure how
+                    // many of those are useful"), otherwise the politeness limit.
+                    // Taking the min of both is what keeps `--adaptive` from
+                    // exceeding a limit the user set for a reason.
+                    let ceiling = match job.conns {
+                        Some(n) => n.min(job.polite.per_host).max(1),
+                        None => job.polite.per_host,
+                    };
                     let (n, d, filled) = learn_concurrency(
                         &conn,
                         &usable[0].1,
                         size,
-                        job.polite.per_host,
+                        ceiling,
                         job.tries,
                         job.timeout_s,
                         &sk,
@@ -1827,6 +1917,13 @@ pub async fn run(job: Job) -> Outcome {
     let t_transfer = Instant::now();
     let mut sched =
         Scheduler::new(size, sources, &per).with_stall_timeout((12.0 * delta).clamp(4.0, 45.0));
+    // `--adaptive`: open the budget but start with one connection active and let the
+    // in-band ramp earn the rest. Without this the scheduler runs every connection
+    // from the first tick, which is the fixed-concurrency behaviour `-x` already
+    // provides.
+    if job.adaptive && n_conns > 1 {
+        sched.set_active_limit(1);
+    }
     // Everything outside the requested range is marked held so the scheduler
     // never issues a request for it.
     if partial {
@@ -1874,6 +1971,23 @@ pub async fn run(job: Job) -> Outcome {
     // before the first observation tick and never updates this at all.
     let progress = Arc::new(std::sync::atomic::AtomicU64::new(sched.bytes_held()));
     let progress_obs = progress.clone();
+
+    // Peak concurrency the transfer actually ran at, sampled from the scheduler.
+    // Seeded from its current active limit so a transfer that completes before the
+    // first observation tick still reports a real number.
+    let used_conns = Arc::new(std::sync::atomic::AtomicUsize::new(
+        sched.active_limit().min(sched.n_conns()),
+    ));
+    let used_conns_obs = used_conns.clone();
+    // The limit the transfer FINISHED at, as opposed to the peak it explored.
+    let settled_conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let settled_conns_obs = settled_conns.clone();
+
+    // Requests the scheduler actually issued, sampled live. Needed because a failed
+    // transfer returns no count, and reporting zero there printed a request count
+    // the run did not measure.
+    let observed_requests = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let observed_requests_obs = observed_requests.clone();
 
     // Checkpoint what is already held BEFORE the first byte of the transfer.
     //
@@ -1940,6 +2054,34 @@ pub async fn run(job: Job) -> Outcome {
             // every tick and the last tick before completion is not necessarily
             // the highest, so a bare store can report less than actually arrived.
             progress_obs.fetch_max(sc.bytes_held(), std::sync::atomic::Ordering::Relaxed);
+            // The concurrency the transfer ACTUALLY reached. Under `--adaptive` the
+            // in-band ramp starts at one connection and admits more only while they
+            // pay, so the budget is a ceiling and reporting it would be reporting a
+            // number the run did not use — the same defect that made
+            // `--max-total-connections 2 -x 8` claim eight.
+            observed_requests_obs.fetch_max(
+                sc.stats.requests,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            // Two different numbers, and conflating them cost two wrong diagnoses.
+            //
+            // `fetch_max` records the HIGHEST active limit the transfer ever reached.
+            // Under `--adaptive` that is the top of the search, not the answer: the
+            // ramp raises the limit to measure a level and lowers it again when the
+            // level does not pay. Reporting the peak made a correctly-settled search
+            // look like a runaway — traced windows showed it stopping at 2 while the
+            // summary said 4 — and sent the investigation after the ramp logic twice.
+            //
+            // So record both: the peak, for understanding what the search explored,
+            // and the final limit, which is what the transfer actually ran at.
+            used_conns_obs.fetch_max(
+                sc.active_limit().min(sc.n_conns()),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            settled_conns_obs.store(
+                sc.active_limit().min(sc.n_conns()),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             // No resume record under `--no-save`: there is no file to resume INTO,
             // so a sidecar would be a stray file created by the flag that promises
             // to create none. (Caught end-to-end, not by a unit test: the periodic
@@ -2047,10 +2189,29 @@ pub async fn run(job: Job) -> Outcome {
     let elapsed = t_start.elapsed().as_secs_f64();
     drop(limiter);
 
+    // Report WHY a transfer failed, and stop claiming it made no requests.
+    //
+    // `Err(_) => (false, 0)` discarded both the error and the request count, so a
+    // failed 88 MB transfer printed "83.6 MiB in 2m52s (496.7 KiB/s), 0 requests"
+    // — a byte count that contradicted the byte-complete file on disk, a rate
+    // derived from it, and a request count that was not measured but invented. The
+    // "0 requests" was the only clue that the number was fabricated rather than
+    // observed, and it took a reproduction on a real 88 MB object to notice.
+    //
+    // The transfer's own error is the one piece of evidence about what went wrong,
+    // and it was being thrown away at the only point that had it.
+    let transfer_error: Option<String> = res.as_ref().err().map(|e| e.to_string());
     let (ok, requests) = match &res {
         Ok((_, r)) => (true, *r),
-        Err(_) => (false, 0),
+        // The request count is a property of what the scheduler DID, not of
+        // whether it finished. Sampled from the observer, which ran on every tick.
+        Err(_) => (false, observed_requests.load(std::sync::atomic::Ordering::Relaxed)),
     };
+    if let Some(why) = transfer_error.as_deref() {
+        if !job.quiet || job.show_error {
+            eprintln!("hydra: transfer error: {why}");
+        }
+    }
     let counters = Counters {
         requests,
         ..Default::default()
@@ -2318,14 +2479,25 @@ pub async fn run(job: Job) -> Outcome {
     // ranges land out of order, so the file is only correct once complete;
     // emitting partial state to a pipe would hand the consumer bytes in the wrong
     // order. Saying so is better than appearing to stream and corrupting a pipe.
+    //
+    // Copied in fixed-size chunks rather than read into a `Vec` first: the whole point
+    // of `--stdout` is piping, and a pipeline is exactly where buffering the entire
+    // object is least affordable. `std::io::copy` on a 1 GiB download needed 1 GiB
+    // resident; the same defect in the digest cost 127 MB of peak RSS on a 121.7 MiB
+    // object, against curl's 14 MB.
     if job.to_stdout && complete {
-        use std::io::Write as _;
-        match std::fs::read(&out_path) {
-            Ok(bytes) => {
+        match std::fs::File::open(&out_path) {
+            Ok(mut f) => {
                 let mut so = std::io::stdout().lock();
-                let _ = so.write_all(&bytes);
-                let _ = so.flush();
-                let _ = std::fs::remove_file(&out_path);
+                match std::io::copy(&mut f, &mut so) {
+                    Ok(_) => {
+                        use std::io::Write as _;
+                        let _ = so.flush();
+                        drop(f);
+                        let _ = std::fs::remove_file(&out_path);
+                    }
+                    Err(e) => eprintln!("hydra: cannot stream to stdout: {e}"),
+                }
             }
             Err(e) => eprintln!("hydra: cannot stream to stdout: {e}"),
         }
@@ -2465,7 +2637,15 @@ pub async fn run(job: Job) -> Outcome {
             0.0
         },
         requests,
-        connections: n_conns,
+        // What the transfer actually ran at, not the budget it was allowed.
+        // Report what the transfer RAN at, not the peak the search explored: a number
+        // the run did not use is not a measurement. `peak_connections` carries the
+        // exploration separately for anyone diagnosing the search itself.
+        connections: settled_conns
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1)
+            .min(used_conns.load(std::sync::atomic::Ordering::Relaxed).max(1)),
+        peak_connections: used_conns.load(std::sync::atomic::Ordering::Relaxed).max(1),
         delta_s: delta,
         sha256: digest,
         checksum_ok,

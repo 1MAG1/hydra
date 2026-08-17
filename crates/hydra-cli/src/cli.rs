@@ -466,6 +466,18 @@ pub struct Cli {
     #[arg(long = "no-probe")]
     pub no_probe: bool,
 
+    /// Measure the useful connection count even when -x is given, treating -x as
+    /// a ceiling rather than a target.
+    ///
+    /// Without this, `-x N` opens N connections whether or not they help. On a
+    /// saturated access link they do not: each one adds a request setup against
+    /// capacity that is already committed, and a fixed multi-connection setting
+    /// measured SLOWER than a single stream on four of five live objects. With
+    /// this, the marginal-goodput search runs and stops where adding a connection
+    /// stops paying, never exceeding N.
+    #[arg(long = "adaptive", conflicts_with = "no_probe")]
+    pub adaptive: bool,
+
     /// Command-line dialect: native, wget, or curl. Also inferred from the name
     /// the binary is invoked as.
     #[arg(long = "compat", value_name = "DIALECT")]
@@ -909,6 +921,40 @@ mod tests {
         assert_eq!(b.requested_conns(), Some(3));
         let c = Cli::try_parse_from(["hydra", "http://x/f"]).unwrap();
         assert_eq!(c.requested_conns(), None, "absent means measure it");
+    }
+
+    /// The three concurrency modes must be distinguishable from the parsed args.
+    ///
+    /// This project's recurring defect is a flag that parses, exits cleanly, and
+    /// does nothing — `--max-total-connections`, `-4`/`-6`, `--show-error`,
+    /// `--logfile` and `--max-redirs` were all found that way. `--no-probe` was
+    /// another: it set a `Job` field that carried `#[allow(dead_code)]` and was
+    /// never read, so taking `-x` on faith was the only behaviour available and
+    /// `--adaptive` was referenced in a comment as though it existed.
+    #[test]
+    fn the_three_concurrency_modes_are_distinguishable() {
+        // Default: no number given, so the useful count is measured.
+        let a = Cli::try_parse_from(["hydra", "http://x/f"]).unwrap();
+        assert_eq!(a.requested_conns(), None);
+        assert!(!a.no_probe && !a.adaptive);
+
+        // Pinned: honour the number exactly, for a reproduction or a comparison
+        // against another client.
+        let b = Cli::try_parse_from(["hydra", "-x", "8", "http://x/f"]).unwrap();
+        assert_eq!(b.requested_conns(), Some(8));
+        assert!(!b.adaptive, "-x alone must not request measurement");
+
+        // Ceiling: measure, but never exceed the number.
+        let c = Cli::try_parse_from(["hydra", "--adaptive", "-x", "8", "http://x/f"]).unwrap();
+        assert_eq!(c.requested_conns(), Some(8));
+        assert!(c.adaptive);
+
+        // Asking to measure and not to measure at once is a usage error, not a
+        // silent precedence rule.
+        assert!(
+            Cli::try_parse_from(["hydra", "--adaptive", "--no-probe", "http://x/f"]).is_err(),
+            "--adaptive and --no-probe contradict each other and must be refused"
+        );
     }
 
     /// A malformed `--checksum` must be rejected as a bad ARGUMENT, not reported
