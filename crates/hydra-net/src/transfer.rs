@@ -146,10 +146,47 @@ pub async fn run_transfer_into<C: Connector>(
     conns_per_target: &[usize],
     size: u64,
     sink: Arc<SparseSink>,
+    sched: Scheduler,
+    tick_ms: u64,
+    observe: &mut (dyn FnMut(&Scheduler, u64) + Send),
+    pace: Pace,
+) -> io::Result<(f64, u64)> {
+    run_transfer_cancellable(
+        connector,
+        targets,
+        conns_per_target,
+        size,
+        sink,
+        sched,
+        tick_ms,
+        observe,
+        pace,
+        None,
+    )
+    .await
+}
+
+/// As [`run_transfer_into`], with an external stop signal.
+///
+/// This is the GUI's Pause/Cancel: setting `cancel` makes the loop abort every
+/// in-flight fetch and return `ErrorKind::Interrupted` at the next tick, so the
+/// caller gets the socket teardown the scheduler's own `Action::Cancel` path
+/// performs — not detached tasks streaming on. Bytes already written through
+/// the sink stay valid at their offsets; a later run resumes by `mark_done`.
+/// `None` is exactly the previous behaviour, which is how every existing entry
+/// point calls it.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_transfer_cancellable<C: Connector>(
+    connector: Arc<C>,
+    targets: Vec<Target>,
+    conns_per_target: &[usize],
+    size: u64,
+    sink: Arc<SparseSink>,
     mut sched: Scheduler,
     tick_ms: u64,
     observe: &mut (dyn FnMut(&Scheduler, u64) + Send),
     pace: Pace,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> io::Result<(f64, u64)> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Arrival>();
     let t0 = Instant::now();
@@ -264,6 +301,21 @@ pub async fn run_transfer_into<C: Connector>(
     let mut ramp_last_held: u64 = sched.bytes_held();
 
     loop {
+        // 0. external stop. Checked before arrivals are drained so a cancel
+        // observed mid-tick still credits the bytes below it; abort teardown
+        // mirrors the watchdog path.
+        if let Some(c) = &cancel {
+            if c.load(std::sync::atomic::Ordering::Relaxed) {
+                // Report the final credited state so the caller's last snapshot
+                // (held ranges, bytes done) includes everything on disk.
+                observe(&sched, sched.bytes_held());
+                for (_, h) in inflight.drain() {
+                    h.abort();
+                }
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+        }
+
         // 1. drain arrivals into the scheduler
         while let Ok(a) = rx.try_recv() {
             sched.on_bytes_at(a.conn, a.off, a.bytes, a.at, a.dt);

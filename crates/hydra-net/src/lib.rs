@@ -259,8 +259,7 @@ impl Watermark {
     /// connection may already hold, which is a coverage violation, not an
     /// optimisation.
     pub fn shrink_to(&self, hi: u64) {
-        self.0
-            .fetch_min(hi, std::sync::atomic::Ordering::Relaxed);
+        self.0.fetch_min(hi, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -331,7 +330,8 @@ pub use http::{
 };
 pub use sink::SparseSink;
 pub use transfer::{
-    run_transfer, run_transfer_into, run_transfer_observed, run_transfer_paced, run_transfer_tick,
+    run_transfer, run_transfer_cancellable, run_transfer_into, run_transfer_observed,
+    run_transfer_paced, run_transfer_tick,
 };
 
 pub use socks::{Proxy, ProxyKind};
