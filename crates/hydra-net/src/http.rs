@@ -810,8 +810,7 @@ pub(crate) async fn fetch_range<C: Connector>(
         .map(|v| v.to_ascii_lowercase().contains("chunked"))
         .unwrap_or(false);
     if chunked {
-        return stream_chunked(s, conn, lo, bound, &head[body_start..], sink, tx, t0, pace)
-            .await;
+        return stream_chunked(s, conn, lo, bound, &head[body_start..], sink, tx, t0, pace).await;
     }
 
     let mut off = lo;

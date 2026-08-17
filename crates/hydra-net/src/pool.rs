@@ -207,7 +207,11 @@ mod tests {
         assert_eq!(p.take(&t("a", 8080)), None, "different port");
         let mut tls = t("a", 80);
         tls.tls = true;
-        assert_eq!(p.take(&tls), None, "plaintext stream offered to a TLS request");
+        assert_eq!(
+            p.take(&tls),
+            None,
+            "plaintext stream offered to a TLS request"
+        );
         let mut proxied = t("a", 80);
         proxied.origin = Some("elsewhere:443".to_string());
         assert_eq!(

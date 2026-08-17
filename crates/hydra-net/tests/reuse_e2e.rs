@@ -94,7 +94,11 @@ async fn a_keep_alive_origin_serves_several_ranges_per_connection() {
     // next response, these bytes would be shifted and wrong.
     {
         let data = std::fs::read(&outs).expect("output readable");
-        assert_eq!(data.len() as u64, SIZE, "output must be the object's length");
+        assert_eq!(
+            data.len() as u64,
+            SIZE,
+            "output must be the object's length"
+        );
         let mut checked = 0u64;
         for k in 0..4u64 {
             let lo = k * 2 * hole;
