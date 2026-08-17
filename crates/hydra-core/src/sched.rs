@@ -34,6 +34,31 @@ pub enum Action {
     Request { conn: usize, range: Range },
     /// Stop reading this connection's current response; its range was reclaimed.
     Cancel { conn: usize },
+    /// The far end of this connection's in-flight range moved DOWN to `hi`: a
+    /// repair handed the tail `[hi, old_hi)` to another connection. Stop reading
+    /// at `hi`.
+    ///
+    /// # Why this action has to exist
+    ///
+    /// The whole claim of this scheduler is that shrinking a laggard's range is
+    /// free, because an HTTP range request names both ends and the far end is
+    /// enforced by the client. That is true of the protocol. It was NOT true of
+    /// this implementation: the repair below moved `conns[vi].range` and emitted
+    /// nothing, while the transport's fetch loop runs `while off < hi` against
+    /// the `hi` it captured when the request was spawned. The victim therefore
+    /// kept pulling the bytes it had just been relieved of, at the same time as
+    /// the taker pulled them, over the same bottleneck.
+    ///
+    /// So each repair cost roughly one stolen span of duplicated traffic instead
+    /// of nothing, and since the duplicate traffic slowed the honest
+    /// connections, it manufactured the very divergence that triggers a repair.
+    /// That positive feedback loop is the measured "repair storm": at n=8 on a
+    /// stationary 5.3 MB transfer, 32-49 repairs where the correct count is 0,
+    /// with in-run throughput decaying 439 -> 306 KiB/s.
+    ///
+    /// A caller that ignores this action is not merely leaving an optimisation
+    /// on the table; it reintroduces the storm.
+    Shrink { conn: usize, hi: u64 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -171,8 +196,18 @@ pub struct Scheduler {
     conns: Vec<Conn>,
     sources: Vec<Source>,
     /// Repair deadband scale; theta = scale * sqrt(delta * T_rem / n).
+    /// Reused index buffer for the per-tick stalled-connection scan.
+    ///
+    /// The scan runs 50 times a second at the default tick and allocated a fresh `Vec`
+    /// each time, to hold at most `n_conns` indices. Reusing one buffer costs a field
+    /// and removes the allocation from the hot loop.
+    scratch_idx: Vec<usize>,
     theta_scale: f64,
     stall_timeout: f64,
+    /// How many connections may hold work at once. Adjustable mid-transfer so the
+    /// concurrency search can run on the real transfer rather than on probe
+    /// traffic; see `set_active_limit`.
+    active_limit: usize,
     /// When false, victim selection ignores detector health and ranks purely by
     /// projected ETA (the pre-detector behaviour). Exists so the detector's
     /// contribution can be A/B measured rather than assumed.
@@ -195,12 +230,105 @@ impl Scheduler {
             held: 0,
             conns,
             sources,
+            scratch_idx: Vec::new(),
             theta_scale: 1.0,
             stall_timeout: 1.0,
             health_ranking: true,
+            // Default: every connection active, so nothing changes for callers that
+            // do not opt into the ramp.
+            active_limit: usize::MAX,
             started: false,
             stats: Stats::default(),
         }
+    }
+
+    /// Cap how many connections may hold work at once, adjustable mid-transfer.
+    ///
+    /// # Why the concurrency search belongs here and not in a probe
+    ///
+    /// Finding the useful connection count by *probing* — fetch a slab with one
+    /// connection, then with two, then three, comparing goodput — is the standard
+    /// approach and it is what this client did. HARP (Kim, Yildirim, Kosar, SC'16)
+    /// names the cost directly: probing "may bring too much probing overhead",
+    /// because the samples are extra transfers whose price is paid before the real
+    /// one starts. Measured here on a 3.15 MB object over a live path, the climbing
+    /// probe made the transfer **1.96x slower** than not probing at all
+    /// (paired over 9 interleaved reps, p = 0.004) — the search cost more than the
+    /// concurrency it found could save.
+    ///
+    /// The probe is only necessary because concurrency is fixed when the transfer
+    /// starts. Make it adjustable and the same search runs on the *real* transfer:
+    /// start at one connection, measure aggregate goodput over a short window,
+    /// admit another connection while the marginal gain justifies it, and stop.
+    /// Every byte moved during the search is a byte of the object, so the search
+    /// is free — the object had to be fetched anyway. What HARP buys with a
+    /// historical corpus, this buys by putting the measurement in-band.
+    ///
+    /// Connections above the limit stay dormant: they are not given work and open
+    /// no socket. Raising the limit lets the next tick hand them work through the
+    /// ordinary work-conserving path, so no new admission machinery is needed.
+    pub fn set_active_limit(&mut self, n: usize) {
+        self.active_limit = n.clamp(1, self.conns.len().max(1));
+    }
+
+    /// The current concurrency cap.
+    pub fn active_limit(&self) -> usize {
+        self.active_limit
+    }
+
+    /// When every source is deliberately suspended, the earliest time one returns.
+    ///
+    /// `None` means at least one source is usable now, so a lack of progress is a
+    /// genuine stall. `Some(t)` means the scheduler has *chosen* to pause every
+    /// source until `t` — nothing can move before then, and that silence is planned
+    /// rather than pathological.
+    ///
+    /// # Why a caller must consult this
+    ///
+    /// The transport's no-progress watchdog exists to fail a transfer where nothing
+    /// will ever happen again. A scheduled retry is the opposite of that, and
+    /// conflating the two is not hypothetical: with one source (the common case —
+    /// one URL, one CDN), `stall_timeout` 4.0s gives a watchdog of
+    /// `4 * (4.0 + delta)` = 16.2s, while five consecutive stalls suspend that sole
+    /// source for `min(4.0 * 2^3, 30)` = 30s. The transfer is then killed at 16.2s
+    /// for failing to make progress it had itself forbidden.
+    ///
+    /// Measured consequence on a 121.7 MiB GitHub release asset: 4 of 8 runs at
+    /// `-x 8`/`-x 16` aborted with a digest mismatch, three of them having already
+    /// received 126.9-127.0 MB of 127.6 MB — 99.6% complete, killed during a
+    /// deliberate backoff over the last half-megabyte.
+    pub fn all_sources_suspended_until(&self, now: f64) -> Option<f64> {
+        let mut earliest = f64::INFINITY;
+        for s in &self.sources {
+            if s.suspended_until <= now {
+                return None;
+            }
+            earliest = earliest.min(s.suspended_until);
+        }
+        if earliest.is_finite() {
+            Some(earliest)
+        } else {
+            None
+        }
+    }
+
+    /// Whether any work is still unclaimed by any connection.
+    ///
+    /// Exposed so the ramp's contract is testable: while concurrency is below the
+    /// budget, work must remain here for connections admitted later to pick up.
+    pub fn unassigned_is_empty(&self) -> bool {
+        self.unassigned.is_empty()
+    }
+
+    /// How many connections currently hold a range.
+    pub fn busy_conns(&self) -> usize {
+        self.conns.iter().filter(|c| c.busy()).count()
+    }
+
+    /// Start with only `n` connections active, ramping up from there.
+    pub fn with_active_limit(mut self, n: usize) -> Self {
+        self.set_active_limit(n);
+        self
     }
 
     pub fn with_theta_scale(mut self, s: f64) -> Self {
@@ -480,15 +608,22 @@ impl Scheduler {
         }
 
         // ---- liveness path 1: reclaim stalled connections -----------------
-        let stalled: Vec<usize> = (0..self.conns.len())
-            .filter(|&j| {
-                let c = &self.conns[j];
-                c.busy()
-                    && now >= c.setup_end
-                    && (now - c.last_progress.max(c.setup_end)) > self.stall_timeout
-            })
-            .collect();
-        for j in stalled {
+        //
+        // Collected into a reused buffer rather than a fresh `Vec` each tick. The
+        // indices cannot be reclaimed in the same pass that finds them — `reclaim`
+        // takes `&mut self` while the filter borrows `self.conns` — so the two-phase
+        // shape stays, but the allocation does not have to. `std::mem::take` moves the
+        // buffer out so the loop below can hold it while `self` is borrowed mutably,
+        // and it is put back at the end for the next tick.
+        let mut stalled = std::mem::take(&mut self.scratch_idx);
+        stalled.clear();
+        stalled.extend((0..self.conns.len()).filter(|&j| {
+            let c = &self.conns[j];
+            c.busy()
+                && now >= c.setup_end
+                && (now - c.last_progress.max(c.setup_end)) > self.stall_timeout
+        }));
+        for j in stalled.drain(..) {
             self.reclaim(j);
             acts.push(Action::Cancel { conn: j });
             // A source that keeps stalling must be suspended, not merely
@@ -498,7 +633,21 @@ impl Scheduler {
             self.sources[src].consecutive_stalls += 1;
             let k = self.sources[src].consecutive_stalls;
             if k >= 2 {
-                let backoff = (self.stall_timeout * (1u64 << (k - 2).min(5)) as f64).min(30.0);
+                let mut backoff = (self.stall_timeout * (1u64 << (k - 2).min(5)) as f64).min(30.0);
+                // Never suspend the LAST usable source for longer than a caller's
+                // watchdog will wait. Exponential backoff is right when there is
+                // somewhere else to send the work; when this is the only source it
+                // is a self-inflicted outage, and a transport that fails on silence
+                // cannot tell it apart from the source being gone.
+                //
+                // Callers should also consult `all_sources_suspended_until` so a
+                // planned pause is not charged against a no-progress deadline. This
+                // clamp is the second line of defence: it keeps the invariant local
+                // to the scheduler, so a caller that does not know about deliberate
+                // suspension still cannot be starved by it.
+                if self.sources.len() == 1 {
+                    backoff = backoff.min(self.stall_timeout.max(1.0));
+                }
                 self.sources[src].suspended_until = now + backoff;
             }
         }
@@ -559,18 +708,99 @@ impl Scheduler {
             if x <= STEAL_QUANTUM as f64 {
                 break;
             }
+
+            // ---- does this repair actually pay for itself? -------------------
+            //
+            // The equalisation above solves `(left - x)/rv == t_eta + delta + x/rt`,
+            // which treats `rt` as capacity that `x` bytes can be moved ONTO. That
+            // is true when the connections have independent bottlenecks — separate
+            // mirrors, separate paths. It is false in the case that dominates real
+            // use: several connections to one origin, sharing one bottleneck. There
+            // the taker's rate is not spare capacity, it is a share of the same
+            // capacity the victim is using, so moving bytes across does not make
+            // them arrive faster. It only re-labels which connection carries them,
+            // and charges a setup for the privilege.
+            //
+            // Worse, the per-connection rate divergence that triggers the repair is
+            // largely a property of the PATH, not of the assignment: flows sharing
+            // a bottleneck settle at persistently unequal shares (roughly 1/RTT,
+            // with cwnd history making the asymmetry outlive any round trip). A
+            // repair cannot move that. So the divergence survives the repair, and
+            // re-triggers it.
+            //
+            // The test: compare the makespan now against the makespan after, where
+            // "after" charges the setup and credits only the improvement in the
+            // WORST finishing time — because the makespan is a max, not a sum, and
+            // improving anything other than the laggard buys nothing.
+            let makespan_now = self
+                .conns
+                .iter()
+                .map(|c| c.eta())
+                .fold(0.0f64, |a, b| if b > a { b } else { a });
+            // The victim keeps `left - x` at its own rate; the taker takes on `x`
+            // after paying `delta`, on top of what it already owes.
+            let v_after = if rv > 0.0 {
+                (left - x) / rv
+            } else {
+                f64::INFINITY
+            };
+            let t_after = if rt > 0.0 {
+                t_eta + delta + x / rt
+            } else {
+                f64::INFINITY
+            };
+            // Every other connection is unaffected by this particular exchange.
+            let others = self
+                .conns
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != vi && *j != ti)
+                .map(|(_, c)| c.eta())
+                .fold(0.0f64, |a, b| if b > a { b } else { a });
+            let makespan_after = v_after.max(t_after).max(others);
+            // Require the gain to exceed the setup it costs, not merely to be
+            // positive: a repair that improves the projected makespan by less than
+            // one delta has not accounted for its own price. `theta` above is the
+            // hysteresis that stops oscillation; this is the profitability test,
+            // and both are needed — the first keeps jitter from triggering repair,
+            // the second keeps a real-but-unprofitable divergence from doing so.
+            // Explicit ordering, matching the theta test above: an unmeasured rate
+            // makes this difference NaN, and a NaN must REFUSE the repair rather
+            // than fall through either way. Acting on an unmeasured quantity is
+            // strictly a loss, because the setup cost is certain and the gain is not.
+            if !matches!(
+                (makespan_now - makespan_after).partial_cmp(&delta),
+                Some(core::cmp::Ordering::Greater)
+            ) {
+                break;
+            }
+
             let x = x as u64;
             let new_hi = vr.hi - x;
             let stolen = Range::new(new_hi, vr.hi);
-            // ZERO-COST client-side shrink: the victim's target end moves; no
-            // cancellation is sent and the server is never told.
+            // Client-side shrink: the victim's target end moves and the server is
+            // never told. Free on the WIRE — no cancellation, no round trip — but
+            // only if the local fetch loop is told, which is what `Shrink` does.
+            // Without it the victim streams the stolen span anyway; see the
+            // `Action::Shrink` docs for what that costs.
             self.conns[vi].range = Some(Range::new(vr.lo, new_hi));
             self.conns[ti].queued = Some(stolen);
+            acts.push(Action::Shrink {
+                conn: vi,
+                hi: new_hi,
+            });
             self.stats.repairs += 1;
         }
 
         // ---- work-conserving assignment (Lemma 2) -------------------------
-        for j in 0..self.conns.len() {
+        //
+        // A connection above the active limit is DORMANT: it is skipped here, so it
+        // is never given work and never opens a socket. This is the whole mechanism
+        // behind the in-band concurrency ramp — raising the limit makes the next
+        // tick admit the connection through this ordinary path, and lowering it
+        // lets an already-busy connection finish its range and then go quiet, with
+        // no cancellation and no wasted bytes.
+        for j in 0..self.conns.len().min(self.active_limit) {
             if self.conns[j].busy() || now < self.conns[j].setup_end {
                 continue;
             }
@@ -578,20 +808,82 @@ impl Scheduler {
             if now < self.sources[src].suspended_until {
                 continue;
             }
-            if let Some(r) = self.unassigned.take_front(u64::MAX) {
+            // How much to hand this connection.
+            //
+            // `u64::MAX` — take everything — is right once concurrency has settled:
+            // maximal ranges mean the fewest requests, which is the whole point of
+            // range scheduling. It is wrong while the ramp is still growing, because
+            // the first idle connection would swallow the reserve that connections
+            // admitted later are supposed to pick up, and they would be left to
+            // STEAL from it. That is a repair per admission, and the repair
+            // undoes a split that had just been made for no reason.
+            //
+            // So while ramping, hand out a budget-sized share and leave the rest.
+            // The cost of being wrong in this direction is one extra request later —
+            // now nearly free on a pooled connection — against one repair per
+            // admitted connection the other way.
+            let want = if self.active_limit < self.conns.len() {
+                let remaining = self.unassigned.total();
+                let share = remaining / self.conns.len().max(1) as u64;
+                share.max(STEAL_QUANTUM * 4)
+            } else {
+                u64::MAX
+            };
+            if let Some(r) = self.unassigned.take_front(want) {
                 self.start(j, r, now);
                 acts.push(Action::Request { conn: j, range: r });
                 continue;
             }
             // Nothing unassigned: steal from the worst laggard.
+            //
+            // This is steal-half (aria2's policy), and it fires on a DIFFERENT
+            // trigger from the divergence repair above: not "the finishes have
+            // diverged" but "a connection has gone idle and there is nothing left
+            // to give it". Splitting the laggard's remainder down the middle is the
+            // right move when the idle connection has capacity the laggard cannot
+            // use. It is churn when they share one bottleneck — the same span is
+            // re-requested, a setup is paid, and the aggregate rate is unchanged
+            // because it was never the assignment that limited it.
+            //
+            // So the same profitability test applies. An idle connection is not a
+            // reason to move work; it is a reason to ASK whether moving work helps.
             if let Some(vi) = self.worst_busy(j) {
                 let vr = self.conns[vi].range.unwrap();
                 let left = vr.hi.saturating_sub(self.conns[vi].pos);
                 let half = left / 2;
-                if half > STEAL_QUANTUM {
+                // Will the taker, paying one setup, actually finish this half
+                // sooner than the victim would have finished the whole remainder?
+                // With `rt` unknown (a connection that has just gone idle may have
+                // no estimate yet) fall back to the victim's own rate, which makes
+                // the test neutral rather than optimistic.
+                let rv = self.conns[vi].rate_est;
+                let rt = if self.conns[j].rate_est > 0.0 {
+                    self.conns[j].rate_est
+                } else {
+                    rv
+                };
+                let delta = self.sources[self.conns[j].source].delta_est;
+                let worth_it = if rv <= 0.0 {
+                    // The victim is delivering nothing measurable: anything is better.
+                    true
+                } else if rt <= 0.0 {
+                    false
+                } else {
+                    let before = left as f64 / rv;
+                    let after = (half as f64 / rv).max(delta + half as f64 / rt);
+                    before - after > delta
+                };
+                if half > STEAL_QUANTUM && worth_it {
                     let new_hi = vr.hi - half;
                     self.conns[vi].range = Some(Range::new(vr.lo, new_hi));
                     let stolen = Range::new(new_hi, vr.hi);
+                    // Same shrink discipline as the divergence repair above: the
+                    // victim must be told its far end moved, or it streams the
+                    // half we just handed away.
+                    acts.push(Action::Shrink {
+                        conn: vi,
+                        hi: new_hi,
+                    });
                     self.start(j, stolen, now);
                     acts.push(Action::Request {
                         conn: j,
@@ -604,6 +896,10 @@ impl Scheduler {
         }
 
         self.stats.bytes_held = self.held;
+        // Hand the scratch buffer back so its capacity survives to the next tick.
+        // Without this the `mem::take` above would leave an empty Vec in the field and
+        // the next tick would allocate again — the reuse would be nominal only.
+        self.scratch_idx = stalled;
         acts
     }
 
@@ -620,13 +916,20 @@ impl Scheduler {
 
     fn initial_split(&mut self, now: f64, acts: &mut Vec<Action>) {
         // Maximal ranges, proportional to rate estimate where known, else equal.
-        let n = self.conns.len();
+        //
+        // Only the ACTIVE prefix takes part. With the ramp enabled the transfer
+        // opens one connection, and the rest are admitted by `set_active_limit` as
+        // the in-band search finds them worth their setup cost. Splitting the
+        // object across connections that will not run would strand those bytes in
+        // a quota nobody fetches.
+        let n = self.conns.len().min(self.active_limit);
         if n == 0 || self.size == 0 {
             return;
         }
         let weights: Vec<f64> = self
             .conns
             .iter()
+            .take(n)
             .map(|c| {
                 let g = self.sources[c.source].gamma_est;
                 if g > 0.0 {
@@ -652,14 +955,35 @@ impl Scheduler {
             return;
         }
         // Per-connection byte quotas, proportional to rate estimate.
+        //
+        // Divided over the FULL connection budget, not just the active prefix, and
+        // this matters specifically when the ramp is running. With one connection
+        // active, dividing by the active count alone hands that connection the
+        // entire object — so a connection admitted later finds the unassigned set
+        // empty and its only route to work is to STEAL, which pays a repair to
+        // undo a split that should never have been made. Measured cost of getting
+        // this wrong: every ramped transfer of a 3.15 MB object took ~21 s against
+        // 6.3 s for fixed concurrency, and several were reported as failures
+        // despite delivering byte-exact files.
+        //
+        // Quotas over the full budget leave the remainder UNASSIGNED, which is
+        // exactly where a newly admitted connection takes work from through
+        // ordinary work-conserving assignment — no repair, no steal, no duplicate
+        // request. If the ramp never grows, nothing is lost: the active connection
+        // finishes its quota and work-conserving assignment gives it the next
+        // piece, which connection reuse now makes nearly free.
+        let budget = self.conns.len().max(1);
         let mut quota: Vec<u64> = weights
             .iter()
-            .map(|w| ((w / total) * avail as f64) as u64)
+            .map(|w| ((w / total) * (avail as f64 / budget as f64) * n as f64) as u64)
             .collect();
-        // Rounding must not strand bytes: give the remainder to the last taker.
-        let assigned: u64 = quota.iter().sum();
-        if let Some(last) = quota.last_mut() {
-            *last += avail - assigned;
+        // Rounding must not strand bytes — but only when every connection is
+        // active. While ramping, the unclaimed remainder is deliberate.
+        if n >= budget {
+            let assigned: u64 = quota.iter().sum();
+            if let Some(last) = quota.last_mut() {
+                *last += avail.saturating_sub(assigned);
+            }
         }
 
         // Walk the unassigned ranges, carving each connection's quota out of them
@@ -698,14 +1022,24 @@ impl Scheduler {
         }
     }
 
+    /// The current repair deadband, in seconds. Exposed for measurement.
+    pub fn theta_now(&self, now: f64) -> f64 {
+        self.theta(now)
+    }
+
     fn theta(&self, now: f64) -> f64 {
-        let live: Vec<&Conn> = self
+        // One fold, no allocation. This is called from the tick loop — 50 times a
+        // second at the default 20 ms tick, for the whole transfer — and it collected
+        // a `Vec<&Conn>` on every call only to take its length and sum one field.
+        // Nothing here needs the intermediate collection.
+        let (live_count, agg) = self
             .conns
             .iter()
             .filter(|c| now >= self.sources[c.source].suspended_until)
-            .collect();
-        let n = live.len().max(1) as f64;
-        let agg: f64 = live.iter().map(|c| c.rate_est.max(0.0)).sum();
+            .fold((0usize, 0.0f64), |(k, sum), c| {
+                (k + 1, sum + c.rate_est.max(0.0))
+            });
+        let n = live_count.max(1) as f64;
         let agg = if agg > 0.0 { agg } else { 1.0 };
         let remaining = self.size.saturating_sub(self.held) as f64;
         let t_rem = remaining / agg;
@@ -714,7 +1048,29 @@ impl Scheduler {
             .iter()
             .map(|s| s.delta_est)
             .fold(0.0f64, f64::max);
-        self.theta_scale * (delta * t_rem.max(0.0) / n).sqrt()
+        let band = self.theta_scale * (delta * t_rem.max(0.0) / n).sqrt();
+
+        // ---- floor the deadband at what a repair actually costs --------------
+        //
+        // `sqrt(delta * T_rem / n)` is the right SHAPE — it is the granularity
+        // trade-off — but it is unbounded below, and it approaches zero from two
+        // directions that both make repair a worse idea, not a better one:
+        // `T_rem` shrinks as the transfer finishes, and `n` grows with
+        // concurrency. So the deadband is narrowest exactly when a repair has the
+        // least remaining time to earn its cost back and the most competitors to
+        // pay it against.
+        //
+        // Measured on the shared-bottleneck harness (examples/storm.rs, 12 seeds):
+        // theta reached 0.061-0.081 s against a delta of 0.12 s. Every repair
+        // triggered in that regime spends one full setup to recover a divergence
+        // smaller than the setup — a guaranteed loss, taken deliberately, dozens
+        // of times per transfer.
+        //
+        // A repair cannot be worth making unless the divergence it corrects
+        // exceeds what correcting it costs, so `delta` is the floor. This is not a
+        // tuning constant: it is the break-even point, and it is measured per
+        // source rather than guessed, so a high-RTT path widens it automatically.
+        band.max(delta)
     }
 
     fn pick_victim_taker(&self, now: f64) -> Option<(usize, usize)> {
@@ -725,7 +1081,11 @@ impl Scheduler {
         // the collapse has not yet dragged down.
         let mut victim: Option<(usize, crate::detect::Health, f64)> = None;
         let mut taker: Option<(usize, f64)> = None;
-        for j in 0..self.conns.len() {
+        // Dormant connections (above the active limit) are excluded from BOTH
+        // roles. As taker, admitting one would open a socket the concurrency ramp
+        // has not yet justified — quietly defeating the limit through the repair
+        // path. As victim, one cannot be: it holds no range.
+        for j in 0..self.conns.len().min(self.active_limit) {
             let c = &self.conns[j];
             if now < c.setup_end || now < self.sources[c.source].suspended_until {
                 continue;
@@ -1014,6 +1374,302 @@ mod tests {
         );
         assert!(sc.coverage_holds() && sc.liveness_holds());
     }
+    /// The repair deadband must never fall below what a repair costs.
+    ///
+    /// `theta = scale*sqrt(delta*T_rem/n)` has the right shape but is unbounded
+    /// below, and it approaches zero from two directions that both make repair a
+    /// worse idea: `T_rem` shrinks as the transfer ends, `n` grows with
+    /// concurrency. Measured on the shared-bottleneck harness, theta reached
+    /// 0.061-0.081 s against a delta of 0.12 s — so the scheduler was spending a
+    /// 0.12 s setup to recover a 0.06 s divergence, dozens of times per transfer.
+    #[test]
+    fn the_repair_deadband_never_drops_below_one_setup_cost() {
+        const S: u64 = 8_000_000;
+        const D: f64 = 0.12;
+        let mk = |n: usize| {
+            let sources = vec![Source {
+                gamma_est: 1.4e6 / n as f64,
+                delta_est: D,
+                ..Default::default()
+            }];
+            Scheduler::new(S, sources, &[n])
+        };
+        // Sweep concurrency and progress: both drive theta down.
+        for &n in &[1usize, 2, 4, 8, 16, 64] {
+            let mut sc = mk(n);
+            sc.tick(0.0);
+            let mut now = 0.0;
+            // Deliver most of the object, so T_rem — and with it the unfloored
+            // band — becomes small.
+            for _ in 0..60 {
+                now += 0.05;
+                for j in 0..n {
+                    if sc.conn_range(j).is_some() {
+                        sc.on_bytes(j, 100_000 / n as u64, now, 0.05);
+                    }
+                }
+                sc.tick(now);
+                let th = sc.theta_now(now);
+                assert!(
+                    th >= D - 1e-12,
+                    "theta {th} fell below delta {D} at n={n}, progress {}/{S}: \
+                     the scheduler would pay a full setup to recover a smaller divergence",
+                    sc.bytes_held()
+                );
+            }
+        }
+    }
+
+    /// A stable unequal split settles after ONE equalisation; a collapse still
+    /// gets answered.
+    ///
+    /// These two assertions are one test on purpose. Suppressing spurious repair is
+    /// trivial in isolation — never repair — and that would be a regression, not a
+    /// fix: the mechanism exists for the mirror that dies mid-transfer. The
+    /// property worth pinning is the DISCRIMINATION between the two cases.
+    ///
+    /// # What this test does NOT cover
+    ///
+    /// It does not reproduce the repair storm, and no test in this crate can. The
+    /// storm was a feedback loop between the scheduler and the transport: a repair
+    /// shrank the victim's range, the victim's socket kept streaming the span
+    /// anyway, the duplicate traffic slowed the honest connections, and that
+    /// slowdown re-diverged the finish times into another repair. The core cannot
+    /// see any of that — it has no sockets — so it cannot close the loop. Feeding
+    /// it a stable unequal split, as here, correctly produces exactly one repair
+    /// (equalising a persistent 60/40 asymmetry IS profitable) and then stops.
+    ///
+    /// The loop itself is tested where it lives, against a served-byte count at the
+    /// origin: `hydra-net/tests/shrink_e2e.rs`.
+    #[test]
+    fn a_stable_unequal_split_settles_and_a_collapse_is_still_answered() {
+        const S: u64 = 40_000_000;
+        let src4 = || Source {
+            gamma_est: 2e6,
+            delta_est: 0.12,
+            ..Default::default()
+        };
+
+        // --- stationary: two connections at persistently unequal but stable shares.
+        // This is what flows sharing one bottleneck look like (share ~ 1/RTT), and
+        // no repair can change it — the asymmetry is a property of the path.
+        let mut sc = Scheduler::new(S, vec![src4(), src4()], &[1, 1]);
+        sc.tick(0.0);
+        let mut now = 0.0;
+        for k in 0..60 {
+            now += 0.1;
+            // 60/40 split, with a little jitter, conserving the aggregate.
+            let wobble = if k % 3 == 0 { 12_000 } else { -8_000 };
+            sc.on_bytes(0, (240_000i64 + wobble) as u64, now, 0.1);
+            sc.on_bytes(1, (160_000i64 - wobble) as u64, now, 0.1);
+            sc.tick(now);
+        }
+        // One equalisation is correct here and the scheduler must then SETTLE: the
+        // 60/40 share ratio is a property of the path, so re-equalising cannot
+        // improve it and every further repair is a pure setup cost. 60 ticks over
+        // 6 s of simulated transfer would be ample room for a storm.
+        let stationary_repairs = sc.stats.repairs;
+        assert!(
+            stationary_repairs <= 1,
+            "a stable unequal split provoked {stationary_repairs} repairs over 60 \
+             ticks; one equalisation is profitable, repeated ones only pay setups"
+        );
+
+        // --- collapse: connection 0 drops to 2% and stays there.
+        let mut sc = Scheduler::new(S, vec![src4(), src4()], &[1, 1]);
+        sc.tick(0.0);
+        let mut now = 0.0;
+        for _ in 0..20 {
+            now += 0.1;
+            sc.on_bytes(0, 200_000, now, 0.1);
+            sc.on_bytes(1, 200_000, now, 0.1);
+            sc.tick(now);
+        }
+        let before = sc.stats.repairs;
+        for _ in 0..40 {
+            now += 0.1;
+            sc.on_bytes(0, 4_000, now, 0.1);
+            sc.on_bytes(1, 200_000, now, 0.1);
+            sc.tick(now);
+        }
+        assert!(
+            sc.stats.repairs > before,
+            "a connection collapsing to 2% of its rate produced no repair: the \
+             profitability test is suppressing the case repair exists for"
+        );
+        assert!(sc.coverage_holds() && sc.liveness_holds());
+    }
+
+    /// A sole source must never be suspended past a caller's patience.
+    ///
+    /// Exponential backoff is right when work can go somewhere else. With one source
+    /// it is a self-inflicted outage: nothing can move until the suspension expires,
+    /// and a transport whose watchdog fails on silence cannot distinguish that from
+    /// the source being gone.
+    ///
+    /// The numbers that made this real: `stall_timeout` 4.0s gives the transport a
+    /// no-progress deadline of `4 * (4.0 + delta)` = 16.2s, while five consecutive
+    /// stalls suspended the sole source for `min(4.0 * 2^3, 30)` = 30s. Measured on a
+    /// 121.7 MiB GitHub release asset, 4 of 8 multi-connection runs aborted with a
+    /// digest mismatch — three holding 126.9-127.0 MB of 127.6 MB, killed during a
+    /// deliberate backoff over the final half-megabyte.
+    #[test]
+    fn a_sole_source_is_never_suspended_longer_than_its_stall_timeout() {
+        const S: u64 = 8_000_000;
+        let st = 4.0;
+        let mut sc = Scheduler::new(S, vec![src(4e6)], &[4]).with_stall_timeout(st);
+        sc.tick(0.0);
+
+        // Drive it through many consecutive stalls, which is what escalates backoff.
+        let mut now = 0.0;
+        let mut worst_suspension = 0.0f64;
+        for _ in 0..12 {
+            now += st * 1.5;
+            sc.tick(now);
+            if let Some(until) = sc.all_sources_suspended_until(now) {
+                worst_suspension = worst_suspension.max(until - now);
+            }
+        }
+        assert!(
+            worst_suspension <= st.max(1.0) + 1e-9,
+            "sole source suspended for {worst_suspension:.1}s against a {st:.1}s stall \
+             timeout: a caller's no-progress watchdog will kill the transfer during a \
+             pause the scheduler chose"
+        );
+    }
+
+    /// Ramping concurrency must find work WAITING, not have to steal it.
+    ///
+    /// With the ramp enabled the transfer starts with one connection active. If the
+    /// initial split gives that connection the whole object, every connection
+    /// admitted afterwards finds the unassigned set empty and its only route to
+    /// work is a steal — paying a repair to undo a split that should not have been
+    /// made. Measured cost of that mistake on a live 3.15 MB transfer: ~21 s
+    /// against 6.3 s for fixed concurrency, with several runs reported as failures
+    /// despite delivering byte-exact files.
+    ///
+    /// The invariant: while the active limit is below the connection budget, some
+    /// work stays unassigned, and raising the limit produces `Request` actions
+    /// rather than repairs.
+    #[test]
+    fn a_ramping_transfer_finds_unassigned_work_instead_of_stealing() {
+        const S: u64 = 40_000_000;
+        let sources = vec![Source {
+            gamma_est: 2e6,
+            delta_est: 0.05,
+            ..Default::default()
+        }];
+        let mut sc = Scheduler::new(S, sources, &[8]).with_active_limit(1);
+        let acts = sc.tick(0.0);
+        assert_eq!(
+            acts.iter()
+                .filter(|a| matches!(a, Action::Request { .. }))
+                .count(),
+            1,
+            "only the active connection may be given work"
+        );
+        assert!(
+            !sc.unassigned_is_empty(),
+            "the whole object was handed to one connection: connections admitted \
+             later can only steal, which costs a repair each"
+        );
+
+        // Deliver some bytes, then admit more connections as the ramp would.
+        let mut now = 0.0;
+        for _ in 0..5 {
+            now += 0.1;
+            sc.on_bytes(0, 200_000, now, 0.1);
+            sc.tick(now);
+        }
+        let repairs_before = sc.stats.repairs;
+        sc.set_active_limit(4);
+        now += 0.1;
+        let acts = sc.tick(now);
+        let reqs = acts
+            .iter()
+            .filter(|a| matches!(a, Action::Request { .. }))
+            .count();
+        assert!(
+            reqs >= 3,
+            "admitting 3 connections produced {reqs} requests: they are not being \
+             given the reserved work"
+        );
+        assert_eq!(
+            sc.stats.repairs, repairs_before,
+            "admitting a connection must not cost a repair"
+        );
+        assert!(sc.coverage_holds() && sc.liveness_holds());
+    }
+
+    /// Every range shrink must be ANNOUNCED, not just performed.
+    ///
+    /// Regression test for the repair storm. The scheduler used to move
+    /// `conns[victim].range` and emit nothing, so the transport's fetch loop —
+    /// which tests `off < hi` against the bound it captured at request time —
+    /// went on pulling the span that had just been handed to another connection.
+    /// Both connections then fetched the same bytes over the same bottleneck, the
+    /// resulting slowdown read as fresh divergence, and that triggered further
+    /// repairs: measured at 32-49 repairs on a stationary 5.3 MB transfer whose
+    /// correct repair count is zero, for ~2.2x the fluid optimum.
+    ///
+    /// The invariant is therefore stronger than "a repair happened": for every
+    /// repair counted, the victim whose far end moved must appear in a `Shrink`
+    /// carrying the new bound. A caller cannot honour what it is not told.
+    #[test]
+    fn every_repair_announces_the_victims_new_far_end() {
+        const S: u64 = 40_000_000;
+        let mut sc = Scheduler::new(S, vec![src(4e6), src(4e6)], &[1, 1]).with_stall_timeout(10.0);
+        sc.tick(0.0);
+        let mut now = 0.0;
+        for _ in 0..12 {
+            now += 0.1;
+            sc.on_bytes(0, 400_000, now, 0.1);
+            sc.on_bytes(1, 400_000, now, 0.1);
+            sc.tick(now);
+        }
+
+        // Collapse connection 0 so a divergence repair becomes correct to make.
+        let mut shrinks: Vec<(usize, u64)> = Vec::new();
+        let mut repairs_before = sc.stats.repairs;
+        let mut saw_repair = false;
+        for _ in 0..25 {
+            now += 0.1;
+            sc.on_bytes(0, 4_000, now, 0.1);
+            sc.on_bytes(1, 400_000, now, 0.1);
+            // Snapshot each victim's far end before the tick that may move it.
+            let before: Vec<Option<u64>> =
+                (0..sc.n_conns()).map(|j| sc.conn_range(j).map(|(_, _, hi)| hi)).collect();
+            let acts = sc.tick(now);
+            for a in &acts {
+                if let Action::Shrink { conn, hi } = a {
+                    shrinks.push((*conn, *hi));
+                    // The announced bound must be the one actually installed, and
+                    // it must be a genuine reduction — never a raise, which would
+                    // hand out bytes another connection may already hold.
+                    assert_eq!(
+                        sc.conn_range(*conn).map(|(_, _, h)| h),
+                        Some(*hi),
+                        "announced bound must match the installed one"
+                    );
+                    if let Some(Some(b)) = before.get(*conn) {
+                        assert!(*hi <= *b, "a shrink must lower the far end: {b} -> {hi}");
+                    }
+                }
+            }
+            if sc.stats.repairs > repairs_before {
+                saw_repair = true;
+                assert!(
+                    !shrinks.is_empty(),
+                    "a repair was counted with no Shrink announced: the victim's \
+                     socket would keep streaming the stolen span"
+                );
+                repairs_before = sc.stats.repairs;
+            }
+        }
+        assert!(saw_repair, "the scenario must produce at least one repair");
+        assert!(sc.coverage_holds() && sc.liveness_holds());
+    }
+
     /// The initial split must respect `mark_done`.
     ///
     /// Regression test: an earlier version partitioned `[0, size)` arithmetically
