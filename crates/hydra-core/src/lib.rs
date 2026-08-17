@@ -26,6 +26,7 @@ pub mod admission;
 pub mod detect;
 pub mod format;
 pub mod intervals;
+pub mod ramp;
 pub mod sched;
 
 pub use admission::{Admission, Admit, DeltaEstimator};
@@ -35,4 +36,5 @@ pub use format::{
     Category, Detection, Evidence, Format,
 };
 pub use intervals::{IntervalSet, Range};
+pub use ramp::{ConcurrencyRamp, Ramp};
 pub use sched::{greedy_concurrency, Action, Capability, Scheduler, Source, Stats, STEAL_QUANTUM};
