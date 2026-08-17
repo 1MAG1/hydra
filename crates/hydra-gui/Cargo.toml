@@ -1,0 +1,84 @@
+[package]
+name = "hya-gui"
+version.workspace = true
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository.workspace = true
+homepage.workspace = true
+description = "Hydra download manager desktop GUI (cross platform)"
+publish = false
+
+[[bin]]
+name = "hydra-gui"
+path = "src/main.rs"
+
+[dependencies]
+hya-core = { workspace = true }
+hya-net = { workspace = true }
+# WebSocket handshake for the browser-extension bridge (extbus): the accept
+# key is base64(SHA-1(key+GUID)) per RFC 6455.
+sha1 = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# GUI toolkit. `tokio` runs Tasks/subscription futures on a tokio executor so
+# the engine bridge can use tokio channels directly; `svg` renders the
+# toolbar/tree icons which are embedded as vector assets so they stay crisp on
+# any DPI without shipping bitmaps per scale factor.
+iced = { version = "0.14", features = ["tokio", "svg", "image"] }
+# Config/state directory resolution per platform (~/Library/Application Support,
+# %APPDATA%, ~/.config) — the GUI persists its download list and settings there.
+dirs = "6"
+# Human dates for the "Last Try Date" column and scheduler times.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# `config.toml` in ~/.config/hydra (or %APPDATA%\hydra): user-editable
+# configuration; an unparsable file falls back to defaults instead of failing.
+toml = "1"
+# "Open" / "Open folder" on completed downloads, delegated to the OS.
+open = "5"
+# Native "Browse..." file/folder pickers (Save As, download directory, virus
+# scanner path). Async API so the picker never blocks the render thread.
+rfd = "0.17"
+# Embedded ACID key-value store for the download list: scales past what a
+# rewritten-whole JSON file handles gracefully, with no C++ build dependency
+# (chosen over rocksdb for that reason).
+redb = "4"
+# Event sounds (Options > Sounds): .wav/.ogg playback; a generated chime is
+# the fallback when no file is configured.
+rodio = { version = "0.22", default-features = false, features = ["wav", "vorbis", "playback"] }
+
+# Primary-display resolution at startup: the main window's default and
+# minimum size are a fraction of the screen, not a hardcoded pixel count.
+display-info = "0.5"
+# Decodes docs/logo.png (embedded at compile time) into the RGBA the tray
+# icon and window/taskbar icon APIs want.
+png = "0.18"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+# System tray icon + native menus. `tray-icon` re-exports muda as
+# `tray_icon::menu`; using that everywhere (tray AND the macOS menu bar)
+# keeps one muda instance and therefore one global menu-event channel.
+# Linux tray support needs a GTK event loop and is deferred.
+tray-icon = "0.24"
+
+[build-dependencies]
+# Compiles the generated .rc (app icon + VERSIONINFO) into hydra-gui.exe —
+# see build.rs. Uses rc.exe on Windows hosts and llvm-rc under cargo-xwin;
+# build.rs is a no-op for non-Windows targets.
+embed-resource = "3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# "Launch on startup" is an HKCU\...\CurrentVersion\Run value:
+# no console flash at logon, and Task Manager's Startup page
+# shows the exe's embedded name and icon. See autostart.rs.
+winreg = "0.56"
+# Cross-compiling to windows-msvc: MSVC's arm64_neon.h is not clang-parsable,
+# so blake3's C NEON path cannot build — the pure-Rust implementation is
+# feature-unified in for Windows targets only (the GUI never bulk-hashes).
+blake3 = { version = "1", features = ["pure"] }
+# System light/dark detection: Windows has no template-icon mechanism, so
+# the tray picks its white or black monochrome variant from the OS theme.
+dark-light = "3"
+
+[lints]
+workspace = true
