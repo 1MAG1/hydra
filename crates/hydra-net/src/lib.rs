@@ -67,6 +67,7 @@ pub const DEFAULT_USER_AGENT: &str = "hydra/0.1";
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 
 /// Per-connection read buffer. The only memory that scales with concurrency.
@@ -200,7 +201,84 @@ impl Target {
     }
 }
 
+/// The far end of an in-flight range, shared between the scheduler loop and the
+/// fetch task streaming that range.
+///
+/// # Why a range's end has to be mutable
+///
+/// This scheduler's central claim is that shrinking a laggard's range costs
+/// nothing: an HTTP range request names both ends, and the far end is enforced
+/// by the client, so the client can simply decide to stop earlier and the server
+/// is never told. No cancellation, no round trip.
+///
+/// That is a true statement about HTTP and it was a false statement about this
+/// code. `fetch_range` used to take `hi: u64` by value, so the fetch loop tested
+/// `off < hi` against a snapshot taken when the task was spawned. A repair moved
+/// the scheduler's copy of the range and the running task never learned: the
+/// victim went on requesting — and receiving — the exact span that had just been
+/// handed to somebody else. Both connections pulled it, over one bottleneck,
+/// and the resulting slowdown looked to the scheduler like fresh divergence,
+/// which triggered another repair. At n=8 that loop turned 0 necessary repairs
+/// into 32-49 and cost ~2.2x the fluid optimum.
+///
+/// Making the bound an `AtomicU64` behind an `Arc` is what makes preemption cost
+/// what the theory says it costs. It is read once per `read()` — a relaxed load
+/// against a 64 KiB buffer fill, which is not measurable next to the syscall.
+///
+/// # What "free" honestly means
+///
+/// Free on the wire, not free in bytes already in flight. When the loop stops at
+/// the lowered bound, the server is still sending toward the original end, so up
+/// to roughly one bandwidth-delay product may already be in the socket and is
+/// discarded when the stream drops. That is bounded by the receive window and
+/// does not scale with the size of the span given away, which is the whole
+/// difference between this and re-requesting.
+#[derive(Clone, Debug)]
+pub struct Watermark(Arc<std::sync::atomic::AtomicU64>);
+
+impl Watermark {
+    /// A bound nobody will move. Used by every caller that fetches a range
+    /// without a scheduler above it (`fetch_range_retry`, the static-split
+    /// policies, the FTP path).
+    pub fn fixed(hi: u64) -> Self {
+        Watermark(Arc::new(std::sync::atomic::AtomicU64::new(hi)))
+    }
+
+    /// The current far end.
+    #[inline]
+    pub fn get(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Lower the far end to `hi`.
+    ///
+    /// Monotonically decreasing by construction: a repair only ever gives work
+    /// away, and `fetch_max` on the negation is not worth the complexity, so
+    /// this uses `fetch_min` to make the direction an invariant rather than a
+    /// convention. Raising a bound would hand a connection bytes another
+    /// connection may already hold, which is a coverage violation, not an
+    /// optimisation.
+    pub fn shrink_to(&self, hi: u64) {
+        self.0
+            .fetch_min(hi, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Anything that can open a byte stream to a target.
+///
+/// # The `pool` hook
+///
+/// A connector may carry a connection pool that OUTLIVES a single transfer. This
+/// exists because the client's own size probe talks to the origin before the
+/// transfer starts, and without somewhere shared to put that connection its
+/// handshake is thrown away and the transfer redials the host it was just talking
+/// to. Measured on a live TLS path, that was 1.6-2.0 s of setup on a transfer whose
+/// body took 3.7-5.5 s — the largest single remaining gap against curl, and pure
+/// waste rather than a design cost.
+///
+/// The default returns `None`, meaning "no shared pool": the transfer then creates
+/// its own, which is correct for the in-process test connector and for any caller
+/// that has not spoken to the origin yet.
 ///
 /// This exists because the transport must be swappable: `TcpConnector` for real
 /// networks, `DuplexConnector` (in `origin`) for hermetic tests. The scheduler
@@ -211,6 +289,16 @@ pub trait Connector: Send + Sync + 'static {
         &'a self,
         t: &'a Target,
     ) -> Pin<Box<dyn Future<Output = io::Result<Self::Stream>> + Send + 'a>>;
+
+    /// A connection pool shared across transfers, if this connector keeps one.
+    ///
+    /// Default `None`: the transfer then owns its own pool, which is right for a
+    /// caller that has not yet contacted the origin. Returning a pool lets earlier
+    /// requests — notably the size probe — contribute their established connections
+    /// instead of having them closed and re-dialled.
+    fn pool(&self) -> Option<crate::pool::SharedPool<Self::Stream>> {
+        None
+    }
 }
 
 /// Real TCP.
@@ -222,11 +310,18 @@ impl Connector for TcpConnector {
         &'a self,
         t: &'a Target,
     ) -> Pin<Box<dyn Future<Output = io::Result<TcpStream>> + Send + 'a>> {
-        Box::pin(async move { TcpStream::connect((t.host.as_str(), t.port)).await })
+        // Through the cached resolver, not `TcpStream::connect((host, port))`: that
+        // helper resolves on tokio's blocking pool on every call, so n connections to
+        // one host paid n resolutions plus n rounds of blocking-thread churn. See
+        // `tls::connect_family` for the measurement.
+        Box::pin(async move {
+            crate::tls::connect_family(&t.host, t.port, crate::tls::IpFamily::Any).await
+        })
     }
 }
 
 pub mod http;
+pub mod pool;
 pub mod sink;
 pub mod transfer;
 

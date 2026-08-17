@@ -231,15 +231,83 @@ impl IpFamily {
 ///
 /// A host with no address of the requested family is an ERROR, not a silent
 /// fallback to the other one — the whole point of the flag is to refuse.
-pub async fn connect_family(host: &str, port: u16, family: IpFamily) -> io::Result<TcpStream> {
-    use tokio::net::lookup_host;
-    if family == IpFamily::Any {
-        return TcpStream::connect((host, port)).await;
+/// Resolved addresses, remembered for the life of the process.
+///
+/// # Why resolution has to be cached
+///
+/// Name resolution in tokio is not async — there is no async `getaddrinfo`, so both
+/// `lookup_host` and `TcpStream::connect((host, port))` hand the call to the runtime's
+/// BLOCKING thread pool. That pool grows on demand and reaps idle threads, so opening
+/// n connections to one host paid for n resolutions and n rounds of thread
+/// create/destroy, on top of whatever the resolver itself cost.
+///
+/// It showed up as involuntary context switches — "used up a timeslice", the overhead
+/// kind, as opposed to the voluntary "waited for I/O" kind that is the actual work.
+/// Measured on an 11 MB transfer: ~192 at `-x 1` but ~1250-2260 for any n > 1, against
+/// curl's 3-4 and wget's 3. The shape is the tell: a STEP at "more than one connection"
+/// rather than growth proportional to n, which is what a per-connection setup cost looks
+/// like when the transfer is long enough for the connections to overlap. Sampling
+/// `/proc/<pid>/task/*` mid-transfer showed 11 live worker threads under a 4-worker
+/// runtime, with thread ids changing between samples — the blocking pool churning.
+///
+/// A downloader opens many connections to ONE host by construction, so the second
+/// through nth resolutions are pure waste: same name, same answer, microseconds apart.
+///
+/// Cached for the process lifetime rather than with a TTL. A transfer lasts seconds to
+/// minutes and a TTL only matters if the mapping changes mid-transfer, in which case the
+/// connection would fail and be retried anyway. Honouring DNS TTLs would mean parsing
+/// them, which `getaddrinfo` does not expose.
+type DnsCache =
+    std::sync::Mutex<std::collections::HashMap<(String, u16), Vec<std::net::SocketAddr>>>;
+
+static DNS_CACHE: std::sync::OnceLock<DnsCache> = std::sync::OnceLock::new();
+
+/// Resolve `host:port`, consulting the process-wide cache first.
+async fn resolve_cached(host: &str, port: u16) -> io::Result<Vec<std::net::SocketAddr>> {
+    let key = (host.to_ascii_lowercase(), port);
+    let cache = DNS_CACHE.get_or_init(Default::default);
+    if let Ok(g) = cache.lock() {
+        if let Some(hit) = g.get(&key) {
+            return Ok(hit.clone());
+        }
     }
-    let addrs: Vec<std::net::SocketAddr> = lookup_host((host, port))
-        .await?
-        .filter(|a| family.matches(a))
-        .collect();
+    // A literal address needs no resolver at all, and this is the common case for the
+    // in-process test origins as well as for `--resolve`-style pinning.
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+    if addrs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!("{host} resolved to no addresses"),
+        ));
+    }
+    if let Ok(mut g) = cache.lock() {
+        g.insert(key, addrs.clone());
+    }
+    Ok(addrs)
+}
+
+pub async fn connect_family(host: &str, port: u16, family: IpFamily) -> io::Result<TcpStream> {
+    let resolved = resolve_cached(host, port).await?;
+    if family == IpFamily::Any {
+        // Same candidate-walking behaviour as `TcpStream::connect((host, port))`, but
+        // over the cached list so the resolver is consulted once per host rather than
+        // once per connection.
+        let mut last: Option<io::Error> = None;
+        for a in &resolved {
+            match TcpStream::connect(*a).await {
+                Ok(s) => return Ok(s),
+                Err(e) => last = Some(e),
+            }
+        }
+        return Err(last.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                format!("{host} resolved to no usable addresses"),
+            )
+        }));
+    }
+    let addrs: Vec<std::net::SocketAddr> =
+        resolved.into_iter().filter(|a| family.matches(a)).collect();
     if addrs.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::AddrNotAvailable,
@@ -276,6 +344,12 @@ pub struct TlsCapableConnector {
     proxy: crate::socks::Proxy,
     /// `-4` / `-6`, applied to every socket this connector opens.
     family: IpFamily,
+    /// Idle connections shared across every request this connector serves,
+    /// INCLUDING the size probe that runs before the transfer. Without a pool that
+    /// outlives one transfer, the probe's handshake is discarded and the transfer
+    /// redials the origin it was just speaking to — measured at 1.6-2.0 s of setup
+    /// on a live TLS path.
+    pool: crate::pool::SharedPool<MaybeTls>,
 }
 
 impl TlsCapableConnector {
@@ -295,10 +369,24 @@ impl TlsCapableConnector {
         // connections to a host, which matters here because a multi-source
         // transfer opens several per source.
         config.resumption = rustls::client::Resumption::in_memory_sessions(64);
+        // Offer HTTP/1.1 explicitly. Without any ALPN list rustls offers none, and
+        // the negotiated protocol is whatever the server assumes — which is
+        // HTTP/1.1 today, but by accident rather than by decision.
+        //
+        // HTTP/1.1 is the DELIBERATE choice here, not a limitation. See
+        // docs/HTTP2-ASSESSMENT.md: HTTP/2 would multiplex every range onto one
+        // TCP connection, which is one flow's share of a contended path. Against
+        // an origin that rate-limits per connection that is an 8x throughput
+        // penalty, set against a best-case saving of 1.34% in setup round trips.
+        // It would also collapse the per-connection rate differences the
+        // scheduler makes its decisions from, since every stream would ride one
+        // congestion window.
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
         Ok(Self {
             config: Arc::new(config),
             proxy: crate::socks::Proxy::none(),
             family: IpFamily::Any,
+            pool: std::sync::Arc::new(crate::pool::ConnPool::new()),
         })
     }
 
@@ -330,10 +418,24 @@ impl TlsCapableConnector {
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth();
         config.resumption = rustls::client::Resumption::in_memory_sessions(64);
+        // Offer HTTP/1.1 explicitly. Without any ALPN list rustls offers none, and
+        // the negotiated protocol is whatever the server assumes — which is
+        // HTTP/1.1 today, but by accident rather than by decision.
+        //
+        // HTTP/1.1 is the DELIBERATE choice here, not a limitation. See
+        // docs/HTTP2-ASSESSMENT.md: HTTP/2 would multiplex every range onto one
+        // TCP connection, which is one flow's share of a contended path. Against
+        // an origin that rate-limits per connection that is an 8x throughput
+        // penalty, set against a best-case saving of 1.34% in setup round trips.
+        // It would also collapse the per-connection rate differences the
+        // scheduler makes its decisions from, since every stream would ride one
+        // congestion window.
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
         Ok(Self {
             config: Arc::new(config),
             proxy: crate::socks::Proxy::none(),
             family: IpFamily::Any,
+            pool: std::sync::Arc::new(crate::pool::ConnPool::new()),
         })
     }
 
@@ -355,6 +457,12 @@ impl TlsCapableConnector {
 
 impl Connector for TlsCapableConnector {
     type Stream = MaybeTls;
+
+    /// Share this connector's pool with the transfer, so a connection established
+    /// by the size probe is reused instead of re-dialled.
+    fn pool(&self) -> Option<crate::pool::SharedPool<MaybeTls>> {
+        Some(self.pool.clone())
+    }
 
     fn connect<'a>(
         &'a self,

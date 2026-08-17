@@ -59,6 +59,34 @@ pub struct OriginControl {
     /// it in-process is the only way to measure the framing path's cost without
     /// a socket, and the piece size is the variable that decides that cost.
     pub chunked: Arc<AtomicU64>,
+    /// Serve more than one request per connection, answering
+    /// `Connection: keep-alive`.
+    ///
+    /// Off by default so every existing test keeps the transport it was written
+    /// against. Turning it on is what makes the client's connection reuse
+    /// observable at all: while the origin answers `Connection: close`, a correct
+    /// client MUST NOT pool the socket, so the pool stays empty and a reuse test
+    /// would pass by doing nothing.
+    pub keep_alive: Arc<AtomicBool>,
+    /// Requests this origin has answered, across every connection.
+    ///
+    /// With `keep_alive` on, comparing this against `connections` is the direct
+    /// measure of reuse: `requests > connections` can only happen if the client
+    /// really did send a second request down a socket it had already used.
+    pub requests: Arc<AtomicU64>,
+    /// Connections this origin has accepted.
+    pub connections: Arc<AtomicU64>,
+    /// Total payload bytes this origin has actually put on the wire, across every
+    /// connection it has served.
+    ///
+    /// This is the measurement that distinguishes a client which preempts ranges
+    /// for free from one that merely believes it does. A scheduler can report a
+    /// byte-exact file and a plausible request count while having pulled parts of
+    /// the object two or three times — the duplicate traffic is invisible from
+    /// the client side, because the second copy of a span is written over the
+    /// first and the file is correct either way. Only the server can see it. A
+    /// transfer with no wasted work satisfies `served == object size`.
+    pub served: Arc<AtomicU64>,
 }
 
 impl OriginControl {
@@ -90,6 +118,10 @@ impl OriginControl {
             lie_length: Arc::new(AtomicBool::new(false)),
             redirect_to: Arc::new(Mutex::new(None)),
             chunked: Arc::new(AtomicU64::new(0)),
+            keep_alive: Arc::new(AtomicBool::new(false)),
+            requests: Arc::new(AtomicU64::new(0)),
+            connections: Arc::new(AtomicU64::new(0)),
+            served: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -174,6 +206,7 @@ impl Connector for OriginSet {
             // 64 KiB pipe: bounded, so a slow reader back-pressures the origin
             // exactly as a TCP receive window would.
             let (client, mut server) = tokio::io::duplex(64 * 1024);
+            ctl.connections.fetch_add(1, Ordering::Relaxed);
             tokio::spawn(async move {
                 let _ = serve(&mut server, size, ctl).await;
             });
@@ -203,25 +236,55 @@ fn write_hex_line(out: &mut [u8; 20], mut v: usize) -> usize {
     n + 2
 }
 
+/// Answer requests on one connection until the peer goes away.
+///
+/// With `keep_alive` off this serves exactly one request and returns, which is
+/// the behaviour every pre-existing test was written against. With it on, the
+/// loop is what lets a client's connection reuse be observed: a second request
+/// arriving on the same socket can only mean the client pooled it.
 async fn serve<S>(sock: &mut S, size: u64, ctl: OriginControl) -> std::io::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    loop {
+        let more = serve_one(sock, size, &ctl).await?;
+        if !more {
+            return Ok(());
+        }
+    }
+}
+
+/// Answer one request. Returns whether the connection may carry another.
+async fn serve_one<S>(sock: &mut S, size: u64, ctl: &OriginControl) -> std::io::Result<bool>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let keep_alive = ctl.keep_alive.load(Ordering::Relaxed);
     let mut req = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
         let n = sock.read(&mut buf).await?;
         if n == 0 {
-            return Ok(());
+            return Ok(false);
         }
         req.extend_from_slice(&buf[..n]);
         if req.windows(4).any(|w| w == b"\r\n\r\n") {
             break;
         }
     }
+    ctl.requests.fetch_add(1, Ordering::Relaxed);
     let text = String::from_utf8_lossy(&req).to_string();
     let is_head = text.starts_with("HEAD");
     let ranges_ok = ctl.ranges.load(Ordering::Relaxed);
+
+    // What this origin tells the client about the socket's future. A client that
+    // pools a connection whose response said `close` is broken; a client that
+    // fails to pool one that said `keep-alive` merely leaves performance behind.
+    let conn_hdr = if keep_alive {
+        "Connection: keep-alive\r\n"
+    } else {
+        "Connection: close\r\n"
+    };
 
     // Clone out of the lock BEFORE awaiting: a std MutexGuard is not Send, so
     // holding it across an await makes the whole future non-Send.
@@ -231,12 +294,12 @@ where
             "HTTP/1.1 301 Moved Permanently\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
         sock.write_all(resp.as_bytes()).await?;
-        return Ok(());
+        return Ok(false);
     }
     if ctl.overloaded.load(Ordering::Relaxed) {
         let resp = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         sock.write_all(resp.as_bytes()).await?;
-        return Ok(());
+        return Ok(false);
     }
 
     // parse Range: bytes=lo-hi
@@ -276,7 +339,7 @@ where
     let head = if chunk_sz > 0 {
         format!(
             "HTTP/1.1 {}\r\nTransfer-Encoding: chunked\r\n{}\
-             Accept-Ranges: bytes\r\nETag: \"synthetic-{size}\"\r\nConnection: close\r\n\r\n",
+             Accept-Ranges: bytes\r\nETag: \"synthetic-{size}\"\r\n{conn_hdr}\r\n",
             if partial {
                 "206 Partial Content"
             } else {
@@ -296,20 +359,20 @@ where
     } else if partial {
         format!(
             "HTTP/1.1 206 Partial Content\r\nContent-Length: {len}\r\nContent-Range: bytes {}-{}/{}\r\n\
-             Accept-Ranges: bytes\r\nETag: \"synthetic-{size}\"\r\nConnection: close\r\n\r\n",
+             Accept-Ranges: bytes\r\nETag: \"synthetic-{size}\"\r\n{conn_hdr}\r\n",
             lo,
             hi.saturating_sub(1),
             size
         )
     } else {
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {len}\r\n{}ETag: \"synthetic-{size}\"\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: {len}\r\n{}ETag: \"synthetic-{size}\"\r\n{conn_hdr}\r\n",
             if ranges_ok { "Accept-Ranges: bytes\r\n" } else { "Accept-Ranges: none\r\n" }
         )
     };
     sock.write_all(head.as_bytes()).await?;
     if is_head {
-        return Ok(());
+        return Ok(keep_alive);
     }
     // A truncating origin: the advertised Content-Length is honest-looking but
     // the connection closes early. A client that trusts the header and reports
@@ -337,7 +400,7 @@ where
         }
         if let Some(cut) = truncate_at {
             if off >= cut {
-                return Ok(()); // close mid-body
+                return Ok(false); // close mid-body
             }
         }
         let n = ((hi - off) as usize).min(SLICE);
@@ -378,10 +441,14 @@ where
         } else {
             sock.write_all(&out[..n]).await?;
         }
+        // Count PAYLOAD bytes, framing excluded: the question this answers is how
+        // many times each byte of the object was sent, which chunk headers would
+        // distort.
+        ctl.served.fetch_add(n as u64, Ordering::Relaxed);
         off += n as u64;
     }
     if chunk_sz > 0 {
         sock.write_all(b"0\r\n\r\n").await?;
     }
-    Ok(())
+    Ok(keep_alive)
 }

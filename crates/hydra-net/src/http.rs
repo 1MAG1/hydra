@@ -105,7 +105,47 @@ impl Probe {
 ///
 /// Central request head builder ensuring that custom headers and User-Agent
 /// are consistently applied to both metadata probes and range body requests.
+/// Whether this request intends to keep the connection open afterwards.
+///
+/// Spelled out as a type rather than a bare `bool` because the two callers want
+/// opposite defaults and the consequence of getting it wrong is asymmetric: a
+/// request that says `keep-alive` and then abandons the socket leaves the server
+/// holding a connection until its idle timeout, while a request that says `close`
+/// merely forgoes the reuse.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Disposition {
+    /// `Connection: close` — this response is the last on the socket.
+    ///
+    /// Correct for anything whose body extent the client cannot predict: a
+    /// read-to-EOF stream, a probe that may be answered any number of ways, or a
+    /// fetch the caller has no intention of following up.
+    Close,
+    /// `Connection: keep-alive` — the socket may be reused once the body has been
+    /// consumed to its exact end.
+    Reuse,
+}
+
+fn connection_header(d: Disposition) -> &'static str {
+    match d {
+        Disposition::Close => "Connection: close\r\n\r\n",
+        // HTTP/1.1 is keep-alive by default and the header is strictly redundant,
+        // but it is sent explicitly: intermediaries and older origins are
+        // measurably more consistent when told, and it makes a packet capture
+        // state the intent rather than leaving it to be inferred from an absence.
+        Disposition::Reuse => "Connection: keep-alive\r\n\r\n",
+    }
+}
+
 fn build_request_head(method: &str, t: &Target, range: Option<(u64, u64)>) -> String {
+    build_request_head_disp(method, t, range, Disposition::Close)
+}
+
+fn build_request_head_disp(
+    method: &str,
+    t: &Target,
+    range: Option<(u64, u64)>,
+    disp: Disposition,
+) -> String {
     let (target, host_hdr) = t.request_target();
     let mut req = format!("{method} {target} HTTP/1.1\r\nHost: {host_hdr}\r\n");
     if let Some((first, last)) = range {
@@ -117,7 +157,7 @@ fn build_request_head(method: &str, t: &Target, range: Option<(u64, u64)>) -> St
         req.push_str(h);
         req.push_str("\r\n");
     }
-    req.push_str("Connection: close\r\n\r\n");
+    req.push_str(connection_header(disp));
     req
 }
 
@@ -470,22 +510,78 @@ pub(crate) fn validator_from(
 }
 
 pub async fn probe<C: Connector>(c: &C, t: &Target) -> io::Result<Probe> {
-    let mut s = c.connect(t).await?;
+    // Reuse an idle connection if this connector keeps a pool, and give it back
+    // afterwards. A HEAD is the client's FIRST contact with the origin on nearly
+    // every run, so its handshake is the one most worth keeping: before this, the
+    // probe dialled, asked for `Connection: close`, and the transfer that started
+    // moments later dialled the same host again. Measured on a live TLS path,
+    // 1.6-2.0 s elapsed before the first byte of a transfer whose body took
+    // 3.7-5.5 s.
+    let pool = c.pool();
+    let (mut s, reused) = match pool.as_ref().and_then(|p| p.take(t)) {
+        Some(s) => (s, true),
+        None => {
+            if let Some(p) = pool.as_ref() {
+                p.record_miss();
+            }
+            (c.connect(t).await?, false)
+        }
+    };
     // The extra headers and User-Agent are included so headers meant to influence
     // what the server returns (such as Authorization or Accept) shape the probe as well.
-    let req = build_request_head("HEAD", t, None);
+    //
+    // Keep-alive so the connection survives to be pooled. A HEAD response has no
+    // body by definition, so the connection is clean the moment its header block
+    // ends — no draining, no risk of leaving unread bytes for the next request.
+    let req = build_request_head_disp("HEAD", t, None, Disposition::Reuse);
     s.write_all(req.as_bytes()).await?;
     let mut buf = Vec::new();
-    // A server may close without sending TLS `close_notify`, which rustls reports as
-    // UnexpectedEof. That is a protocol impoliteness, not a failed request: if the
-    // header block already arrived, the response is in hand. Treating it as fatal made
-    // an otherwise-fine HEAD fail outright, which is how a legitimate host came back as
-    // "every probe failed".
-    match s.read_to_end(&mut buf).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof && find_crlf2(&buf).is_some() => {}
-        Err(e) => return Err(e),
+    // Read only until the header block ends, rather than to EOF.
+    //
+    // `read_to_end` was correct while every request said `Connection: close`, since
+    // the server's close was the terminator. With keep-alive there is no close, so
+    // reading to EOF would block until the origin's idle timeout — turning a
+    // fast probe into a multi-second stall. A HEAD has no body, so CRLFCRLF is the
+    // complete response.
+    let mut chunk = [0u8; 4096];
+    let head_end = loop {
+        if let Some(e) = find_crlf2(&buf) {
+            break Some(e);
+        }
+        match s.read(&mut chunk).await {
+            Ok(0) => break find_crlf2(&buf),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            // A server may close without sending TLS `close_notify`, which rustls
+            // reports as UnexpectedEof. That is a protocol impoliteness, not a
+            // failed request: if the header block already arrived, the response is
+            // in hand. Treating it as fatal made an otherwise-fine HEAD fail
+            // outright, which is how a legitimate host came back as "every probe
+            // failed".
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break find_crlf2(&buf),
+            Err(e) => return Err(e),
+        }
+        if buf.len() > 64 * 1024 {
+            break None;
+        }
+    };
+    // Return the connection only when the response ended exactly where the protocol
+    // says it should: a complete header block, nothing after it, and no error. The
+    // same rule the transfer path uses — a connection whose framing is uncertain is
+    // dropped, never reused, because the cost of getting that wrong is silent
+    // corruption of the NEXT response.
+    if let (Some(end), Some(p)) = (head_end, pool.as_ref()) {
+        let hdr = String::from_utf8_lossy(&buf[..end]).to_string();
+        let server_will_close = header_value(&hdr, "connection")
+            .map(|v| v.to_ascii_lowercase().contains("close"))
+            .unwrap_or(false);
+        // `buf.len() == end` is the framing check: a HEAD has no body, so anything
+        // past the header block means the server sent something this code does not
+        // understand, and a connection whose framing is uncertain is dropped.
+        if buf.len() == end && !server_will_close {
+            p.put(t, s);
+        }
     }
+    let _ = reused;
     let raw_head = String::from_utf8_lossy(&buf).to_string();
     let head = raw_head.clone();
     // The status line is not decoration. A 302 carries `Content-Length: 0` and an
@@ -550,18 +646,57 @@ pub(crate) async fn fetch_range<C: Connector>(
     conn: usize,
     t: Target,
     lo: u64,
-    hi: u64,
+    bound: crate::Watermark,
     sink: Arc<SparseSink>,
     tx: mpsc::UnboundedSender<Arrival>,
     t0: Instant,
     pace: Pace,
+    pool: Option<crate::pool::SharedPool<C::Stream>>,
 ) -> io::Result<()> {
-    let mut s = c.connect(&t).await?;
+    // The far end is re-read from `bound` as the body streams, never captured. A
+    // repair that gives this connection's tail away lowers it, and the loop stops
+    // there instead of racing the taker for the same bytes. See `Watermark`.
+    let hi = bound.get();
+
+    // Reuse an idle connection to this endpoint when one is available. This is the
+    // difference between n ranges costing n handshakes and costing one; see
+    // `crate::pool` for why it matters disproportionately to this client and for
+    // the conditions under which a stream may go back.
+    let reused = pool.as_ref().and_then(|p| p.take(&t));
+    let from_pool = reused.is_some();
+    let mut s = match reused {
+        Some(s) => s,
+        None => {
+            if let Some(p) = pool.as_ref() {
+                p.record_miss();
+            }
+            c.connect(&t).await?
+        }
+    };
     // A User-Agent identifying the client is basic etiquette: a mirror operator
     // seeing unexplained parallel range requests should be able to tell what is
     // making them. The builder sends it on every request.
-    let req = build_request_head("GET", &t, Some((lo, hi.saturating_sub(1))));
-    s.write_all(req.as_bytes()).await?;
+    let disp = if pool.is_some() {
+        Disposition::Reuse
+    } else {
+        Disposition::Close
+    };
+    let req = build_request_head_disp("GET", &t, Some((lo, hi.saturating_sub(1))), disp);
+    // A pooled connection may have been closed by the peer while it sat idle, and
+    // that is indistinguishable from a healthy one until the write or the first
+    // read fails. Treat any such failure as a miss and retry once on a fresh
+    // connection rather than surfacing it: the range is perfectly fetchable, and
+    // the scheduler would otherwise see a phantom stall.
+    if let Err(e) = s.write_all(req.as_bytes()).await {
+        if !from_pool {
+            return Err(e);
+        }
+        if let Some(p) = pool.as_ref() {
+            p.record_miss();
+        }
+        s = c.connect(&t).await?;
+        s.write_all(req.as_bytes()).await?;
+    }
 
     // Read headers, then stream the body straight to its file offset.
     let mut buf = vec![0u8; READ_BUF];
@@ -676,7 +811,8 @@ pub(crate) async fn fetch_range<C: Connector>(
         .map(|v| v.to_ascii_lowercase().contains("chunked"))
         .unwrap_or(false);
     if chunked {
-        return stream_chunked(s, conn, lo, hi, &head[body_start..], sink, tx, t0, pace).await;
+        return stream_chunked(s, conn, lo, bound, &head[body_start..], sink, tx, t0, pace)
+            .await;
     }
 
     let mut off = lo;
@@ -702,9 +838,20 @@ pub(crate) async fn fetch_range<C: Connector>(
         last = now;
     }
 
+    // Re-read the bound each pass: `hi` above was only its value at request time.
+    let mut hi = hi;
     while off < hi {
         let want = pace.read_size(((hi - off) as usize).min(READ_BUF));
         let n = s.read(&mut buf[..want]).await?;
+        if n == 0 {
+            break;
+        }
+        // A repair may have moved the far end while this read was parked. Re-read
+        // before crediting, and clamp: bytes past the new bound belong to whichever
+        // connection was given them, so writing them here would double-count
+        // coverage and reintroduce the duplicate-span cost this exists to remove.
+        hi = bound.get();
+        let n = n.min(hi.saturating_sub(off) as usize);
         if n == 0 {
             break;
         }
@@ -731,6 +878,41 @@ pub(crate) async fn fetch_range<C: Connector>(
     // let the caller treat a short read as a delivered range, so the bytes that
     // never arrived were never re-requested. `UnexpectedEof` is retryable, which
     // is the correct disposition: the range may well arrive on a second attempt.
+    // ---- return the connection for reuse, if and only if it is safe ----------
+    //
+    // The test is not "did the transfer succeed" but "does the client know exactly
+    // where this response ended". Anything left unread in the socket becomes the
+    // first bytes of whatever request goes out next, which corrupts that response
+    // at the wrong file offsets while keeping a plausible length — the same failure
+    // shape as the positional-write and double-count defects before it.
+    //
+    // Three separate reasons to refuse, and the third is peculiar to this
+    // scheduler:
+    //   * the server said `Connection: close` — it will not serve another request
+    //     on this socket, so pooling it guarantees the next user a dead stream;
+    //   * the body did not reach the far end we asked for (`off < hi_final`), so
+    //     an unknown number of bytes is still arriving;
+    //   * the far end MOVED (`hi_final < hi_at_request`), meaning a repair took
+    //     this connection's tail. The loop stopped early by design and the server
+    //     is still sending toward the original end, so the socket has unread body
+    //     in it. Preemption remains free on the wire; the cost is that this one
+    //     connection cannot be reused. Pooling it here would trade a bounded,
+    //     already-paid cost for silent corruption.
+    let hi_final = bound.get();
+    let shrunk = hi_final < hi;
+    let server_will_close = header_value(&head_str, "connection")
+        .map(|v| v.to_ascii_lowercase().contains("close"))
+        .unwrap_or(false);
+    if let Some(p) = pool.as_ref() {
+        if !shrunk && !server_will_close && off >= hi_final {
+            p.put(&t, s);
+        }
+    }
+
+    // A shrink is not a truncation. If the bound moved below where the loop
+    // stopped, the remainder was deliberately handed to another connection and
+    // this range is complete as redefined; only a genuinely short body is an error.
+    let hi = hi_final;
     if off < hi {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -788,7 +970,7 @@ pub(crate) async fn stream_chunked<S>(
     mut s: S,
     conn: usize,
     lo: u64,
-    hi: u64,
+    bound: crate::Watermark,
     initial: &[u8],
     sink: Arc<SparseSink>,
     tx: mpsc::UnboundedSender<Arrival>,
@@ -798,6 +980,8 @@ pub(crate) async fn stream_chunked<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    // Same discipline as the plain-body path: the far end can move under us.
+    let mut hi = bound.get();
     enum St {
         Size,
         Data(u64),
@@ -921,6 +1105,14 @@ where
         }
         // One Arrival per read, covering every chunk decoded from it.
         flush_pending!();
+        // Pick up a repair that lowered the far end. The `room` clamp in the
+        // `St::Data` arm above then stops writing at the new boundary, and the
+        // early-exit below ends the stream rather than draining a body whose tail
+        // now belongs to another connection.
+        hi = bound.get();
+        if off >= hi {
+            return Ok(());
+        }
         // Shape the same way the unframed path does: cap the read size so one
         // pause stays short, then pay for the bytes as they come off the wire.
         // The charge is against RAW bytes read, framing included — that is what
@@ -1023,13 +1215,19 @@ pub async fn fetch_range_retry<C: Connector>(
             0,
             t.clone(),
             off,
-            hi,
+            // No scheduler above this entry point, so nothing ever moves the far
+            // end: the static-split policies mean "never reassign" literally.
+            crate::Watermark::fixed(hi),
             sink.clone(),
             tx.clone(),
             t0,
             // This entry point carries no cap parameter, so it is explicitly
             // unshaped rather than silently inheriting one.
             Pace::unlimited(),
+            // No pool: this is the static-split transport, one range per
+            // connection with retries in place, so there is no second request to
+            // the same endpoint for a pooled connection to serve.
+            None,
         );
         tokio::pin!(fut);
         loop {
@@ -1427,7 +1625,7 @@ mod tests {
                 client,
                 0,
                 0,
-                12,
+                crate::Watermark::fixed(12),
                 head,
                 sink.clone(),
                 tx,
@@ -1472,7 +1670,7 @@ mod tests {
             client,
             0,
             0,
-            12,
+            crate::Watermark::fixed(12),
             b"",
             sink,
             tx,

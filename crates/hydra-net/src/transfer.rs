@@ -168,6 +168,33 @@ pub async fn run_transfer_into<C: Connector>(
     let mut inflight: std::collections::HashMap<usize, tokio::task::JoinHandle<()>> =
         std::collections::HashMap::new();
 
+    // The live far end of each connection's in-flight range, shared with the task
+    // streaming it. A repair lowers the victim's entry and the running task sees
+    // it on its next read, which is what makes range preemption cost what the
+    // theory says it costs — see `crate::Watermark`.
+    let mut bounds: std::collections::HashMap<usize, crate::Watermark> =
+        std::collections::HashMap::new();
+
+    // One pool for the whole transfer, shared by every connection. This is the
+    // case connection reuse was missing from most: `n` ranges against one origin
+    // used to mean `n` handshakes, and every repair another. The pool only ever
+    // receives connections whose response ended where the client predicted — see
+    // `crate::pool` — so a shrunk connection is dropped rather than reused.
+    //
+    // Taken from the connector when it offers one, so a caller that already spoke
+    // to this origin — the CLI's size probe does, on every run — can hand over the
+    // connection it is holding instead of letting the transfer redial. Measured on
+    // a live TLS path: 1.6-2.0 s of setup before the first byte, against a transfer
+    // body only 1.12-1.22x curl's total. The gap was almost entirely handshakes
+    // that had already been paid for once.
+    let pool: crate::pool::SharedPool<C::Stream> = connector
+        .pool()
+        .unwrap_or_else(|| Arc::new(crate::pool::ConnPool::new()));
+    // Reported through the same channel as everything else measurable about a
+    // transfer: a reuse rate that is claimed rather than counted is not a
+    // measurement. `HYDRA_POOL_STATS=1` prints it after the transfer.
+    let report_pool = std::env::var_os("HYDRA_POOL_STATS").is_some();
+
     // ---- no-progress watchdog --------------------------------------------
     //
     // The scheduler detects a stalled connection and reclaims its range, but
@@ -197,11 +224,72 @@ pub async fn run_transfer_into<C: Connector>(
     let mut last_progress_at = Instant::now();
     let mut last_held: u64 = sched.bytes_held();
 
+    // Extra patience earned by DELIBERATE scheduler pauses, and the ceiling on it.
+    //
+    // `backoff_grace` accumulates only while every source is suspended — silence the
+    // scheduler chose — and is added to the no-progress deadline. The cap is what
+    // keeps this from becoming unbounded patience: a source that black-holes from the
+    // first byte generates a fresh suspension after every stall, so an uncapped grace
+    // would forgive deadline after deadline and the transfer would never fail.
+    //
+    // One extra deadline's worth is enough to cover a real backoff (`stall_timeout`
+    // through 30s) once, which is the case worth surviving, while still bounding the
+    // total wait at roughly twice the deadline.
+    let mut backoff_grace = 0.0f64;
+    let backoff_grace_cap = no_progress_deadline;
+    let mut last_tick_at = Instant::now();
+
     let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(tick_ms.max(1)));
+    // In-band concurrency ramp.
+    //
+    // Enabled by the caller starting the scheduler below its full connection count
+    // (`Scheduler::with_active_limit`). The ramp then admits connections while the
+    // aggregate rate says they pay for themselves, measuring on the real transfer
+    // instead of on probe traffic — see `hya_core::ramp` for why the probe was a
+    // net loss (1.96x slower on a 3 MB object, p = 0.004).
+    let mut ramp = if sched.active_limit() < sched.n_conns() {
+        // Start at the scheduler's active limit, which the caller set deliberately,
+        // rather than at one. The CLI sets it to 1 for `--adaptive`, so the search
+        // begins at the configuration that measured fastest in the field and only
+        // admits more on evidence of headroom — see `ConcurrencyRamp::starting_at`.
+        let mut r = hya_core::ConcurrencyRamp::starting_at(
+            0.15,
+            sched.active_limit().max(1),
+            sched.n_conns(),
+        );
+        r.start(0.0, sched.worst_delta().max(1e-3));
+        Some(r)
+    } else {
+        None
+    };
+    let mut ramp_last_held: u64 = sched.bytes_held();
+
     loop {
         // 1. drain arrivals into the scheduler
         while let Ok(a) = rx.try_recv() {
             sched.on_bytes_at(a.conn, a.off, a.bytes, a.at, a.dt);
+        }
+
+        // 1b. feed the ramp the AGGREGATE delivery, and let it decide.
+        //
+        // Aggregate rather than per-connection on purpose: on a saturated link each
+        // connection's own rate falls as connections are added while the total stays
+        // flat, so a per-connection view would read saturation as healthy scaling.
+        if let Some(r) = ramp.as_mut() {
+            let now = t0.elapsed().as_secs_f64();
+            let held = sched.bytes_held();
+            r.observe(held.saturating_sub(ramp_last_held), now);
+            ramp_last_held = held;
+            match r.poll(now, sched.worst_delta().max(1e-3)) {
+                hya_core::Ramp::Raise(n) => sched.set_active_limit(n),
+                hya_core::Ramp::Settled(n) => {
+                    sched.set_active_limit(n);
+                    // Stop polling: the search is over and re-running it would
+                    // re-pay its cost on a decision already made.
+                    ramp = None;
+                }
+                hya_core::Ramp::Hold => {}
+            }
         }
         if sched.is_complete() {
             // Observe the FINAL state before leaving. The loop breaks here, above
@@ -223,6 +311,17 @@ pub async fn run_transfer_into<C: Connector>(
                     if let Some(h) = inflight.remove(&conn) {
                         h.abort();
                     }
+                    bounds.remove(&conn);
+                }
+                // A repair moved this connection's far end down. Publishing it is
+                // the entire mechanism: the victim's own loop stops at the new
+                // boundary, so the span handed to the taker crosses the wire once
+                // rather than twice. No `abort` and no request — that is the point,
+                // the connection keeps streaming the part it still owns.
+                Action::Shrink { conn, hi } => {
+                    if let Some(b) = bounds.get(&conn) {
+                        b.shrink_to(hi);
+                    }
                 }
                 Action::Request { conn, range } => {
                     if let Some(h) = inflight.remove(&conn) {
@@ -233,8 +332,16 @@ pub async fn run_transfer_into<C: Connector>(
                     // Every connection shares ONE limiter, so the cap applies to the
                     // aggregate. Cloning a `Pace` clones the `Arc`, not the bucket.
                     let pc = pace.clone();
+                    // A fresh bound per request: a stale one from a superseded
+                    // request may already have been shrunk, which would truncate
+                    // this range before it started.
+                    let bound = crate::Watermark::fixed(range.hi);
+                    bounds.insert(conn, bound.clone());
+                    let pl = pool.clone();
                     let h = tokio::spawn(async move {
-                        let _ = fetch_range(cc, conn, t, range.lo, range.hi, sk, txc, t0, pc).await;
+                        let _ =
+                            fetch_range(cc, conn, t, range.lo, bound, sk, txc, t0, pc, Some(pl))
+                                .await;
                     });
                     inflight.insert(conn, h);
                 }
@@ -250,11 +357,43 @@ pub async fn run_transfer_into<C: Connector>(
         // Watchdog: any byte of progress resets the clock, so this fires only
         // when the whole transfer — not merely one connection — has been silent.
         // A slow-but-moving source is never killed by it, however slow.
+        // Accrue grace for time spent under a deliberate suspension. Measured as
+        // elapsed wall clock since the previous iteration rather than as the
+        // suspension's nominal length, so a pause that ends early costs only what it
+        // actually took.
+        {
+            let dt = last_tick_at.elapsed().as_secs_f64();
+            last_tick_at = Instant::now();
+            if sched
+                .all_sources_suspended_until(t0.elapsed().as_secs_f64())
+                .is_some()
+            {
+                backoff_grace = (backoff_grace + dt).min(backoff_grace_cap);
+            }
+        }
+
         let held_now = sched.bytes_held();
         if held_now > last_held {
             last_held = held_now;
             last_progress_at = Instant::now();
-        } else if last_progress_at.elapsed().as_secs_f64() > no_progress_deadline {
+        } else if last_progress_at.elapsed().as_secs_f64() > no_progress_deadline + backoff_grace {
+            // The deadline is extended by `backoff_grace`: the time the scheduler
+            // has DELIBERATELY spent with every source suspended, capped.
+            //
+            // Silence the scheduler asked for is not a stall. After repeated stalls a
+            // source is suspended for a backoff interval, and with a single source —
+            // one URL, one CDN, the common case — nothing can move until it expires.
+            // Charging that against the no-progress deadline made hydra abort
+            // transfers it had itself paused: on a 121.7 MiB GitHub release asset, 4
+            // of 8 multi-connection runs died at "no progress for 16s", three of them
+            // holding 126.9-127.0 MB of 127.6 MB — 99.6% fetched, reported as failed.
+            //
+            // The grace is CAPPED, and the cap is the whole design. An uncapped
+            // version (reset the clock whenever every source is suspended) hangs
+            // forever on a source that black-holes from the first byte: each stall
+            // triggers another suspension, which forgives another deadline. That is
+            // the failure `a_lone_black_holing_source_fails_instead_of_idling_forever`
+            // exists to catch, and it caught it.
             for (_, h) in inflight.drain() {
                 h.abort();
             }
@@ -281,6 +420,13 @@ pub async fn run_transfer_into<C: Connector>(
     }
     for (_, h) in inflight.drain() {
         h.abort();
+    }
+    if report_pool {
+        let (hits, misses) = pool.stats();
+        eprintln!(
+            "pool: {hits} reused, {misses} fresh ({} requests, {} repairs)",
+            sched.stats.requests, sched.stats.repairs
+        );
     }
     Ok((t0.elapsed().as_secs_f64(), sched.stats.requests))
 }
