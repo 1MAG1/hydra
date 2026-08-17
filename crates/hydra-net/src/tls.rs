@@ -180,7 +180,7 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
 ///
 /// A property of the connection rather than of the request, so it lives on the
 /// connector beside the proxy. The flags were parsed and forwarded through the
-/// wget/curl compat layer but never reached any socket: `-6` against an
+/// compatibility layer but never reached any socket: `-6` against an
 /// IPv4-only host connected happily over IPv4 and reported success.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum IpFamily {
@@ -243,8 +243,8 @@ impl IpFamily {
 ///
 /// It showed up as involuntary context switches — "used up a timeslice", the overhead
 /// kind, as opposed to the voluntary "waited for I/O" kind that is the actual work.
-/// Measured on an 11 MB transfer: ~192 at `-x 1` but ~1250-2260 for any n > 1, against
-/// curl's 3-4 and wget's 3. The shape is the tell: a STEP at "more than one connection"
+/// Measured on an 11 MB transfer: ~192 at `-x 1` but ~1250-2260 for any n > 1. The shape
+/// is the tell: a STEP at "more than one connection"
 /// rather than growth proportional to n, which is what a per-connection setup cost looks
 /// like when the transfer is long enough for the connections to overlap. Sampling
 /// `/proc/<pid>/task/*` mid-transfer showed 11 live worker threads under a 4-worker
@@ -576,7 +576,7 @@ mod tests {
     /// `-4` and `-6` must actually filter candidate addresses.
     ///
     /// Regression test: both flags were declared on the CLI and forwarded through
-    /// the wget/curl compat layer, but no DNS or socket code ever read them —
+    /// the compatibility layer, but no DNS or socket code ever read them —
     /// `-6` against an IPv4-only host connected over IPv4 and reported success.
     /// The filter is what makes the flag mean something, and refusing is the
     /// correct outcome when the requested family is absent: falling back to the

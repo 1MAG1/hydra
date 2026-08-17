@@ -91,13 +91,11 @@ impl Proxy {
     ///
     /// Accepts `http://`, `https://` (treated as http-proxy semantics), `socks4://`,
     /// `socks4a://`, `socks5://`, and `socks5h://`, with optional `user:pass@` and an
-    /// optional port. A bare `host:port` with no scheme is treated as HTTP, matching
-    /// curl and wget.
+    /// optional port. A bare `host:port` with no scheme is treated as HTTP by default.
     ///
     /// `socks5h` and `socks5` are both mapped to `Socks5`: this client always sends a
     /// hostname when it has one, because resolving locally and sending an address
-    /// defeats the main reason to use a SOCKS proxy. curl distinguishes them; here the
-    /// distinction would only add a way to configure a worse outcome.
+    /// defeats the main reason to use a SOCKS proxy.
     pub fn parse(raw: &str) -> Result<Self, String> {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -105,7 +103,7 @@ impl Proxy {
         }
         let (scheme, rest) = match raw.split_once("://") {
             Some((s, r)) => (s.to_ascii_lowercase(), r),
-            // No scheme: curl and wget both assume an HTTP proxy here.
+            // No scheme: default to an HTTP proxy.
             None => ("http".to_string(), raw),
         };
         let kind = match scheme.as_str() {
@@ -445,7 +443,7 @@ mod tests {
 
     #[test]
     fn a_bare_host_port_is_an_http_proxy() {
-        // curl and wget both assume HTTP when no scheme is given.
+        // Assume HTTP when no scheme is given.
         let p = Proxy::parse("proxy.corp:3128").unwrap();
         assert_eq!(p.kind, ProxyKind::Http);
         assert_eq!(p.port, 3128);

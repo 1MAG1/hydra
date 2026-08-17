@@ -107,7 +107,7 @@ pub struct ConcurrencyRamp {
 /// * Windows too SHORT (`MAX_WINDOW_S` = 0.6 s, i.e. ~3 RTTs at the 200 ms RTT of these
 ///   origins, against the 4–8 RTTs slow start needs): every level looks like it is
 ///   still improving, so the search runs to the ceiling. Measured settling at 8 on a
-///   path a single stream saturates, 1.68–2.23x slower than aria2c.
+///   path a single stream saturates, causing significant transfer slowdown.
 ///
 /// No single value satisfies both, which is why the ramp no longer climbs from one. It
 /// starts at the concurrency that measured fastest in the field and only *adds* when
@@ -142,17 +142,18 @@ impl ConcurrencyRamp {
     ///
     /// Climbing costs a measurement window per level, and a window long enough to
     /// outlast slow start (see `WINDOW_DELTAS`) is long enough that the climb dominates
-    /// a short transfer. Climbing from one is only worth it if one is likely to be the
-    /// answer *and* the levels above it are likely to be much better — but the field
-    /// data says the opposite on both counts: a single connection was the fastest
-    /// configuration measured, beating `aria2c -x 8` by 8–15% (paired ratios 0.85x,
-    /// 0.90x, 0.92x on 3 MB / 11 MB / 122 MB, all runs digest-verified), while `-x 8`
-    /// cost 1.37–3.04x against the same baseline.
+    /// a short transfer. Climbing from one is only worth it if the levels above one are
+    /// likely to be much better — and on the paths measured, they are not.
     ///
-    /// So the prior is inverted from what a climbing search assumes. Starting at the
-    /// configuration that wins and admitting more only on evidence of headroom means
-    /// the common case pays nothing for the search, and the search only spends time
-    /// when there is something to find.
+    /// The asymmetry, not a claimed win, is what justifies starting low. Measured
+    /// over 20 paired repetitions on four objects, starting at 1 connection is
+    /// statistically indistinguishable from a fixed baseline while fixed `-x 8`
+    /// cost 1.37–3.04x, and on a path a single stream already saturates `-x 8`
+    /// incurred a 3.6x slowdown where `-x 1` was 1.17x. So the downside of starting
+    /// high is large and measured; the upside is not.
+    ///
+    /// Starting at one is therefore a conservative policy choice, ensuring minimal
+    /// overhead while admitting more connections only when headroom is proven.
     pub fn starting_at(min_gain_frac: f64, start: usize, max: usize) -> Self {
         let mut r = Self::new(min_gain_frac, max);
         r.level = start.clamp(1, r.max);
@@ -232,7 +233,7 @@ impl ConcurrencyRamp {
         // indistinguishable from "this connection is paying for itself". Acting on a
         // single window is what drove the search to the ceiling on a path one stream
         // already saturated (settled counts [2, 8, 8, 8, 8] over five repetitions,
-        // 1.68-2.23x slower than aria2c).
+        // resulting in 1.68-2.23x slower transfers).
         //
         // The first window at a level is held back rather than recorded, so `Admission`
         // sees one sample per level and its per-connection gain arithmetic stays valid.

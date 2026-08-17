@@ -66,7 +66,8 @@ impl Admission {
     /// connections, so returning `samples.len() - 1` returned a sample index dressed
     /// as a connection count.
     ///
-    /// Measured consequence, 11 MB object, five repetitions: settled counts came back
+    /// HISTORICAL MEASUREMENT (pre-fix implementation; retained to document why this
+    /// design exists, not as a current result). 11 MB object, five repetitions: settled counts came back
     /// `[2, 8, 8, 8, 8]` on a path a single stream already saturates. The `2` is the
     /// index bug reporting sample 3 as "2"; the four `8`s are the ceiling arm firing
     /// because the sample-count test `n >= max_conns` needs eight samples and doubling
@@ -266,12 +267,13 @@ mod tests {
     /// describes FOUR connections.
     ///
     /// Two things broke at once, and the field data showed both. Settled counts over
-    /// five repetitions on an 11 MB object came back `[2, 8, 8, 8, 8]` on a path a
-    /// single stream already saturates: the `2` is sample 3 reported as level 2, and the
-    /// four `8`s are the ceiling arm, whose `samples.len() >= max_conns` test needs
-    /// eight samples while doubling only ever produces four. The mode ended up no
-    /// better than hard-coding the ceiling (0.99x, p = 0.63) while one connection was
-    /// 1.97x faster than either.
+    /// HISTORICAL MEASUREMENT (pre-fix implementation; retained to document why this test
+    /// exists, not as a current result). Five repetitions on an 11 MB object came back
+    /// `[2, 8, 8, 8, 8]` on a path a single stream already saturates: the `2` is sample 3
+    /// reported as level 2, and the four `8`s are the ceiling arm, whose
+    /// `samples.len() >= max_conns` test needs eight samples while doubling only ever
+    /// produces four. The mode ended up no better than hard-coding the ceiling
+    /// (0.99x, p = 0.63) while one connection was 1.97x faster than either.
     #[test]
     fn a_doubling_caller_settles_on_a_real_connection_count() {
         // Saturated path: 1 -> 2 -> 4 all deliver the same, so the answer is 1.

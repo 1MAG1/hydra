@@ -836,7 +836,7 @@ impl Scheduler {
             }
             // Nothing unassigned: steal from the worst laggard.
             //
-            // This is steal-half (aria2's policy), and it fires on a DIFFERENT
+            // This is the steal-half heuristic, and it fires on a DIFFERENT
             // trigger from the divergence repair above: not "the finishes have
             // diverged" but "a connection has gone idle and there is nothing left
             // to give it". Splitting the laggard's remainder down the middle is the

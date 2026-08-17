@@ -114,7 +114,7 @@ impl Progress {
         }
     }
 
-    /// Send human output to `path` instead of the terminal (wget `-o` / `-a`).
+    /// Send human output to `path` instead of the terminal (`-o` / `-a` logfile).
     ///
     /// `append` distinguishes `--logfile-append` from `--logfile`, which truncates.
     /// Opening eagerly and reporting the error is deliberate: a log file that
@@ -1158,12 +1158,12 @@ mod tests {
     /// and nothing ever told it what `SIZE` returned — so a transfer whose exact
     /// length was known before the first byte moved rendered an empty rule, a
     /// `?` percentage, a `?` total and a `?` ETA for its entire duration
-    /// (measured on ftp.gnu.org/gnu/wget/wget-latest.tar.gz: `334.9 KiB/?`).
+    /// (measured on unknown-size stream: `334.9 KiB/?`).
     /// Asserted on the frame's text, because the previous suite could only count
     /// lines and a `?` where a percentage belongs occupies exactly one line.
     #[test]
     fn a_size_learned_after_construction_still_draws_a_bar() {
-        let mut p = Progress::new("wget-latest.tar.gz", None, 0, false, false);
+        let mut p = Progress::new("archive-latest.tar.gz", None, 0, false, false);
         p.force_tty();
         let (unknown, _) = p.frame(1 << 20, 4.0e5, &[], Counters::default());
         assert!(
@@ -1208,7 +1208,7 @@ mod tests {
     #[test]
     fn a_connection_row_tracks_the_cursor_rather_than_filling() {
         let total = 342_954u64;
-        let mut p = Progress::new("wget-latest.tar.gz", Some(total), 0, false, false);
+        let mut p = Progress::new("archive-latest.tar.gz", Some(total), 0, false, false);
         p.force_tty();
         let at = |done: u64| {
             let views = vec![ConnView {

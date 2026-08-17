@@ -166,9 +166,9 @@ fn build_request_head_disp(
 /// Some resources have no knowable size in advance: a dynamically generated page, a
 /// `Content-Range: bytes 0-0/*` reply (an asterisk total means "I will not say"), or a
 /// chunked response with no length at all. Multi-source scheduling is impossible here —
-/// with no size there are no ranges to divide — but *fetching* is not, and curl handles
-/// these routinely. Refusing them made `hydra <html-page>` fail where every other
-/// client succeeds.
+/// with no size there are no ranges to divide — but *fetching* is not, and standard clients
+/// handle these routinely. Refusing them made `hydra <html-page>` fail where other
+/// tools succeed.
 ///
 /// So this is the honest degradation: one connection, sequential, no resume, no
 /// parallelism, and the caller is told that is what happened.
@@ -379,8 +379,7 @@ fn dechunk(body: &[u8]) -> Vec<u8> {
 ///
 /// A `bytes=0-0` GET is the robust alternative: it costs one byte of body, it proves
 /// range support rather than trusting an `Accept-Ranges` advertisement, and its
-/// `Content-Range` carries the total size. This is what curl's `--head`-less probing
-/// effectively does.
+/// `Content-Range` carries the total size, effectively probing without needing a separate HEAD request.
 pub async fn probe_via_get<C: Connector>(c: &C, t: &Target) -> io::Result<Probe> {
     let mut s = c.connect(t).await?;
     let req = build_request_head("GET", t, Some((0, 0)));

@@ -888,9 +888,9 @@ mod tests {
         }
     }
 
-    /// In a FOREIGN dialect, aria2c's spelling is translated to the canonical one.
+    /// In a foreign dialect, connection flag spellings are translated to the canonical one.
     #[test]
-    fn aria2_style_connection_flags_translate_in_foreign_dialects() {
+    fn foreign_connection_flags_translate_in_dialects() {
         assert_eq!(
             canon(Personality::Wget, &["--split", "4", "http://x/f"]),
             s(&["--max-connection-per-server", "4", "http://x/f"])

@@ -94,7 +94,7 @@ pub struct Target {
     pub path: String,
     /// Connect with TLS.
     pub tls: bool,
-    /// Extra request headers, verbatim `Name: value` lines (curl -H).
+    /// Extra request headers, verbatim `Name: value` lines (`-H`).
     pub headers: Vec<String>,
     /// `User-Agent` to send.
     pub agent: Option<String>,
@@ -273,7 +273,7 @@ impl Watermark {
 /// transfer starts, and without somewhere shared to put that connection its
 /// handshake is thrown away and the transfer redials the host it was just talking
 /// to. Measured on a live TLS path, that was 1.6-2.0 s of setup on a transfer whose
-/// body took 3.7-5.5 s — the largest single remaining gap against curl, and pure
+/// body took 3.7-5.5 s — a significant unnecessary latency gap and pure
 /// waste rather than a design cost.
 ///
 /// The default returns `None`, meaning "no shared pool": the transfer then creates

@@ -1,9 +1,7 @@
 //! Command-line surface.
 //!
-//! Flags follow `wget` and `curl` wherever both agree, and `aria2c` for the
-//! multi-connection options those two lack. The goal is that muscle memory
-//! works: `-O`, `-c`, `--limit-rate`, `-x`, `-s`, `-H`, `-U`, `-q`, `-v` all mean
-//! what a user already expects.
+//! Flags follow standard retriever conventions for muscle memory: `-O`, `-c`,
+//! `--limit-rate`, `-x`, `-s`, `-H`, `-U`, `-q`, `-v` all behave predictably.
 
 use clap::{Parser, Subcommand};
 use hya_net::polite::{parse_rate, Politeness, DEFAULT_PER_HOST, DEFAULT_TOTAL};
@@ -146,8 +144,8 @@ impl Cli {
         // and must still reach the parser, so the user gets an error rather than
         // a silently ignored argument.
         //
-        // This does cost the ability to SEND a deliberately empty header, which
-        // curl spells `Name;` — an unusual thing to want, and the tradeoff is
+        // This does cost the ability to SEND a deliberately empty header
+        // (such as `Name;`) — an unusual thing to want, and the tradeoff is
         // stated in the flag's help text.
         fn query_name(s: &str) -> Option<&str> {
             let name = match s.split_once(':') {
@@ -306,19 +304,19 @@ pub struct Cli {
     #[arg(value_name = "URL")]
     pub urls: Vec<String>,
 
-    /// Write output to this file (wget/curl -O).
+    /// Write output to this file (`-O`).
     #[arg(short = 'O', long = "output", value_name = "FILE")]
     pub output: Option<PathBuf>,
 
-    /// Continue a partially-downloaded file (wget -c).
+    /// Continue a partially-downloaded file (`-c`).
     #[arg(short = 'c', long = "continue")]
     pub resume: bool,
 
-    /// Connections per source (aria2c -x). Omit to measure the useful number.
+    /// Connections per source (`-x`). Omit to measure the useful number.
     #[arg(short = 'x', long = "max-connection-per-server", value_name = "N")]
     pub connections: Option<usize>,
 
-    /// Alias for -x, for aria2c muscle memory.
+    /// Alias for -x.
     ///
     /// Declared here rather than translated by the compat layer: native long
     /// options pass through untouched, so the parser is the single place that
@@ -326,7 +324,7 @@ pub struct Cli {
     #[arg(short = 's', long = "split", value_name = "N")]
     pub split: Option<usize>,
 
-    /// Cap the aggregate transfer rate, e.g. 500k, 2M (wget --limit-rate).
+    /// Cap the aggregate transfer rate, e.g. 500k, 2M (`--limit-rate`).
     #[arg(long = "limit-rate", value_name = "RATE")]
     pub limit_rate: Option<String>,
 
@@ -343,7 +341,7 @@ pub struct Cli {
     ///
     /// A name with no value is a question, not a header to send, in either
     /// spelling — the trailing colon is punctuation. This means an intentionally
-    /// empty request header (curl's `-H 'Name;'`) cannot be sent; that is a rare
+    /// empty request header (`-H 'Name;'`) cannot be sent; that is a rare
     /// need traded for the common one.
     ///
     /// Values are validated here rather than at send time: they are written onto
@@ -365,7 +363,7 @@ pub struct Cli {
     #[arg(skip)]
     pub header_queries: Vec<String>,
 
-    /// User-Agent to send (curl -U / wget -U).
+    /// User-Agent to send (`-U`).
     #[arg(
         short = 'U',
         visible_short_alias = 'A',
@@ -375,11 +373,11 @@ pub struct Cli {
     )]
     pub user_agent: String,
 
-    /// Retries per range before giving up on a source (wget --tries).
+    /// Retries per range before giving up on a source (`--tries`).
     #[arg(short = 't', long = "tries", value_name = "N", default_value_t = 4)]
     pub tries: u32,
 
-    /// Per-request timeout in seconds (wget --timeout).
+    /// Per-request timeout in seconds (`--timeout`).
     #[arg(
         long = "timeout",
         short = 'T',
@@ -410,7 +408,7 @@ pub struct Cli {
     #[arg(long = "checksum", value_name = "HASH", value_parser = parse_checksum)]
     pub checksum: Option<String>,
 
-    /// Suppress all output except errors (wget -q).
+    /// Suppress all output except errors (`-q`).
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
 
@@ -425,7 +423,7 @@ pub struct Cli {
     /// surprising reading: `hydra <a> <b>` with two unrelated links reported "skipping
     /// b: size differs (cannot prove it serves the same bytes)" and fetched only the
     /// first, which looks like a bug even though the mirror logic was working exactly as
-    /// designed. wget and curl both treat multiple URLs as multiple files.
+    /// designed. Standard convention is to treat multiple URLs as multiple files.
     ///
     /// Mirror assembly is still available and still safe — it just has to be asked for
     /// with `--mirrors`, because splitting one object across sources is only sound when
@@ -483,34 +481,32 @@ pub struct Cli {
     #[arg(long = "compat", value_name = "DIALECT")]
     pub compat: Option<String>,
 
-    /// Write to stdout instead of a file (wget -O-, curl -o -).
+    /// Write to stdout instead of a file (`--stdout`).
     #[arg(long = "stdout")]
     pub stdout: bool,
 
-    /// Name the output from the URL's last path component (curl -O).
+    /// Name the output from the URL's last path component.
     #[arg(long = "remote-name")]
     pub remote_name: bool,
 
-    /// Skip the download if the output file already exists (wget -nc).
+    /// Skip the download if the output file already exists (`-nc`).
     #[arg(long = "no-clobber")]
     pub no_clobber: bool,
 
-    /// Create the output directory if it does not exist (curl --create-dirs).
+    /// Create the output directory if it does not exist (`--create-dirs`).
     #[arg(long = "create-dirs")]
     pub create_dirs: bool,
 
-    /// Directory to save into (wget -P, curl --output-dir).
+    /// Directory to save into (`-P`).
     #[arg(long = "output-dir", short = 'P', value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
 
-    /// Probe headers and report, without retrieving the body (wget --spider, curl -I).
+    /// Probe headers and report, without retrieving the body (`--spider`).
     #[arg(long = "spider")]
     pub spider: bool,
 
-    /// Print the server's response headers (wget -S).
-    /// Show the request and response headers (`-i` for curl muscle memory, `-S` for
-    /// wget's). Not `-I`: in curl that means "headers only, no body", which is
-    /// `--spider` here.
+    /// Print the server's response headers (`-S` / `-i`).
+    /// Show the request and response headers.
     #[arg(
         long = "server-response",
         short = 'S',
@@ -527,7 +523,7 @@ pub struct Cli {
     #[arg(long = "force", short = 'f')]
     pub force: bool,
 
-    /// Retrieve only this byte range, e.g. 0-1023, 1024-, or -512 (curl -r).
+    /// Retrieve only this byte range, e.g. 0-1023, 1024-, or -512 (`-r`).
     ///
     /// `allow_hyphen_values` is required: a suffix range like `-512` otherwise
     /// parses as an unknown short flag rather than a value.
@@ -539,55 +535,55 @@ pub struct Cli {
     )]
     pub range: Option<String>,
 
-    /// Start at this byte offset (wget --start-pos, curl -C N).
+    /// Start at this byte offset (`--start-pos`).
     #[arg(long = "start-pos", value_name = "OFFSET")]
     pub start_pos: Option<u64>,
 
-    /// Exit non-zero on an HTTP error without writing a file (curl -f).
+    /// Exit non-zero on an HTTP error without writing a file (`--fail`).
     #[arg(long = "fail")]
     pub fail: bool,
 
-    /// Show errors even when quiet (curl -S).
+    /// Show errors even when quiet (`--show-error`).
     #[arg(long = "show-error")]
     pub show_error: bool,
 
-    /// Force the progress display on, even when not a terminal (wget --show-progress).
+    /// Force the progress display on, even when not a terminal (`--show-progress`).
     #[arg(long = "show-progress")]
     pub show_progress: bool,
 
-    /// Reduce output without silencing it (wget -nv).
+    /// Reduce output without silencing it (`-nv`).
     #[arg(long = "no-verbose")]
     pub no_verbose: bool,
 
-    /// Log to this file instead of the terminal (wget -o).
+    /// Log to this file instead of the terminal (`-o`).
     #[arg(long = "logfile", short = 'o', value_name = "FILE")]
     pub logfile: Option<PathBuf>,
 
-    /// Append to the log file instead of truncating (wget -a).
+    /// Append to the log file instead of truncating (`-a`).
     #[arg(long = "logfile-append", value_name = "FILE")]
     pub logfile_append: Option<PathBuf>,
 
-    /// Set the local file's mtime from the server (wget -N, curl -R).
+    /// Set the local file's mtime from the server (`-N`).
     #[arg(long = "remote-time", short = 'N')]
     pub remote_time: bool,
 
-    /// Name the output from a Content-Disposition header (curl -J).
+    /// Name the output from a Content-Disposition header.
     #[arg(long = "content-disposition")]
     pub content_disposition: bool,
 
-    /// Follow redirects (curl -L). On by default; the flag exists for scripts.
+    /// Follow redirects (`-L`). On by default; the flag exists for scripts.
     #[arg(long = "location", short = 'L')]
     pub location: bool,
 
-    /// Maximum redirects to follow (wget --max-redirect, curl --max-redirs).
+    /// Maximum redirects to follow (`--max-redirs`).
     #[arg(long = "max-redirs", value_name = "N", default_value_t = 8)]
     pub max_redirs: u32,
 
-    /// Refuse an object larger than this many bytes (curl --max-filesize).
+    /// Refuse an object larger than this many bytes (`--max-filesize`).
     #[arg(long = "max-filesize", value_name = "BYTES")]
     pub max_filesize: Option<u64>,
 
-    /// Proxy to use (curl -x). Defaults to $http_proxy / $all_proxy.
+    /// Proxy to use. Defaults to $http_proxy / $all_proxy.
     ///
     /// Accepts `http://`, `socks4://`, `socks4a://`, `socks5://`, and `socks5h://`,
     /// with optional `user:pass@` credentials. SOCKS is a different mechanism, not a
@@ -598,11 +594,11 @@ pub struct Cli {
     #[arg(long = "proxy", value_name = "URL")]
     pub proxy: Option<String>,
 
-    /// Ignore any proxy in the environment (wget --no-proxy).
+    /// Ignore any proxy in the environment (`--no-proxy`).
     #[arg(long = "no-proxy")]
     pub no_proxy: bool,
 
-    /// Allow certificates that do not verify (curl -k, wget --no-check-certificate).
+    /// Allow certificates that do not verify (`--insecure`).
     #[arg(long = "insecure")]
     pub insecure: bool,
 
@@ -614,15 +610,15 @@ pub struct Cli {
     ///
     /// Conflicts with `-4`: "IPv4 only AND IPv6 only" has no satisfiable reading,
     /// and silently picking one of them is how a flag comes to look like it works
-    /// while doing nothing. curl rejects the combination too.
+    /// while doing nothing.
     #[arg(long = "ipv6", short = '6', conflicts_with = "ipv4")]
     pub ipv6: bool,
 
-    /// Seconds to wait between retries (wget --waitretry, curl --retry-delay).
+    /// Seconds to wait between retries (`--retry-delay`).
     #[arg(long = "retry-delay", value_name = "SECS", default_value_t = 0.5)]
     pub retry_delay: f64,
 
-    /// Seconds to wait between separate URLs (wget -w).
+    /// Seconds to wait between separate URLs (`--wait`).
     #[arg(long = "wait", value_name = "SECS", default_value_t = 0.0)]
     pub wait: f64,
 
@@ -630,19 +626,19 @@ pub struct Cli {
     #[arg(long = "connect-timeout", value_name = "SECS")]
     pub connect_timeout: Option<f64>,
 
-    /// Read URLs from a file, one per line (wget -i).
+    /// Read URLs from a file, one per line (`--input-file`).
     #[arg(long = "input-file", value_name = "FILE")]
     pub input_file: Option<PathBuf>,
 
-    /// Compare against an ETag stored in this file (curl --etag-compare).
+    /// Compare against an ETag stored in this file (`--etag-compare`).
     #[arg(long = "etag-compare", value_name = "FILE")]
     pub etag_compare: Option<PathBuf>,
 
-    /// Save the object's ETag to this file (curl --etag-save).
+    /// Save the object's ETag to this file (`--etag-save`).
     #[arg(long = "etag-save", value_name = "FILE")]
     pub etag_save: Option<PathBuf>,
 
-    /// Retrieve several URLs concurrently (curl -Z). Distinct objects, not mirrors.
+    /// Retrieve several URLs concurrently (`-Z`). Distinct objects, not mirrors.
     #[arg(long = "parallel", short = 'Z')]
     pub parallel: bool,
 
@@ -651,7 +647,7 @@ pub struct Cli {
     pub parallel_max: usize,
 
     /// Sort the finished file into a per-category subdirectory (Video, Music,
-    /// Compressed, Documents, Programs, ...), the way IDM does.
+    /// Compressed, Documents, Programs, ...).
     ///
     /// The category comes from the payload's magic bytes, not from the extension
     /// or the server's Content-Type, both of which are frequently wrong.

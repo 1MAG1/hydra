@@ -17,16 +17,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Default connections per host. Public-mirror etiquette, not a physical limit:
-/// aria2 defaults to 5 per host with a 16 total, wget to 1, curl to 1. Four is
-/// within the range mirror operators tolerate.
+/// four connections per host balances parallelism against server politeness and
+/// remains within standard acceptable load thresholds.
 pub const DEFAULT_PER_HOST: usize = 4;
 
 /// Default ceiling across all hosts, so a large mirror list cannot fan out into
 /// hundreds of sockets.
 pub const DEFAULT_TOTAL: usize = 16;
 
-/// Redirect depth limit. curl uses 50 by default; a download that redirects more
-/// than a handful of times is misconfigured, and each hop costs a full `delta`.
+/// Redirect depth limit. A download that redirects more than a handful of times
+/// is typically misconfigured, and each hop costs a full `delta` round-trip.
 pub const MAX_REDIRECTS: u32 = 8;
 
 /// Politeness configuration.
@@ -350,7 +350,7 @@ impl Pace {
 }
 
 /// Parse a `--limit-rate` value: bare bytes, or with a k/K/m/M/g/G suffix.
-/// Matches wget's and curl's accepted forms.
+/// Accepts standard rate-limit unit conventions.
 pub fn parse_rate(s: &str) -> Option<u64> {
     let t = s.trim();
     if t.is_empty() {
@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn rate_parsing_matches_wget_forms() {
+    fn rate_parsing_matches_standard_forms() {
         assert_eq!(parse_rate("1024"), Some(1024));
         assert_eq!(parse_rate("2k"), Some(2048));
         assert_eq!(parse_rate("2K"), Some(2048));

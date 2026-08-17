@@ -106,7 +106,7 @@ fn digest(path: &str, expect_len: u64) -> Option<String> {
     Some(format!("{h:016x}"))
 }
 
-/// Single sequential stream: the `curl` baseline.
+/// Single sequential stream baseline.
 async fn run_single(obj: &RealObject) -> Option<(f64, String)> {
     let t = targets(obj, 1).remove(0);
     let out = std::env::temp_dir().join(format!("hydra_real_single_{}", obj.name));
@@ -288,12 +288,12 @@ pub async fn bench(reps: usize) {
             // Baseline first in each rep, so both see similar network conditions.
             match run_single(&obj).await {
                 Some((el, d)) => println!(
-                    "{},{mb:.2},single stream (curl-equivalent),{rep},{el:.3},{:.2},1,{d},1,,,,",
+                    "{},{mb:.2},single stream (baseline),{rep},{el:.3},{:.2},1,{d},1,,,,",
                     obj.name,
                     mb / el
                 ),
                 None => println!(
-                    "{},{mb:.2},single stream (curl-equivalent),{rep},,,,,0,,,,",
+                    "{},{mb:.2},single stream (baseline),{rep},,,,,0,,,,",
                     obj.name
                 ),
             }

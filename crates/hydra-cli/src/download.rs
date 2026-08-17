@@ -146,7 +146,7 @@ pub struct Job {
     pub etag_save: Option<PathBuf>,
     /// Skip if the stored ETag still matches.
     pub etag_compare: Option<PathBuf>,
-    /// Sort the output into a per-category subdirectory (IDM-style).
+    /// Sort the output into a per-category subdirectory based on file type.
     pub sort_by_type: bool,
     /// Content-Type the server reported, for classification.
     pub content_type: Option<String>,
@@ -193,6 +193,13 @@ pub struct Outcome {
     /// The highest active limit reached, which under `--adaptive` is the top of the
     /// search rather than the answer. Equal to `connections` for fixed `-x`.
     pub peak_connections: usize,
+    /// The most connections that ever actually held a range simultaneously. Differs from
+    /// the limit in both directions: lowering the limit lets a busy connection finish, and
+    /// a connection can be idle between ranges.
+    pub peak_busy_connections: usize,
+    /// Integral of busy connections over time. The only concurrency figure here that
+    /// summarises the whole run rather than a moment or a bound.
+    pub connection_seconds: f64,
     pub delta_s: f64,
     pub sha256: Option<String>,
     pub checksum_ok: Option<bool>,
@@ -442,7 +449,7 @@ async fn verify_prefix<C: hya_net::Connector>(
     }
 }
 
-/// Print the probe exchange the way `curl -iv` does: request with `>`, response with
+/// Print the probe exchange with request prefixed by `>` and response prefixed by
 /// `<`, so a pasted transcript is unambiguous about direction.
 fn print_exchange(pr: &hya_net::Probe) {
     for line in pr.raw_request.lines() {
@@ -566,9 +573,8 @@ async fn ftp_fetch(job: &Job, u: &Url, p: &mut Progress, outs: String) -> Outcom
     // The size FTP already answered has to reach the renderer, or the bar cannot
     // draw. `ftp_fetch` is handed the setup-phase `Progress`, built before any
     // request when no size was known, and a `None` total renders an empty rule, a
-    // `?` percentage and a `?` ETA for the whole transfer — measured on
-    // ftp.gnu.org/gnu/wget/wget-latest.tar.gz, which reported `334.9 KiB/?` while
-    // SIZE had returned the exact length during the probe two lines above.
+    // `?` percentage and a `?` ETA for the whole transfer when total size is unknown,
+    // even though SIZE had returned the exact length during the probe two lines above.
     p.set_total(probe.size);
     p.set_baseline(start);
     let t_xfer = Instant::now();
@@ -690,6 +696,10 @@ async fn ftp_fetch(job: &Job, u: &Url, p: &mut Progress, outs: String) -> Outcom
         connections: 1,
         // No concurrency search on this path, so the peak is what it ran at.
         peak_connections: 1,
+        // FTP has no validator, so fetches are single-source by design: one connection
+        // held a range for the whole transfer.
+        peak_busy_connections: 1,
+        connection_seconds: elapsed,
         delta_s: 0.0,
         sha256: digest,
         checksum_ok: None,
@@ -860,7 +870,7 @@ where
     // `MAX_HOPS = 8` that nothing could influence: `--max-redirs 0` followed the
     // redirect and downloaded the object anyway.
     //
-    // `0` means refuse to follow any, as curl and wget spell it. One probe still
+    // `0` means refuse to follow any redirect hops. One probe still
     // happens — that is how a redirect is discovered at all — but the hop is not
     // taken.
     let max_hops = max_redirs as usize;
@@ -1240,11 +1250,11 @@ async fn verify_and_repair_chunks(
 /// writes at exact offsets and holds no reassembly buffer, so the digest was the only
 /// part of the program that could not fetch a file larger than RAM.
 ///
-/// Measured on a 121.7 MiB GitHub release asset: peak RSS 127 MB against curl's
-/// 14 MB and wget's 11 MB. The signature that identified it was that hydra's FAILED
-/// runs used 11 MB — a failed transfer skips the digest, so the footprint was
-/// entirely this function. A 1 GiB download would have needed 1 GiB of resident
-/// memory, on a tool intended to run on servers.
+/// Measured on a 121.7 MiB release asset: buffering the entire file scaled RSS
+/// to 127 MB instead of a constant ~11-14 MB. The signature that identified it was
+/// that hydra's FAILED runs used 11 MB — a failed transfer skips the digest, so the
+/// footprint was entirely this function. A 1 GiB download would have needed 1 GiB
+/// of resident memory.
 ///
 /// 1 MiB chunks: large enough that syscall overhead is negligible against disk
 /// throughput, small enough to stay in L2 and to keep the resident cost constant
@@ -1433,10 +1443,9 @@ pub async fn run(job: Job) -> Outcome {
     }
     if size == 0 && !job.spider {
         // No knowable size. Multi-source scheduling is impossible — with no total there
-        // are no ranges to divide — but FETCHING is not, and curl does this routinely
-        // for dynamic pages and `Content-Range: bytes 0-0/*` replies. Degrade to a
-        // single sequential stream and say so, rather than failing where every other
-        // client succeeds.
+        // are no ranges to divide — but FETCHING is not, which standard HTTP clients
+        // do routinely for dynamic pages and `Content-Range: bytes 0-0/*` replies. Degrade to a
+        // single sequential stream and say so, rather than failing where other tools succeed.
         if job.server_response {
             // Clear the spinner first: it shares the row and would prefix the request
             // line with a partial frame.
@@ -1982,6 +1991,14 @@ pub async fn run(job: Job) -> Outcome {
     // The limit the transfer FINISHED at, as opposed to the peak it explored.
     let settled_conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let settled_conns_obs = settled_conns.clone();
+    // The most connections that ever actually held a range at once, which is not the
+    // same as the limit that permitted them.
+    let peak_busy = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let peak_busy_obs = peak_busy.clone();
+    // Busy-connection-seconds, in micro-units so the accumulator can be atomic.
+    let conn_secs = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let conn_secs_obs = conn_secs.clone();
+    let conn_secs_last = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
     // Requests the scheduler actually issued, sampled live. Needed because a failed
     // transfer returns no count, and reporting zero there printed a request count
@@ -2063,25 +2080,49 @@ pub async fn run(job: Job) -> Outcome {
                 sc.stats.requests,
                 std::sync::atomic::Ordering::Relaxed,
             );
-            // Two different numbers, and conflating them cost two wrong diagnoses.
+            // FOUR different numbers, and conflating any two of them has already cost a
+            // wrong diagnosis. The distinctions are not pedantic:
             //
-            // `fetch_max` records the HIGHEST active limit the transfer ever reached.
-            // Under `--adaptive` that is the top of the search, not the answer: the
-            // ramp raises the limit to measure a level and lowers it again when the
-            // level does not pay. Reporting the peak made a correctly-settled search
-            // look like a runaway — traced windows showed it stopping at 2 while the
-            // summary said 4 — and sent the investigation after the ramp logic twice.
-            //
-            // So record both: the peak, for understanding what the search explored,
-            // and the final limit, which is what the transfer actually ran at.
-            used_conns_obs.fetch_max(
-                sc.active_limit().min(sc.n_conns()),
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            settled_conns_obs.store(
-                sc.active_limit().min(sc.n_conns()),
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            //  * `peak_connections` — highest admission limit ever set. Under
+            //    `--adaptive` this is the top of the SEARCH, not its answer: the ramp
+            //    raises the limit to measure a level and lowers it when the level does
+            //    not pay. Reporting this as "connections" made a correctly-settled
+            //    search look like a runaway (traced windows showed it stopping at 2
+            //    while the summary said 4) and sent the investigation after the ramp
+            //    logic twice.
+            //  * `settled_connections` — the admission limit at the end. This is a
+            //    POLICY number: it says what the scheduler was willing to run, not what
+            //    it did run.
+            //  * `peak_busy_connections` — the most connections that ever actually held
+            //    a range at once. This differs from the limit in both directions:
+            //    lowering the limit lets an already-busy connection finish its range and
+            //    go quiet, so real concurrency lags the limit downward; and a connection
+            //    can be idle between ranges, so it lags upward too.
+            //  * `connection_seconds` — the integral of busy connections over time,
+            //    which is the only one of the four that summarises the WHOLE run rather
+            //    than a moment or a bound. For research this is the number that belongs
+            //    next to a throughput figure.
+            let limit_now = sc.active_limit().min(sc.n_conns());
+            used_conns_obs.fetch_max(limit_now, std::sync::atomic::Ordering::Relaxed);
+            settled_conns_obs.store(limit_now, std::sync::atomic::Ordering::Relaxed);
+            let busy_now = sc.busy_conns();
+            peak_busy_obs.fetch_max(busy_now, std::sync::atomic::Ordering::Relaxed);
+            // Rectangle rule over the observer's own interval. The observer runs on the
+            // transfer's tick, so the interval is the tick period; deriving it from the
+            // clock rather than assuming a constant keeps the integral honest if the
+            // tick is ever retimed or a tick is late.
+            {
+                let mut last = conn_secs_last.lock().unwrap();
+                let now = std::time::Instant::now();
+                let dt = now.duration_since(*last).as_secs_f64();
+                *last = now;
+                // Stored as micro-connection-seconds in an integer so the accumulator
+                // needs no lock of its own and cannot drift on float addition order.
+                conn_secs_obs.fetch_add(
+                    (busy_now as f64 * dt * 1e6) as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
             // No resume record under `--no-save`: there is no file to resume INTO,
             // so a sidecar would be a stray file created by the flag that promises
             // to create none. (Caught end-to-end, not by a unit test: the periodic
@@ -2267,7 +2308,7 @@ pub async fn run(job: Job) -> Outcome {
     // prefix, plausible size, silently wrong file. The same failure shape as the
     // sparse-file and truncating-reopen bugs recorded elsewhere in this project.
     //
-    // curl -r writes only the requested bytes, and that is the only reading of
+    // Byte-range retrieval should write only the requested bytes, and that is the only reading of
     // "retrieve only this byte range" that makes sense. A suffix range must give
     // a 512-byte file, not a 34 041-byte file whose last 512 bytes are real.
     //
@@ -2424,7 +2465,7 @@ pub async fn run(job: Job) -> Outcome {
 
     if job.server_response {
         p.end_phase();
-        // Verbatim first, interpretation second. curl -i prints what arrived; the
+        // Verbatim first, interpretation second. Print raw headers as received; the
         // paraphrase below is a convenience, and when the two disagree the raw block
         // is the evidence.
         print_exchange(&probe_info);
@@ -2484,7 +2525,7 @@ pub async fn run(job: Job) -> Outcome {
     // of `--stdout` is piping, and a pipeline is exactly where buffering the entire
     // object is least affordable. `std::io::copy` on a 1 GiB download needed 1 GiB
     // resident; the same defect in the digest cost 127 MB of peak RSS on a 121.7 MiB
-    // object, against curl's 14 MB.
+    // object, keeping resident memory footprint bounded.
     if job.to_stdout && complete {
         match std::fs::File::open(&out_path) {
             Ok(mut f) => {
@@ -2646,6 +2687,8 @@ pub async fn run(job: Job) -> Outcome {
             .max(1)
             .min(used_conns.load(std::sync::atomic::Ordering::Relaxed).max(1)),
         peak_connections: used_conns.load(std::sync::atomic::Ordering::Relaxed).max(1),
+        peak_busy_connections: peak_busy.load(std::sync::atomic::Ordering::Relaxed),
+        connection_seconds: conn_secs.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
         delta_s: delta,
         sha256: digest,
         checksum_ok,
@@ -2679,7 +2722,7 @@ impl Outcome {
 
 fn failed(job: &Job, size: u64, why: String) -> Outcome {
     // `-q` silences normal output; `--show-error` carves out the exception for
-    // failures, as curl's `-s -S` pair does. Without it a quiet run that failed
+    // failures when requested. Without it a quiet run that failed
     // was indistinguishable from a quiet run that succeeded: empty stdout, empty
     // stderr, and only the exit code to tell them apart.
     if !job.quiet || job.show_error {
@@ -2729,7 +2772,7 @@ mod tests {
 
     #[test]
     fn closed_ranges_are_inclusive_as_http_spells_them() {
-        // curl -r 0-1023 is 1024 bytes.
+        // A range 0-1023 represents 1024 bytes.
         assert_eq!(RangeSpec::Closed(0, 1023).resolve(10_000), Some((0, 1024)));
         assert_eq!(
             RangeSpec::Closed(1000, 2023).resolve(10_000),

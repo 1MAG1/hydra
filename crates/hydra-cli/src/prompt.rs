@@ -6,8 +6,7 @@
 //! `file.iso` already present, and every one of them is wrong in some situation:
 //! resuming corrupts the file if the remote object changed, restarting throws away a
 //! 4 GB partial transfer, renaming leaves the user with `file.iso.1` they did not ask
-//! for, and refusing is useless in a script. wget picks renaming, curl picks
-//! overwriting, and both surprise people regularly.
+//! for, and refusing is useless in a script.
 //!
 //! So an interactive terminal asks. A non-interactive one must not: a prompt with
 //! nobody to answer it is a hang, which in a cron job or a CI step is worse than any
@@ -116,8 +115,8 @@ pub fn decide<R: BufRead, W: Write>(
             // makes it safe, so there is nothing left to ask about.
             ResumeOffer::Sound(_) | ResumeOffer::Verifiable(_) => Existing::Resume,
             ResumeOffer::LooksComplete(_) => Existing::Verify,
-            // -c on a file that genuinely cannot be resumed: restarting is what wget
-            // does, and it is what the user asked for in spirit — they want the file.
+            // -c on a file that genuinely cannot be resumed: restarting is a safe fallback,
+            // and it is what the user asked for in spirit — they want the file.
             ResumeOffer::Refused(_) => Existing::Restart,
         });
     }
@@ -137,9 +136,8 @@ pub fn decide<R: BufRead, W: Write>(
             }
         }
         // Nothing to read. Choose the option that cannot destroy data: keep the
-        // existing file and write beside it. This differs from curl (overwrite)
-        // deliberately — an unattended run that silently discards a completed 4 GB
-        // download is a worse failure than an extra file on disk.
+        // existing file and write beside it (avoiding accidental overwrite or
+        // unbounded file loss).
         return Ok(Existing::Rename);
     }
 
@@ -275,7 +273,7 @@ pub fn ask(
 
 /// First free name in the `path`, `path.1`, `path.2`, ... series.
 ///
-/// wget's convention. Bounded rather than looping forever: a directory with a million
+/// Numeric suffix collision avoidance convention. Bounded rather than looping forever: a directory with a million
 /// collisions is a bug somewhere else, and spinning on `stat` is not a useful response
 /// to it.
 pub fn next_free_name(path: &Path) -> Option<std::path::PathBuf> {
@@ -531,7 +529,7 @@ mod tests {
         assert_eq!(
             next_free_name(&base).unwrap(),
             dir.join("f.bin.1"),
-            "wget's convention"
+            "numeric suffix collision avoidance convention"
         );
         std::fs::write(dir.join("f.bin.1"), b"x").unwrap();
         assert_eq!(next_free_name(&base).unwrap(), dir.join("f.bin.2"));

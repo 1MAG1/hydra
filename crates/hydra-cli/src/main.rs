@@ -252,7 +252,7 @@ fn print_formats(as_json: bool, category: Option<&str>, what: Option<&str>) {
     }
 }
 
-/// Parse a curl-style byte range: `0-1023`, `1024-`, or `-512` (last 512 bytes).
+/// Parse an HTTP byte range: `0-1023`, `1024-`, or `-512` (last 512 bytes).
 ///
 /// Returns a [`download::RangeSpec`] rather than a sentinel-encoded pair. An
 /// earlier version encoded "suffix of n bytes" as `u64::MAX - n` and recognised
@@ -289,7 +289,7 @@ fn parse_range(spec: &str) -> Option<download::RangeSpec> {
 /// the work each one does per wakeup is a 64 KiB read and a positioned write — far
 /// too little to amortise being scheduled. The cost shows up as involuntary context
 /// switches: measured on an 11 MB transfer, hydra was preempted 1516 times at `-x 8`
-/// against curl's 33 (46x), while VOLUNTARY switches were essentially identical
+/// compared to single-threaded baseline of 33 (46x), while VOLUNTARY switches were essentially identical
 /// (2127 vs 2145). Voluntary switches are "waited for I/O", which is the work;
 /// involuntary switches are "used up a timeslice", which here is overhead.
 ///
@@ -297,8 +297,7 @@ fn parse_range(spec: &str) -> Option<download::RangeSpec> {
 /// above was tested and rejected: interleaved over five repetitions the paired ratio was
 /// 1.04 with Wilcoxon p = 0.81 and per-repetition deltas inconsistent in sign. An
 /// earlier apparent 1516 → 921 improvement was between-job noise — the two builds ran in
-/// separate jobs minutes apart, and curl's own switch count moved 33 → 96 across the same
-/// gap, which is what gave it away.
+/// separate jobs minutes apart.
 ///
 /// The cap is kept because sizing a thread pool to the workload is defensible on its own
 /// terms for a tool intended to run on servers, where many concurrent transfers share a
@@ -326,8 +325,8 @@ fn main() -> std::process::ExitCode {
 
 async fn async_main() -> std::process::ExitCode {
     // Translate the invoking dialect into canonical native options BEFORE parsing.
-    // wget and curl disagree on 15 of 19 common short flags, so there is no single
-    // namespace that can serve both; the personality decides what `-O` means.
+    // Different CLI personalities disagree on short flag semantics, so the personality
+    // decides what `-O` means.
     let argv: Vec<String> = std::env::args().collect();
     let argv0 = argv.first().cloned().unwrap_or_else(|| "hydra".into());
     let rest: Vec<String> = argv.iter().skip(1).cloned().collect();
@@ -522,7 +521,7 @@ async fn async_main() -> std::process::ExitCode {
         }
     };
 
-    // --range narrows the retrieval to a byte interval (curl -r semantics).
+    // --range narrows the retrieval to a byte interval.
     let range = match args.range.as_deref() {
         None => args.start_pos.map(download::RangeSpec::From),
         Some(spec) => match parse_range(spec) {

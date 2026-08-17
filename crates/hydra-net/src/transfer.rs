@@ -184,9 +184,8 @@ pub async fn run_transfer_into<C: Connector>(
     // Taken from the connector when it offers one, so a caller that already spoke
     // to this origin — the CLI's size probe does, on every run — can hand over the
     // connection it is holding instead of letting the transfer redial. Measured on
-    // a live TLS path: 1.6-2.0 s of setup before the first byte, against a transfer
-    // body only 1.12-1.22x curl's total. The gap was almost entirely handshakes
-    // that had already been paid for once.
+    // a live TLS path: 1.6-2.0 s of setup before the first byte on a short transfer.
+    // The gap was almost entirely handshakes that had already been paid for once.
     let pool: crate::pool::SharedPool<C::Stream> = connector
         .pool()
         .unwrap_or_else(|| Arc::new(crate::pool::ConnPool::new()));

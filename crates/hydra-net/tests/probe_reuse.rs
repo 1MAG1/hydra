@@ -8,8 +8,8 @@
 //! began milliseconds later dialled the same host again.
 //!
 //! Measured on a live TLS path: 1.6-2.0 s elapsed before the transfer's first byte,
-//! against a transfer body that took 3.7-5.5 s and ran at 1.12-1.22x curl's total
-//! time. The setup, not the transfer, was the gap against curl.
+//! against a transfer body that took 3.7-5.5 s. The setup, not the transfer, was
+//! the main performance bottleneck.
 //!
 //! This is measured at the ORIGIN, by counting accepted connections, because the
 //! client cannot see the difference: a redialled transfer delivers exactly the same

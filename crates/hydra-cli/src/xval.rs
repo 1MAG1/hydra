@@ -6,10 +6,10 @@
 //! so the theory is checked against the shipped implementation rather than
 //! against a model of it.
 //!
-//! Competing policies are implemented here as *policies*, not as products:
-//! `EqualStatic` is IDM's and axel's design (N equal parts up front, never
-//! reassigned), `StealOnIdle` is aria2's. IDM itself is Windows-only and cannot
-//! be executed here; the comparison is a statement about the policy.
+//! Competing policies are implemented here as *policies*:
+//! `EqualStatic` is static partitioning (N equal parts up front, never
+//! reassigned), `StealOnIdle` is work-stealing on idle.
+//! The comparison is a benchmark of algorithm behavior.
 
 use hya_core::{Scheduler, Source};
 use hya_net::origin::{byte_at, OriginControl, OriginSet};
@@ -189,7 +189,7 @@ async fn run_hydra_with(
     r.filter(|_| ok)
 }
 
-/// IDM / axel policy: N equal contiguous parts, assigned once, never reassigned.
+/// Static partitioning policy: N equal contiguous parts, assigned once, never reassigned.
 /// A part whose connection dies is retried on the SAME connection.
 async fn run_equal_static(sc: &Scenario, size: u64, conns: usize) -> Option<(f64, u64)> {
     let (net, targets, ctls) = spawn_scenario(sc, size);
@@ -332,11 +332,11 @@ pub async fn cross_validate() {
         }
         match run_equal_static(&sc, SIZE, CONNS).await {
             Some((t, r)) => println!(
-                "{},IDM policy (equal static),{oracle:.3},{t:.3},{:.3},{r},1",
+                "{},Equal static policy,{oracle:.3},{t:.3},{:.3},{r},1",
                 sc.name,
                 t / oracle
             ),
-            None => println!("{},IDM policy (equal static),{oracle:.3},,,,0", sc.name),
+            None => println!("{},Equal static policy,{oracle:.3},,,,0", sc.name),
         }
     }
 }
