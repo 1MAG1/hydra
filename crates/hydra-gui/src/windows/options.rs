@@ -60,7 +60,33 @@ fn general(app: &App) -> El<'_> {
                 .style(theme::check),
         );
     }
-    column![
+    // Dock/taskbar visibility exists only where the tray can take over:
+    // Linux has neither the tray (deferred, see tray.rs) nor a WM-portable
+    // skip-taskbar control in iced, so the option is not shown there.
+    #[cfg(target_os = "macos")]
+    let hide_taskbar: Option<El<'_>> = Some(hinted(
+        checkbox(s.hide_from_taskbar)
+            .label(tr("Hide Dock icon"))
+            .on_toggle(|b| o(OptField::HideTaskbar(b)))
+            .size(15.0)
+            .text_size(theme::FONT_SIZE)
+            .style(theme::check),
+        tr("Removes Hydra from the Dock and Cmd-Tab; reach it from the menu-bar tray icon. The app menu bar is unavailable while hidden. Applies immediately."),
+    ));
+    #[cfg(target_os = "windows")]
+    let hide_taskbar: Option<El<'_>> = Some(hinted(
+        checkbox(s.hide_from_taskbar)
+            .label(tr("Hide from taskbar"))
+            .on_toggle(|b| o(OptField::HideTaskbar(b)))
+            .size(15.0)
+            .text_size(theme::FONT_SIZE)
+            .style(theme::check),
+        tr("Hydra windows get no taskbar button; reach the app from the tray icon. Applies to windows opened after the change."),
+    ));
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let hide_taskbar: Option<El<'_>> = None;
+    let mut col =
+        column![
         section(tr("Browser/System Integration")),
         hinted(
             checkbox(s.launch_on_startup).label(tr("Launch Hydra on startup"))
@@ -78,6 +104,11 @@ fn general(app: &App) -> El<'_> {
                 .style(theme::check),
             tr("Autostart launches stay in the tray; open the window from the tray icon."),
         ),
+    ];
+    if let Some(el) = hide_taskbar {
+        col = col.push(el);
+    }
+    col.extend([
         hinted(
             checkbox(s.power_save).label(tr("Power save mode"))
                 .on_toggle(|b| o(OptField::PowerSave(b)))
@@ -102,12 +133,19 @@ fn general(app: &App) -> El<'_> {
                 .style(theme::check),
             tr("Watches the clipboard for download links by file type and known download sites; one link opens the file dialog, many open the batch list."),
         ),
-        text(tr("Capture downloads from the following browsers:")).size(theme::FONT_SIZE),
-        container(browsers).padding(10).width(Length::Fill).style(theme::panel),
+        text(tr("Capture downloads from the following browsers:"))
+            .size(theme::FONT_SIZE)
+            .into(),
+        container(browsers)
+            .padding(10)
+            .width(Length::Fill)
+            .style(theme::panel)
+            .into(),
         text(tr("Browser extensions are configured from the extensions/ directory of the project."))
             .size(theme::FONT_SIZE - 1.0)
-            .color(theme::dim_text(&iced::Theme::Light)),
-    ]
+            .color(theme::dim_text(&iced::Theme::Light))
+            .into(),
+    ])
     .spacing(10)
     .into()
 }

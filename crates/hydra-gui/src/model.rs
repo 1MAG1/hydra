@@ -242,6 +242,11 @@ pub struct Settings {
     /// Fewer wakeups everywhere: slower UI refresh, no glide animation,
     /// coarser engine ticks. Transfer speed is unaffected.
     pub power_save: bool,
+    /// Hide the app from the Dock (macOS, activation policy Accessory) or
+    /// the taskbar (Windows, skip_taskbar on each window). The tray icon
+    /// remains the way back in. Not offered on Linux: neither Wayland nor
+    /// iced/winit's X11 path exposes a skip-taskbar control.
+    pub hide_from_taskbar: bool,
     /// GPU (wgpu) rendering instead of the default software raster; smoother
     /// on very large windows at the cost of a much larger memory baseline.
     pub gpu_render: bool,
@@ -316,6 +321,7 @@ impl Default for Settings {
             launch_on_startup: true,
             start_in_tray: true,
             power_save: false,
+            hide_from_taskbar: false,
             gpu_render: false,
             monitor_clipboard: false,
             capture_browsers: ["Apple Safari", "Google Chrome", "Microsoft Edge", "Mozilla Firefox", "Opera"]
