@@ -67,8 +67,10 @@ fetch() { # fetch URL [OUTFILE] — curl with a wget fallback
 }
 
 if [ -z "$VERSION" ]; then
-  VERSION=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep -m1 '"tag_name"' | cut -d'"' -f4)
+  # Capture the JSON before parsing: grep -m1 on a live curl pipe closes it
+  # early, which makes curl fail with exit 56 under pipefail.
+  RELEASE_JSON=$(fetch "https://api.github.com/repos/${REPO}/releases/latest") || RELEASE_JSON=""
+  VERSION=$(printf '%s\n' "$RELEASE_JSON" | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)
   [ -n "$VERSION" ] || { echo "error: could not resolve the latest release tag" >&2; exit 1; }
 fi
 VER="${VERSION#v}"
