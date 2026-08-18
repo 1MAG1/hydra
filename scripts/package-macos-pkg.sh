@@ -13,6 +13,8 @@
 #   /Library/Application Support/Hydra/extensions
 #       chrome/, firefox/, safari/ — unpacked extensions ready for
 #       "Load unpacked" / temporary add-on install
+#   /usr/local/share/man/man1/hydra*.1
+#       CLI man pages, on the default man path ("man hydra" just works)
 #   postinstall:
 #       symlinks /usr/local/bin/hydra -> the CLI inside the bundle, and
 #       writes the per-user native-messaging manifests for the console user
@@ -62,6 +64,11 @@ mkdir -p "$STAGE/Applications" "$STAGE/Library/Application Support/Hydra/extensi
 ditto "$APP" "$STAGE/Applications/Hydra Download Manager.app"
 cp -R extensions/chrome extensions/firefox extensions/safari \
   "$STAGE/Library/Application Support/Hydra/extensions/"
+
+# CLI man pages onto the default man path.
+mkdir -p "$STAGE/usr/local/share/man/man1"
+cp docs/man/*.1 "$STAGE/usr/local/share/man/man1/"
+chmod 644 "$STAGE/usr/local/share/man/man1/"*.1
 
 # postinstall runs as root: it can write /usr/local/bin, but the browser
 # manifests belong in the console user's home (root has no browser profiles).

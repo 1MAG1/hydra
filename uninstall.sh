@@ -68,13 +68,22 @@ if [ "$OS" = linux ]; then
   fi
 fi
 
-# Binaries + share dir from the tarball install.
+# Man pages, by exact name: a glob like hydra*.1 could hit the unrelated
+# THC hydra(1) if it shares the prefix.
+MAN_PAGES=(hydra.1 hydra-interactive.1 hydra-checksum.1 hydra-parity.1
+           hydra-formats.1 hydra-bench.1 hydra-completions.1)
+
+# Binaries + share dir + man pages from the tarball install.
 if [ -n "$PREFIX" ]; then PREFIXES=("$PREFIX"); else PREFIXES=(/usr/local "$HOME/.local"); fi
 for prefix in "${PREFIXES[@]}"; do
   rm_path "$prefix/bin/hydra"
   rm_path "$prefix/bin/hydra-gui"
   rm_path "$prefix/bin/hydra-host"
   rm_path "$prefix/share/hydra"
+  for m in "${MAN_PAGES[@]}"; do
+    rm_path "$prefix/share/man/man1/$m"
+    rm_path "$prefix/share/man/man1/$m.gz"
+  done
 done
 
 if [ "$OS" = macos ]; then

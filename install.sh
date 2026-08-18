@@ -112,6 +112,16 @@ $SUDO mkdir -p "$BIN_DIR"
 $SUDO install -m 755 "$SRC/hydra" "$BIN_DIR/hydra"
 echo "installed $BIN_DIR/hydra"
 
+# Man pages (releases >= 0.2.2 ship them in the tarball as man/*.1).
+if [ -d "$SRC/man" ]; then
+  MAN_DIR="$PREFIX/share/man/man1"
+  $SUDO mkdir -p "$MAN_DIR"
+  for m in "$SRC"/man/*.1; do
+    $SUDO install -m 644 "$m" "$MAN_DIR/$(basename "$m")"
+  done
+  echo "installed man pages into $MAN_DIR (try: man hydra)"
+fi
+
 if [ "$MODE" = gui ]; then
   $SUDO install -m 755 "$SRC/hydra-gui" "$BIN_DIR/hydra-gui"
   $SUDO install -m 755 "$SRC/hydra-host" "$BIN_DIR/hydra-host"

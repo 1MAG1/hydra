@@ -184,6 +184,14 @@ EOF
 
   install -Dm644 LICENSE       "$ROOT/usr/share/doc/$NAME/LICENSE"
   install -Dm644 LICENSING.md  "$ROOT/usr/share/doc/$NAME/LICENSING.md"
+
+  # CLI man pages, gzipped per distro policy (-n keeps the build reproducible).
+  install -d "$ROOT/usr/share/man/man1"
+  local page
+  for page in docs/man/*.1; do
+    gzip -9n -c "$page" > "$ROOT/usr/share/man/man1/$(basename "$page").gz"
+    chmod 644 "$ROOT/usr/share/man/man1/$(basename "$page").gz"
+  done
 }
 
 # --- deb ----------------------------------------------------------------------
@@ -289,6 +297,7 @@ fi
 /usr/share/applications/hydra.desktop
 /usr/share/icons/hicolor/*/apps/hydra.png
 /usr/share/doc/$NAME/
+/usr/share/man/man1/hydra*.1.gz
 %config(noreplace) /etc/xdg/autostart/hydra.desktop
 %config(noreplace) /etc/opt/chrome/native-messaging-hosts/$HOST_NAME.json
 %config(noreplace) /etc/chromium/native-messaging-hosts/$HOST_NAME.json

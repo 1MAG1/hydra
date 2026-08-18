@@ -41,6 +41,13 @@ for size in 16 32 64 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/hydra.icns"
 
+# CLI man pages ride inside the bundle, so a drag-installed (DMG) app still
+# carries its documentation. The .pkg additionally copies them onto the man
+# path; DMG users can read them with:
+#   man "/Applications/Hydra Download Manager.app/Contents/Resources/man/man1/hydra.1"
+mkdir -p "$APP/Contents/Resources/man/man1"
+cp docs/man/*.1 "$APP/Contents/Resources/man/man1/"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

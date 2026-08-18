@@ -118,6 +118,14 @@ jobs:
           cp "${BIN}/hydra${EXT}" "stage/${CLI_NAME}/"
           cp LICENSE LICENSING.md THIRD-PARTY-NOTICES.md README.md "stage/${CLI_NAME}/"
 
+          # Man pages travel with both archives on Unix; install.sh puts them
+          # under <prefix>/share/man/man1.
+          if [ "${{ matrix.os }}" != windows ]; then
+            mkdir -p "stage/${CLI_NAME}/man" "stage/${GUI_NAME}/man"
+            cp docs/man/*.1 "stage/${CLI_NAME}/man/"
+            cp docs/man/*.1 "stage/${GUI_NAME}/man/"
+          fi
+
           # GUI archive: GUI + CLI + native-messaging host + browser extensions.
           # The install-native-host script resolves the bundle root as the
           # parent of its own directory, so it must sit in scripts/ with

@@ -32,6 +32,26 @@ PREFIX=~/.local ./install.sh  # into a home prefix
 `--check` fails non-zero on any non-STYLE diagnostic, so it is usable as a CI step.
 The installer refuses to install pages that do not lint.
 
+## Distribution
+
+End users get these pages without ever seeing this directory:
+
+- **release tarballs** ship them as `man/*.1`; the repo-root `install.sh` copies
+  them to `<prefix>/share/man/man1` and `uninstall.sh` removes them by exact
+  name (never by glob — `hydra*.1` could hit the unrelated THC hydra page)
+- **deb / rpm** install them gzipped under `/usr/share/man/man1`
+  (`scripts/package-linux.sh`)
+- **pkg** (macOS) installs them to `/usr/local/share/man/man1`, which is on the
+  default man path (`scripts/package-macos-pkg.sh`)
+- **DMG** carries them inside the bundle at
+  `Hydra Download Manager.app/Contents/Resources/man/man1`
+  (`scripts/macos-app-bundle.sh`); drag-installed apps have no install step, so
+  they stay off the man path until the user copies them
+
+Adding a page means updating the `pages=` list in `install.sh` here, the
+`MAN_PAGES` list in the repo-root `uninstall.sh`, and this table — the
+packaging scripts glob `docs/man/*.1` and pick it up automatically.
+
 ## Keeping them honest
 
 The pages document **observed** behaviour. Every claim about exit codes, output
