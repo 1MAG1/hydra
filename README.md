@@ -98,6 +98,38 @@ The compiled binary will be located at `target/release/hydra`. To build the GUI 
 
 ---
 
+## Uninstall
+
+### Quick Uninstall (prebuilt installs)
+
+**macOS / Linux**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/uninstall.sh | bash
+```
+
+To also delete config, state, and logs:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/uninstall.sh | bash -s -- --purge
+```
+
+**Windows (PowerShell)**:
+
+```powershell
+irm https://raw.githubusercontent.com/ja7ad/hydra/main/uninstall.ps1 | iex
+```
+
+To also delete config and state:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ja7ad/hydra/main/uninstall.ps1))) -Purge
+```
+
+The scripts remove binaries, extensions, manifests, desktop shortcuts, and startup entries. On macOS, they also remove the bundled app and package receipts. Config and state are kept by default (`~/.config/hydra` on Linux/macOS, `%APPDATA%\hydra` on Windows); use `--purge` / `-Purge` to delete them.
+
+---
+
 ## Usage
 
 ### Basic Download
