@@ -186,6 +186,20 @@ hydra --checksum sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b
 
 ---
 
+## Contributing
+
+Contributions are welcome! Please read the [Contributing Guide](CONTRIBUTING.md) for the project layout, build instructions, pre-submit checks (`fmt`, `clippy`, tests), commit conventions, and how licensing applies to each crate. In short:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
+```
+
+Bug reports and feature requests go to the [issue tracker](https://github.com/ja7ad/hydra/issues); security vulnerabilities should be reported privately via [GitHub security advisories](https://github.com/ja7ad/hydra/security/advisories/new).
+
+---
+
 ## License
 
 - The `hydra` CLI binary is licensed under the **GNU General Public License v3.0 or later** ([GPL-3.0-or-later](LICENSE)).
