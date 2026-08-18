@@ -1,0 +1,157 @@
+// Copyright (C) 2026 Javad Rajabzadeh
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! "Add batch download" — paste a list of URLs, check the ones to add,
+//! choose where they are saved ("Download All Links" flow).
+
+use crate::app::{App, El, Message, WinKind};
+use crate::windows::{dlg_btn, dlg_btn_primary};
+use crate::{i18n::tr, theme};
+use iced::widget::{
+    checkbox, column, container, pick_list, radio, row, scrollable, text, text_editor, text_input,
+};
+use iced::Length;
+
+pub fn view(app: &App) -> El<'_> {
+    let st = &app.batch;
+
+    let editor = text_editor(&st.text)
+        .placeholder("https://example.com/file1.zip\nhttps://example.com/file2.zip")
+        .on_action(Message::BatchEdit)
+        .size(theme::FONT_SIZE)
+        .height(180.0);
+
+    // Link table: File Name | Size | Download from | Save to.
+    let save_to_for = |url: &str| -> String {
+        if st.to_dir {
+            st.dir.clone()
+        } else {
+            let name = crate::engine::file_name_from_url(url);
+            let cat = if st.to_category {
+                Some(st.category.clone())
+            } else {
+                crate::model::categorize(&name, &app.cfg.categories)
+            };
+            cat.and_then(|c| app.cfg.categories.iter().find(|k| k.name == c))
+                .or(app.cfg.categories.first())
+                .map(|c| c.dir.clone())
+                .unwrap_or_default()
+        }
+    };
+    let mut checks = column![].spacing(1);
+    checks = checks.push(
+        row![
+            container(text("").size(theme::FONT_SIZE)).width(28.0),
+            container(text(tr("File Name")).size(theme::FONT_SIZE)).width(220.0),
+            container(text(tr("Size")).size(theme::FONT_SIZE)).width(70.0),
+            container(text(tr("Download from")).size(theme::FONT_SIZE)).width(Length::Fill),
+            container(text(tr("Save to")).size(theme::FONT_SIZE)).width(220.0),
+        ]
+        .spacing(4),
+    );
+    for (i, (url, on)) in st.checks.iter().enumerate() {
+        checks = checks.push(
+            row![
+                container(
+                    checkbox(*on)
+                        .on_toggle(move |b| Message::BatchCheck(i, b))
+                        .size(15.0)
+                        .style(theme::check)
+                )
+                .width(28.0),
+                container(text(crate::engine::file_name_from_url(url)).size(theme::FONT_SIZE))
+                    .width(220.0)
+                    .clip(true),
+                container(
+                    text(
+                        st.sizes
+                            .get(url)
+                            .map(|s| crate::fmt::size2(*s))
+                            .unwrap_or_default()
+                    )
+                    .size(theme::FONT_SIZE)
+                )
+                .width(70.0),
+                container(text(url.clone()).size(theme::FONT_SIZE))
+                    .width(Length::Fill)
+                    .clip(true),
+                container(text(save_to_for(url)).size(theme::FONT_SIZE))
+                    .width(220.0)
+                    .clip(true),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+
+    let cats: Vec<String> = app.cfg.categories.iter().map(|c| c.name.clone()).collect();
+    let mode = if st.to_category {
+        1u8
+    } else if st.to_dir {
+        2
+    } else {
+        0
+    };
+
+    container(
+        column![
+            text(tr("Please check the links, which you want to add to the download list, and click OK button."))
+                .size(theme::FONT_SIZE),
+            editor,
+            row![
+                dlg_btn(tr("Check All"), Some(Message::BatchCheckAll(true))),
+                dlg_btn(tr("Uncheck All"), Some(Message::BatchCheckAll(false))),
+            ]
+            .spacing(8),
+            container(scrollable(checks).height(Length::Fill))
+                .padding(6)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(theme::panel),
+            text(tr("Save To")).size(theme::FONT_SIZE + 1.0),
+            radio(
+                tr("Every file to the directory according to the category of the file"),
+                0u8,
+                Some(mode),
+                Message::BatchSaveMode,
+            )
+            .size(15.0)
+            .text_size(theme::FONT_SIZE),
+            row![
+                radio(tr("All files to one category"), 1u8, Some(mode), Message::BatchSaveMode)
+                    .size(15.0)
+                    .text_size(theme::FONT_SIZE),
+                pick_list(cats, Some(st.category.clone()), Message::BatchCategory)
+                    .text_size(theme::FONT_SIZE)
+                    .style(theme::picker)
+                    .width(220.0),
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center),
+            row![
+                radio(tr("All files to one directory"), 2u8, Some(mode), Message::BatchSaveMode)
+                    .size(15.0)
+                    .text_size(theme::FONT_SIZE),
+                text_input("", &st.dir)
+                    .on_input(Message::BatchDir)
+                    .size(theme::FONT_SIZE)
+                    .style(theme::input)
+                    .width(Length::Fill),
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center),
+            row![
+                iced::widget::space::horizontal(),
+                dlg_btn_primary(tr("OK"), Some(Message::BatchOk)),
+                dlg_btn(tr("Cancel"), app.win_of(WinKind::Batch).map(Message::CloseThis)),
+            ]
+            .spacing(10),
+        ]
+        .spacing(10)
+        .padding(14),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(theme::window)
+    .into()
+}
