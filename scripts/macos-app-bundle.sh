@@ -19,15 +19,18 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 cargo build --release -p hya-gui -p hya-host -p hya-cli
 
-APP="target/release/Hydra Download Manager.app"
+# With CARGO_BUILD_TARGET set (CI cross-arch builds), cargo emits into
+# target/<triple>/release instead of target/release.
+BIN="target/${CARGO_BUILD_TARGET:+$CARGO_BUILD_TARGET/}release"
+APP="$BIN/Hydra Download Manager.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/hydra-gui "$APP/Contents/MacOS/Hydra Download Manager"
+cp "$BIN/hydra-gui" "$APP/Contents/MacOS/Hydra Download Manager"
 # The CLI and the native-messaging host travel inside the bundle, so a
 # drag-installed app is complete: browser manifests can point at
 # Contents/MacOS/hydra-host, and the CLI can be symlinked onto PATH.
-cp target/release/hydra-host "$APP/Contents/MacOS/hydra-host"
-cp target/release/hydra "$APP/Contents/MacOS/hydra"
+cp "$BIN/hydra-host" "$APP/Contents/MacOS/hydra-host"
+cp "$BIN/hydra" "$APP/Contents/MacOS/hydra"
 
 # App icon from docs/logo.png
 ICONSET=$(mktemp -d)/hydra.iconset

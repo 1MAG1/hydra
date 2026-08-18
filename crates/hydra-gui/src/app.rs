@@ -3750,6 +3750,8 @@ pub fn part_matches(part: &std::path::Path, size: Option<u64>, held: &[(u64, u64
             return false;
         }
     }
+    #[cfg(not(unix))]
+    let _ = held;
     true
 }
 

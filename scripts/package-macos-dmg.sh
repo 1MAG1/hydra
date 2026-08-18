@@ -27,8 +27,16 @@ cd "$REPO"
 scripts/macos-app-bundle.sh
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-ARCH=$(uname -m)
-APP="target/release/Hydra Download Manager.app"
+# With CARGO_BUILD_TARGET set (CI cross-arch builds), the bundle script puts
+# the .app under target/<triple>/release, and the arch in the image name must
+# come from the triple, not from the build host.
+BIN="target/${CARGO_BUILD_TARGET:+$CARGO_BUILD_TARGET/}release"
+case "${CARGO_BUILD_TARGET:-}" in
+  x86_64-*)  ARCH=x86_64 ;;
+  aarch64-*) ARCH=arm64 ;;
+  *)         ARCH=$(uname -m) ;;
+esac
+APP="$BIN/Hydra Download Manager.app"
 
 EXT_ID=$(python3 - extensions/chrome/manifest.json <<'EOF'
 import base64, hashlib, json, sys

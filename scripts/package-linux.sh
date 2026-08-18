@@ -52,8 +52,10 @@ mkdir -p "$OUT"
 if [ "$BUILD" = 1 ]; then
   cargo build --release -p hya-cli -p hya-gui -p hya-host
 fi
+# With CARGO_BUILD_TARGET set (CI), cargo emits into target/<triple>/release.
+BIN="target/${CARGO_BUILD_TARGET:+$CARGO_BUILD_TARGET/}release"
 for b in hydra hydra-gui hydra-host; do
-  [ -x "target/release/$b" ] || { echo "missing target/release/$b (build failed?)" >&2; exit 1; }
+  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b (build failed?)" >&2; exit 1; }
 done
 
 # Extension IDs, derived the same way scripts/install-native-host.sh does, so
@@ -107,9 +109,9 @@ EOF
 stage() { # <root> <deb|rpm>
   local ROOT=$1 FLAVOR=$2
 
-  install -Dm755 target/release/hydra      "$ROOT/usr/bin/hydra"
-  install -Dm755 target/release/hydra-gui  "$ROOT/usr/bin/hydra-gui"
-  install -Dm755 target/release/hydra-host "$ROOT/usr/bin/hydra-host"
+  install -Dm755 "$BIN/hydra"      "$ROOT/usr/bin/hydra"
+  install -Dm755 "$BIN/hydra-gui"  "$ROOT/usr/bin/hydra-gui"
+  install -Dm755 "$BIN/hydra-host" "$ROOT/usr/bin/hydra-host"
 
   # Desktop/menu entry (the "desktop icon").
   install -d "$ROOT/usr/share/applications"

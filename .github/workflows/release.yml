@@ -78,7 +78,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libasound2-dev libx11-dev libxrandr-dev \
-            libxcb1-dev libxkbcommon-dev
+            libxcb1-dev libxkbcommon-dev rpm imagemagick
+
+      - name: Install NSIS (Windows installer)
+        if: matrix.os == 'windows'
+        shell: bash
+        run: |
+          if ! command -v makensis >/dev/null 2>&1; then
+            choco install nsis -y --no-progress
+            echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -130,6 +139,40 @@ jobs:
             tar -czf "dist/${CLI_NAME}.tar.gz" -C stage "${CLI_NAME}"
             tar -czf "dist/${GUI_NAME}.tar.gz" -C stage "${GUI_NAME}"
           fi
+          ls -lh dist/
+
+      # Native installers. The packaging scripts read CARGO_BUILD_TARGET to
+      # find the binaries under target/<triple>/release (and, for macOS, to
+      # name the image after the target arch rather than the build host).
+      - name: Build DMG (macOS)
+        if: matrix.os == 'macos'
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          scripts/package-macos-dmg.sh
+          cp target/dist/*.dmg dist/
+          ls -lh dist/
+
+      - name: Build deb and rpm packages (Linux)
+        if: matrix.os == 'linux'
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          scripts/package-linux.sh all --no-build
+          cp target/dist/*.deb target/dist/*.rpm dist/
+          ls -lh dist/
+
+      - name: Build NSIS installer (Windows)
+        if: matrix.os == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH=x64
+          [ "${{ matrix.arch }}" = arm64 ] && ARCH=arm64
+          scripts/build-windows-installer.sh "$ARCH" --no-build
+          cp "target/hydra-${VERSION}-windows-${ARCH}-setup.exe" dist/
           ls -lh dist/
 
       - name: Upload build artifacts
