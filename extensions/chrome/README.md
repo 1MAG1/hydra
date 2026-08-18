@@ -1,0 +1,145 @@
+# Hydra Extension for Chromium Browsers
+
+**Edge, Brave, Vivaldi, Opera, Arc and Chromium all load this same
+directory** — they are Chromium, they use the `chrome-extension://` origin
+scheme, and the pinned manifest `key` gives the add-on the identical id in
+every one of them, so the native host's allow-list matches without any
+per-browser build. Load it from `edge://extensions`, `brave://extensions`
+and so on exactly as described below for Chrome. Both native-host installers
+already register Edge, Brave, Vivaldi and Chromium alongside Chrome.
+
+
+
+Browser integration for [Hydra](../../README.md): automatic
+download capture, right-click "Download with Hydra", "Download all links",
+a floating "Download with Hydra" button when you highlight links on a page
+(single link downloads directly, several open the batch box), per-tab media
+sniffing with a badge counter, and a welcome page on first install.
+
+## How it works
+
+```
+                    ┌── WebSocket 127.0.0.1:6799 ─────────────┐   (primary)
+extension ──────────┤                                          ├──> hydra-gui
+ (this dir)         └── native messaging ──> hydra-host ───────┘   (extbus)
+                         (stdio frames)      launches the app     (fallback)
+```
+
+- The extension watches `chrome.downloads`. When a download's file type
+  matches the capture list, it pauses it, collects the cookies for that URL,
+  hands it to Hydra, and only then cancels the browser's copy — if Hydra is
+  unreachable the paused download simply resumes in the browser.
+- The **WebSocket is the primary transport**: no process spawn per request,
+  and the open socket is itself the "app is running" signal.
+- `hydra-host` is the fallback, spawned by the browser per request. It
+  forwards JSON to the running GUI (authenticated with the token from
+  `ipc.json`) and **launches the GUI minimized** when it is not running —
+  the only path that can start the app.
+- Every GUI reply carries the current capture settings, so the file-type
+  list, excluded sites, and the "Google Chrome" checkbox in Hydra's
+  Options propagate to the extension automatically.
+- Hold **Alt** while clicking a link to bypass capture once.
+
+## Install
+
+1. Build and register the native host (macOS/Linux):
+
+   ```bash
+   scripts/install-native-host.sh
+   ```
+
+2. Load the extension: `chrome://extensions` → enable **Developer mode** →
+   **Load unpacked** → pick `extensions/chrome/`.
+
+3. Restart the browser once so it sees the native-host manifest.
+
+The extension ID is pinned by the `key` field in `manifest.json`
+(`jpnonmbbkjdpeebdhkjoliklfhkdcomj`), so the native-host manifest written in
+step 1 stays valid no matter where the unpacked directory lives. The install
+script re-derives the ID from `manifest.json`, so the two can never drift.
+
+## Protocol (extension → GUI)
+
+Two front doors to the same handler:
+
+| Transport | Port | Auth | Used by |
+|---|---|---|---|
+| WebSocket | `6799`, fallback `16799` (fixed) | `Origin: chrome-extension://…` | the extension, directly |
+| Line protocol | ephemeral, published in `ipc.json` | random token from `ipc.json` | `hydra-host` |
+
+The WebSocket is the primary path: no process spawn per request, and the
+live socket *is* the "Hydra is running" indicator (the toolbar shows a gray
+**X** while it is down). The native host remains the fallback and
+is the only path that can **launch** the app.
+
+Requests are JSON objects: `ping`, `config`, `open`,
+`download {url, filename?, cookies?, referer?, user_agent?, size?, mime?,
+tab_url?}`, `links {urls}`. An `id` is echoed back so replies can be
+matched. Replies: `{ok, capture, auto_types, dont_start_sites, version,
+id?, error?}`.
+
+## Behavior details
+
+- **Capture order**:
+  the browser download is **paused** the instant it is created, the decision
+  is made once `onDeterminingFilename` resolves the real filename, and only
+  then is it cancelled and erased — or resumed untouched if Hydra did not
+  take it. Pausing is reversible where cancelling is not: small files cannot
+  finish before the round-trip, and signed one-shot URLs never need
+  re-requesting.
+- **Single instance**: launching hydra-gui while another instance runs now
+  just surfaces the running instance's window and exits — the extension
+  always talks to the instance that owns `ipc.json`.
+- After changing the extension files, reload it on `chrome://extensions`;
+  after re-running the install script, restart the browser once.
+
+## Safari
+
+The files in this directory are the **single source of truth for Safari
+too** — they bind `browser` or `chrome`, handle both native-messaging
+dialects, and feature-detect every API. `scripts/sync-extension-resources.sh safari`
+copies them next to Safari's manifest; see
+[../safari/README.md](../safari/README.md) for the build.
+
+## Safari (details)
+
+Safari has no native-messaging-host registry and **no `downloads` API**, so
+automatic capture is impossible there (Apple does not expose download
+events to extensions). Everything else — context menus, the selection
+button, media sniffing, the popup — works via a wrapper app whose Swift
+handler ([../safari/SafariWebExtensionHandler.swift](../safari/SafariWebExtensionHandler.swift))
+forwards to the same loopback socket. Building it requires full Xcode:
+
+```bash
+scripts/build-safari-extension.sh
+```
+
+Then open the built app once, enable the extension in Safari → Settings →
+Extensions, and (for unsigned dev builds) Develop → Allow Unsigned
+Extensions.
+
+## Notes / current limits
+
+- `referer` and per-download `user_agent` are transmitted and logged, but
+  the engine does not yet send them (StartSpec has no header support);
+  cookies **are** applied.
+- Segmented streams (HLS `.m3u8` / DASH) are deliberately not sniffed —
+  Hydra downloads files, it does not mux segment streams.
+## Do I need `hydra-host` on every OS?
+
+Only for one job: **starting Hydra when it is not already running.** Every
+other request goes over the WebSocket, which behaves identically on macOS,
+Linux and Windows and needs no registration at all. So if Hydra is already
+running (it installs a login item by default), the extension never invokes
+the host.
+
+Ship it per-OS anyway, since the cold-start click is the common case:
+
+| OS | Install | Registration |
+|---|---|---|
+| macOS / Linux | `scripts/install-native-host.sh` | JSON manifest in each browser's `NativeMessagingHosts` directory |
+| Windows | `powershell -ExecutionPolicy Bypass -File scripts\install-native-host.ps1` | `HKCU` registry key per browser pointing at a manifest in `%LOCALAPPDATA%\Hydra` |
+
+Both installers derive the Chromium extension id from the pinned manifest
+key and the Firefox id from `browser_specific_settings.gecko.id`, so the
+two platforms can never disagree about which extension is allowed.

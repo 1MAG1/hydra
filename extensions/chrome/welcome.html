@@ -1,0 +1,123 @@
+<!doctype html>
+<!-- Copyright (C) 2026 Javad Rajabzadeh
+     SPDX-License-Identifier: GPL-3.0-or-later -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Welcome to Hydra</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1c1c1c;
+        --muted: #5c5c5c;
+        --line: #ddd;
+        --accent: #2c6e31;
+        --card: #fff;
+        --bg: #f4f6f4;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #ececec;
+          --muted: #a5a5a5;
+          --line: #3a3a3a;
+          --accent: #7dc383;
+          --card: #2a2a2a;
+          --bg: #1f221f;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 15px/1.6 system-ui, sans-serif;
+        color: var(--fg);
+        background: var(--bg);
+      }
+      main { max-width: 680px; margin: 0 auto; padding: 48px 24px 64px; }
+      header { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; }
+      header img { width: 56px; height: 56px; }
+      h1 { margin: 0; font-size: 26px; }
+      .tagline { color: var(--muted); margin: 0 0 32px 72px; }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 20px 24px;
+        margin-bottom: 16px;
+      }
+      .card h2 { margin: 0 0 8px; font-size: 16px; }
+      .card p { margin: 6px 0; }
+      kbd {
+        font: 12px/1 system-ui, sans-serif;
+        border: 1px solid var(--line);
+        border-bottom-width: 2px;
+        border-radius: 4px;
+        padding: 2px 6px;
+      }
+      code {
+        font: 13px ui-monospace, monospace;
+        background: color-mix(in srgb, var(--fg) 8%, transparent);
+        border-radius: 4px;
+        padding: 1px 5px;
+      }
+      a { color: var(--accent); }
+      .warn {
+        border-left: 3px solid #c98a2b;
+        padding-left: 12px;
+        color: var(--muted);
+      }
+      footer { margin-top: 32px; color: var(--muted); font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="icons/icon128.png" alt="Hydra logo" />
+        <h1>Hydra is connected to your browser</h1>
+      </header>
+      <p class="tagline">The download manager with many heads.</p>
+
+      <div class="card">
+        <h2>⚡ Automatic capture</h2>
+        <p>
+          Click any download and Hydra takes it over — multi-connection, resumable,
+          with your cookies carried along. Which file types are captured is set in
+          <strong>Hydra&nbsp;→&nbsp;Options&nbsp;→&nbsp;File&nbsp;Types</strong>.
+        </p>
+        <p>Hold <kbd>Alt</kbd> while clicking to let the browser keep one download.</p>
+      </div>
+
+      <div class="card">
+        <h2>🖱 Right-click &amp; text selection</h2>
+        <p>
+          Right-click any link, image, or video → <em>Download with Hydra</em>.
+          Or simply <strong>highlight links on a page</strong> — a floating
+          <em>Download with Hydra</em> button appears. Several
+          links at once open Hydra's batch download box.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>🎬 Media sniffing</h2>
+        <p>
+          When a page plays direct video or audio files, a counter appears on the
+          Hydra toolbar icon. Open the popup to grab any of them.
+        </p>
+      </div>
+
+      <div class="card warn">
+        <p>
+          <strong>One-time setup:</strong> the extension talks to the Hydra app
+          through a native messaging host. If you have not run it yet:
+          <code>scripts/install-native-host.sh</code>, then restart the browser.
+        </p>
+      </div>
+
+      <footer>
+        <a href="https://github.com/ja7ad/hydra" target="_blank" rel="noopener">
+          Hydra on GitHub — docs, source, and releases
+        </a>
+        · Free software, GPL-3.0
+      </footer>
+    </main>
+  </body>
+</html>
