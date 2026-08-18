@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hydra: fast, resilient, multi-source download manager</title>
+<meta name="description" content="Hydra is a high-performance download engine that splits every file across connections and mirrors. Ships as a wget/curl-compatible CLI, a terminal UI, and a desktop download manager for Windows (x64 & ARM64), macOS, and Linux.">
+<link rel="icon" type="image/png" href="logo.png">
+<meta property="og:title" content="Hydra Download Manager">
+<meta property="og:description" content="A fast, resilient, multi-source file retriever and download engine. CLI, TUI, and desktop app with browser integration.">
+<meta property="og:image" content="https://ja7ad.github.io/hydra/img/screenshot.png">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0e13;
+    --bg-raised: #0f151d;
+    --line: rgba(148, 197, 222, 0.12);
+    --line-strong: rgba(148, 197, 222, 0.22);
+    --text: #e7edf3;
+    --text-dim: #93a4b4;
+    --text-faint: #64778a;
+    --accent: #2dd4d4;
+    --accent-ink: #06282e;
+    --grad: linear-gradient(100deg, #2dd4d4, #2596e8);
+    --radius: 14px;
+    --font-sans: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  a { color: inherit; text-decoration: none; }
+  img { max-width: 100%; display: block; }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+
+  .nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 40;
+    border-bottom: 1px solid transparent;
+    transition: background 0.25s ease, border-color 0.25s ease;
+  }
+  .nav.scrolled {
+    background: rgba(10, 14, 19, 0.82);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-bottom-color: var(--line);
+  }
+  .nav-inner {
+    height: 68px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: 0.01em; }
+  .brand img { width: 30px; height: 30px; }
+  .nav-links { display: flex; align-items: center; gap: 28px; font-size: 14.5px; color: var(--text-dim); }
+  .nav-links a { transition: color 0.15s ease; }
+  .nav-links a:hover { color: var(--text); }
+  .nav-gh { display: inline-flex; align-items: center; }
+  .nav-gh svg { width: 21px; height: 21px; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 9px;
+    font-weight: 600; font-size: 15px; white-space: nowrap;
+    border-radius: 999px; padding: 12px 24px;
+    transition: transform 0.15s ease, box-shadow 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+  }
+  .btn:active { transform: translateY(1px) scale(0.99); }
+  .btn-primary {
+    background: var(--grad); color: var(--accent-ink);
+  }
+  .btn-primary:hover { box-shadow: 0 6px 28px rgba(45, 200, 220, 0.28); }
+  .btn-ghost {
+    border: 1px solid var(--line-strong); color: var(--text);
+    background: rgba(148, 197, 222, 0.04);
+  }
+  .btn-ghost:hover { border-color: rgba(148, 197, 222, 0.4); background: rgba(148, 197, 222, 0.08); }
+  .btn svg { width: 17px; height: 17px; flex: none; }
+
+  .hero {
+    padding: 140px 0 96px;
+    position: relative;
+  }
+  .hero::before {
+    content: ""; position: absolute; inset: 0; z-index: -1;
+    background:
+      radial-gradient(780px 460px at 30% 0%, rgba(37, 150, 232, 0.14), transparent 65%),
+      radial-gradient(700px 420px at 78% 22%, rgba(45, 212, 212, 0.10), transparent 60%);
+  }
+  .hero-grid {
+    display: grid; grid-template-columns: minmax(0, 11fr) minmax(0, 9fr);
+    gap: 56px; align-items: center;
+  }
+  .hero h1 {
+    font-size: clamp(36px, 4.4vw, 56px);
+    line-height: 1.06; letter-spacing: -0.03em; font-weight: 700;
+  }
+  .hero h1 .grad {
+    background: var(--grad);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero p {
+    margin-top: 22px; font-size: 18px; color: var(--text-dim);
+    max-width: 52ch;
+  }
+  .hero-ctas { margin-top: 34px; display: flex; gap: 14px; flex-wrap: wrap; }
+
+  .shot { position: relative; display: flex; justify-content: center; }
+  .shot::before {
+    content: ""; position: absolute; z-index: -1;
+    inset: -12% -14%;
+    background: radial-gradient(60% 55% at 55% 50%, rgba(37, 150, 232, 0.18), transparent 70%);
+    pointer-events: none;
+  }
+  .viz { width: min(100%, 500px); }
+  .viz canvas { display: block; width: 100%; aspect-ratio: 5 / 4; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .hero-copy, .shot {
+      animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    .shot { animation-delay: 0.12s; }
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(18px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  section { padding: 96px 0; }
+  .sec-head { max-width: 62ch; margin-bottom: 52px; }
+  .sec-head h2 {
+    font-size: clamp(28px, 3.2vw, 40px);
+    letter-spacing: -0.025em; line-height: 1.12; font-weight: 700;
+  }
+  .sec-head p { margin-top: 14px; color: var(--text-dim); font-size: 16.5px; max-width: 58ch; }
+
+  .bento {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+  }
+  .cell {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+    padding: 28px;
+    transition: border-color 0.2s ease;
+  }
+  .cell:hover { border-color: var(--line-strong); }
+  .cell-wide { grid-column: span 2; }
+  .cell-full { grid-column: 1 / -1; }
+  .cell-tint-a {
+    background:
+      radial-gradient(500px 260px at 90% -20%, rgba(45, 212, 212, 0.14), transparent 70%),
+      var(--bg-raised);
+  }
+  .cell-tint-b {
+    background:
+      radial-gradient(420px 260px at 0% 120%, rgba(37, 150, 232, 0.13), transparent 70%),
+      var(--bg-raised);
+  }
+  .ico {
+    width: 40px; height: 40px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(45, 212, 212, 0.1);
+    border: 1px solid rgba(45, 212, 212, 0.18);
+    margin-bottom: 18px; flex: none;
+  }
+  .ico svg { width: 21px; height: 21px; stroke: var(--accent); }
+  .cell h3 { font-size: 17.5px; font-weight: 600; letter-spacing: -0.01em; }
+  .cell p { margin-top: 8px; font-size: 14.5px; color: var(--text-dim); line-height: 1.55; }
+
+  .gui { background: var(--bg-raised); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .gui-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 14px 40px;
+  }
+  .gui-item {
+    display: flex; gap: 16px; padding: 20px 18px;
+    border-radius: var(--radius); border: 1px solid transparent;
+    transition: background 0.2s ease, border-color 0.2s ease;
+  }
+  .gui-item:hover { background: rgba(148, 197, 222, 0.04); border-color: var(--line); }
+  .gui-item .ico { margin-bottom: 0; width: 38px; height: 38px; }
+  .gui-item .ico svg { width: 20px; height: 20px; }
+  .gui-item h3 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+  .gui-item p { font-size: 14px; color: var(--text-dim); margin-top: 4px; line-height: 1.55; }
+
+  .cli-grid {
+    display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+    gap: 56px; align-items: center;
+  }
+  .cli-points { display: flex; flex-direction: column; gap: 22px; margin-top: 34px; }
+  .cli-point { display: flex; gap: 14px; }
+  .cli-point .dotless { flex: none; margin-top: 3px; }
+  .cli-point .dotless svg { width: 19px; height: 19px; stroke: var(--accent); }
+  .cli-point h3 { font-size: 16px; font-weight: 600; }
+  .cli-point p { font-size: 14px; color: var(--text-dim); margin-top: 3px; }
+
+  .term {
+    border: 1px solid var(--line-strong); border-radius: var(--radius);
+    background: #0b1118; overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  }
+  .term-bar {
+    display: flex; align-items: center; gap: 7px;
+    padding: 12px 16px; border-bottom: 1px solid var(--line);
+  }
+  .term-bar i { width: 11px; height: 11px; border-radius: 50%; background: rgba(148, 197, 222, 0.16); }
+  .term-bar span { margin-left: 8px; font-family: var(--font-mono); font-size: 12px; color: var(--text-faint); }
+  .term pre {
+    padding: 22px 20px; font-family: var(--font-mono); font-size: 13.5px;
+    line-height: 1.85; overflow-x: auto; color: var(--text-dim);
+  }
+  .term .c-cmd { color: var(--text); }
+  .term .c-accent { color: var(--accent); }
+  .term .c-dim { color: var(--text-faint); }
+
+  .dl-card {
+    border: 1px solid var(--line-strong); border-radius: 20px;
+    background:
+      radial-gradient(760px 380px at 50% -30%, rgba(37, 150, 232, 0.16), transparent 70%),
+      var(--bg-raised);
+    padding: 64px 32px; text-align: center;
+  }
+  .dl-card h2 { font-size: clamp(28px, 3.2vw, 40px); letter-spacing: -0.025em; font-weight: 700; }
+  .dl-card > p { margin: 14px auto 0; color: var(--text-dim); max-width: 54ch; }
+  .dl-ctas { margin-top: 32px; display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+
+  .platforms {
+    margin: 40px auto 0; max-width: 760px;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+    text-align: left;
+  }
+  .platform {
+    border: 1px solid var(--line); border-radius: 12px;
+    background: rgba(10, 14, 19, 0.5); padding: 16px 18px;
+  }
+  .platform h3 { font-size: 14.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .platform h3 svg { width: 16px; height: 16px; stroke: var(--accent); flex: none; }
+  .platform p { font-size: 13px; color: var(--text-dim); margin-top: 4px; line-height: 1.5; }
+
+  .install-tabs { max-width: 720px; margin: 40px auto 0; text-align: left; }
+  .tab-row { display: flex; gap: 8px; margin-bottom: 12px; }
+  .tab {
+    font-family: var(--font-sans); font-size: 13.5px; font-weight: 600;
+    color: var(--text-dim); background: none; border: 1px solid var(--line);
+    border-radius: 999px; padding: 7px 16px; cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active {
+    color: var(--accent); border-color: rgba(45, 212, 212, 0.35);
+    background: rgba(45, 212, 212, 0.08);
+  }
+  .cmd {
+    display: none; align-items: center; gap: 12px;
+    border: 1px solid var(--line); border-radius: 12px;
+    background: #0b1118; padding: 15px 18px;
+  }
+  .cmd.active { display: flex; }
+  .cmd code {
+    font-family: var(--font-mono); font-size: 13px; color: var(--text-dim);
+    overflow-x: auto; white-space: nowrap; flex: 1;
+    scrollbar-width: none;
+  }
+  .cmd code::-webkit-scrollbar { display: none; }
+  .cmd code b { color: var(--accent); font-weight: 500; }
+  .copy {
+    flex: none; display: flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 8px; cursor: pointer;
+    background: rgba(148, 197, 222, 0.06); border: 1px solid var(--line);
+    color: var(--text-dim);
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .copy:hover { color: var(--accent); border-color: rgba(45, 212, 212, 0.35); }
+  .copy svg { width: 15px; height: 15px; }
+  .dl-note { margin-top: 18px; font-size: 13.5px; color: var(--text-faint); text-align: center; }
+  .dl-note a { color: var(--text-dim); border-bottom: 1px solid var(--line-strong); }
+  .dl-note a:hover { color: var(--accent); }
+
+  footer { border-top: 1px solid var(--line); padding: 40px 0; }
+  .foot {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 20px; flex-wrap: wrap;
+  }
+  .foot-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; }
+  .foot-brand img { width: 24px; height: 24px; }
+  .foot p { font-size: 13.5px; color: var(--text-faint); }
+  .foot p a { color: var(--text-dim); }
+  .foot p a:hover { color: var(--accent); }
+  .foot-social { display: flex; gap: 14px; }
+  .foot-social a { color: var(--text-dim); display: inline-flex; transition: color 0.15s ease; }
+  .foot-social a:hover { color: var(--text); }
+  .foot-social svg { width: 20px; height: 20px; }
+
+  @media (max-width: 900px) {
+    section { padding: 64px 0; }
+    .hero { padding: 116px 0 64px; }
+    .hero-grid { grid-template-columns: 1fr; gap: 48px; }
+    .bento { grid-template-columns: 1fr; }
+    .cell-wide { grid-column: auto; }
+    .gui-grid { grid-template-columns: 1fr; gap: 8px; }
+    .cli-grid { grid-template-columns: 1fr; gap: 40px; }
+    .platforms { grid-template-columns: 1fr; }
+    .nav-links { gap: 18px; }
+    .nav-links .nav-hide-sm { display: none; }
+    .dl-card { padding: 48px 20px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="top-sentinel" style="position:absolute; top:0; left:0; width:1px; height:1px;" aria-hidden="true"></div>
+
+<nav class="nav" id="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#">
+      <img src="logo.png" alt="Hydra logo" width="30" height="30">
+      HYDRA
+    </a>
+    <div class="nav-links">
+      <a href="#engine" class="nav-hide-sm">Engine</a>
+      <a href="#app" class="nav-hide-sm">Desktop App</a>
+      <a href="#cli" class="nav-hide-sm">CLI</a>
+      <a href="#download">Download</a>
+      <a class="nav-gh" href="https://github.com/ja7ad/hydra" aria-label="Hydra on GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+      </a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      <h1>Every mirror. Every connection. <span class="grad">One download.</span></h1>
+      <p>Hydra splits each file across parallel connections and mirror sources, then rebalances work away from slow peers while the transfer runs. Built in Rust, for the terminal and the desktop.</p>
+      <div class="hero-ctas">
+        <a class="btn btn-primary" href="#download">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
+          Download
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/ja7ad/hydra">View on GitHub</a>
+      </div>
+    </div>
+    <div class="shot">
+      <div class="viz">
+        <canvas id="hero-canvas" role="img" aria-label="Animation of one download being fed by several mirror sources at once"></canvas>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="engine">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>An engine built to saturate the link</h2>
+      <p>The core is a statistical scheduler for byte ranges. It measures every connection, predicts stalls before timeouts fire, and keeps the fastest paths busy until the last byte lands.</p>
+    </div>
+    <div class="bento">
+      <div class="cell cell-wide cell-tint-a">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 17h-8m8-10h-8m-2 0H3m18 5H11m-2 5H3M13 5v4m-4 1v4m8 1v4"/></svg></div>
+        <h3>Multi-source, adaptive concurrency</h3>
+        <p>Byte ranges are distributed across parallel connections and independent mirror origins, with the concurrency level discovered automatically per server. Point Hydra at two mirrors of the same ISO and both are drained at once, so high-bandwidth links stay full instead of waiting on a single stream.</p>
+      </div>
+      <div class="cell">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg></div>
+        <h3>Dynamic range stealing</h3>
+        <p>Laggard connections are detected mid-flight and their remaining byte ranges are handed to faster peers, with zero server coordination overhead.</p>
+      </div>
+      <div class="cell">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg></div>
+        <h3>Stall detection before timeouts</h3>
+        <p>Two-sided CUSUM and dual-window statistical estimators flag collapsing or degraded connections long before a traditional timeout would expire.</p>
+      </div>
+      <div class="cell">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4v5c0 4.5-3.2 8.2-8 9-4.8-.8-8-4.5-8-9V7l8-4z M9 12l2 2 4-4"/></svg></div>
+        <h3>Integrity end to end</h3>
+        <p>Per-chunk checksum manifests, verification against server-advertised digests like Content-MD5, and local Reed-Solomon erasure coding against bitrot.</p>
+      </div>
+      <div class="cell">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3v5h5M5 21V5a2 2 0 012-2h7l5 5v13a2 2 0 01-2 2H7a2 2 0 01-2-2zM9 14l2 2 4-4"/></svg></div>
+        <h3>Format sniffing &amp; smart sorting</h3>
+        <p>Magic-byte inspection detects the real file type regardless of extension, and downloads can be sorted into category folders automatically.</p>
+      </div>
+      <div class="cell cell-full cell-tint-b">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18M12 3a15 15 0 000 18"/></svg></div>
+        <h3>Protocols, proxies, and a flat memory footprint</h3>
+        <p>HTTP/1.1 and HTTPS via rustls with Mozilla roots, FTP with resume support, HTTP CONNECT tunneling, and SOCKS4 / SOCKS4a / SOCKS5 proxies. Positioned writes stream data straight to disk, so resident memory stays constant whether the file is 10 MB or 100 GB.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="gui" id="app">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>A full download manager on the desktop</h2>
+      <p>The Hydra app wraps the engine in a native, localized interface for Windows, macOS, and Linux, with the workflow you expect from a classic download manager.</p>
+    </div>
+    <div class="gui-grid">
+      <div class="gui-item">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v11H4zM2 19h20M9 8l3 3 3-3"/></svg></div>
+        <div>
+          <h3>Browser capture</h3>
+          <p>Extensions for Chrome, Edge, Firefox, and Safari hand downloads to the app over a local WebSocket bridge, with a native-messaging fallback that can launch the app on demand.</p>
+        </div>
+      </div>
+      <div class="gui-item">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></div>
+        <div>
+          <h3>Queues &amp; scheduler</h3>
+          <p>Group downloads into queues with scheduled start and stop times, retry tracking, and one-click start or stop for the whole queue.</p>
+        </div>
+      </div>
+      <div class="gui-item">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12l4 6-10 12L2 9l4-6zM2 9h20M9 3l3 6 3-6"/></svg></div>
+        <div>
+          <h3>Power save mode</h3>
+          <p>One toggle cuts interface wakeups: slower refresh, no progress animation, coarser transfer ticks. Download speed is unchanged while your battery lasts longer.</p>
+        </div>
+      </div>
+      <div class="gui-item">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 3v4h6V3M9 12h6M9 16h4"/></svg></div>
+        <div>
+          <h3>Clipboard watching</h3>
+          <p>Copy a link and Hydra picks it up automatically, filtered by the file types you choose, with per-site exceptions when you want it to stay out of the way.</p>
+        </div>
+      </div>
+      <div class="gui-item">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6V3M12 21v-3M6 12H3m18 0h-3M7.8 7.8L5.6 5.6m12.8 12.8l-2.2-2.2m0-8.4l2.2-2.2M5.6 18.4l2.2-2.2"/><circle cx="12" cy="12" r="3"/></svg></div>
+        <div>
+          <h3>Speed limits &amp; connection caps</h3>
+          <p>Cap bandwidth to a fixed budget per interval and set the default connection count per download, so background transfers never starve your video call.</p>
+        </div>
+      </div>
+      <div class="gui-item">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7l4-4h10l4 4M3 7v12a2 2 0 002 2h14a2 2 0 002-2V7M3 7h18M10 12h4"/></svg></div>
+        <div>
+          <h3>Categories &amp; auto-sorting</h3>
+          <p>Compressed, Documents, Music, Programs, Video: incoming files are routed to the right category and folder by type, each with its own default directory.</p>
+        </div>
+      </div>
+      <div class="gui-item">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4M12 8v5M9.5 10.5L12 13l2.5-2.5"/></svg></div>
+        <div>
+          <h3>Lives in your tray</h3>
+          <p>System tray with light and dark aware icons, launch on startup, minimize to tray, and optional hiding from the Dock or taskbar for a fully background setup.</p>
+        </div>
+      </div>
+      <div class="gui-item">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18M12 3a15 15 0 000 18"/></svg></div>
+        <div>
+          <h3>Localized, with event sounds</h3>
+          <p>A translated interface, per-event sounds for completed or failed downloads, and a completion dialog with Open and Open-folder shortcuts.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="cli">
+  <div class="wrap cli-grid">
+    <div>
+      <div class="sec-head" style="margin-bottom:0">
+        <h2>At home in the terminal</h2>
+        <p>The same engine drives a scriptable CLI and a full-screen queue manager, so servers and headless boxes get the multi-source treatment too.</p>
+      </div>
+      <div class="cli-points">
+        <div class="cli-point">
+          <span class="dotless"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 7l5 5-5 5M12 19h7"/></svg></span>
+          <div>
+            <h3>wget and curl compatibility</h3>
+            <p>Compat personalities accept common wget and curl flags as-is, so Hydra drops into existing scripts without edits.</p>
+          </div>
+        </div>
+        <div class="cli-point">
+          <span class="dotless"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 13h6M7 16h10"/></svg></span>
+          <div>
+            <h3>Interactive queue manager</h3>
+            <p>A full-screen TUI for adding, pausing, resuming, and monitoring queued downloads without leaving the shell.</p>
+          </div>
+        </div>
+        <div class="cli-point">
+          <span class="dotless"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4v5c0 4.5-3.2 8.2-8 9-4.8-.8-8-4.5-8-9V7l8-4z M9 12l2 2 4-4"/></svg></span>
+          <div>
+            <h3>Remote checksum lookup</h3>
+            <p>Inspect server-advertised digests before downloading, or verify the finished file against a target hash inline.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="term">
+      <div class="term-bar"><i></i><i></i><i></i><span>hydra</span></div>
+      <pre><span class="c-dim"># saturate the link across two mirrors, 8 connections</span>
+<span class="c-cmd">$ hydra <span class="c-accent">-x 8</span> https://mirror1.example.org/ubuntu.iso \
+        https://mirror2.example.org/ubuntu.iso</span>
+
+<span class="c-dim"># reuse your wget muscle memory</span>
+<span class="c-cmd">$ hydra <span class="c-accent">--compat=wget</span> -c -O kernel.tar.xz https://cdn.kernel.org/...</span>
+
+<span class="c-dim"># verify against a target hash while downloading</span>
+<span class="c-cmd">$ hydra <span class="c-accent">--checksum</span> sha256:e3b0c442... https://example.com/release.tar.gz</span>
+
+<span class="c-dim"># open the interactive queue</span>
+<span class="c-cmd">$ hydra <span class="c-accent">interactive</span></span></pre>
+    </div>
+  </div>
+</section>
+
+<section id="download">
+  <div class="wrap">
+    <div class="dl-card">
+      <h2>Get Hydra</h2>
+      <p>One command installs the CLI, the desktop app, and the browser integration for your OS and architecture.</p>
+      <div class="dl-ctas">
+        <a class="btn btn-primary" href="https://github.com/ja7ad/hydra/releases/latest">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
+          Download
+        </a>
+      </div>
+      <div class="platforms">
+        <div class="platform">
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>Windows</h3>
+          <p>Native x64 and ARM64 builds. Windows on ARM runs Hydra natively, no emulation layer.</p>
+        </div>
+        <div class="platform">
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>macOS</h3>
+          <p>Apple Silicon and Intel, with a bundled app, Dock and menu-bar integration, and Safari support.</p>
+        </div>
+        <div class="platform">
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>Linux</h3>
+          <p>amd64 and arm64 archives, plus deb and rpm packaging with tray and autostart support.</p>
+        </div>
+      </div>
+      <div class="install-tabs">
+        <div class="tab-row" role="tablist" aria-label="Install command by platform">
+          <button class="tab active" role="tab" aria-selected="true" data-target="cmd-unix">macOS / Linux</button>
+          <button class="tab" role="tab" aria-selected="false" data-target="cmd-win">Windows</button>
+        </div>
+        <div class="cmd active" id="cmd-unix">
+          <code><b>curl</b> -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | <b>bash</b></code>
+          <button class="copy" aria-label="Copy install command" data-copy="curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | bash">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
+          </button>
+        </div>
+        <div class="cmd" id="cmd-win">
+          <code><b>irm</b> https://raw.githubusercontent.com/ja7ad/hydra/main/install.ps1 | <b>iex</b></code>
+          <button class="copy" aria-label="Copy install command" data-copy="irm https://raw.githubusercontent.com/ja7ad/hydra/main/install.ps1 | iex">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
+          </button>
+        </div>
+      </div>
+      <p class="dl-note">Prebuilt archives are on the <a href="https://github.com/ja7ad/hydra/releases">releases page</a>, or build from source with Rust 1.80+.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot">
+    <a class="foot-brand" href="#">
+      <img src="logo.png" alt="" width="24" height="24">
+      HYDRA
+    </a>
+    <p>GPL-3.0-or-later (CLI) with MIT / Apache-2.0 core libraries. See <a href="https://github.com/ja7ad/hydra/blob/main/LICENSING.md">LICENSING.md</a>.</p>
+    <div class="foot-social">
+      <a href="https://github.com/ja7ad/hydra" aria-label="Hydra on GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+      </a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  const nav = document.getElementById("nav");
+  new IntersectionObserver(([e]) => nav.classList.toggle("scrolled", !e.isIntersecting))
+    .observe(document.getElementById("top-sentinel"));
+
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".tab").forEach((t) => { t.classList.remove("active"); t.setAttribute("aria-selected", "false"); });
+      document.querySelectorAll(".cmd").forEach((c) => c.classList.remove("active"));
+      tab.classList.add("active");
+      tab.setAttribute("aria-selected", "true");
+      document.getElementById(tab.dataset.target).classList.add("active");
+    });
+  });
+
+  (() => {
+    const canvas = document.getElementById("hero-canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx.roundRect) ctx.roundRect = function (x, y, w, h) { this.rect(x, y, w, h); };
+    const W = 500, H = 400;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const TEAL = "45, 212, 212", BLUE = "37, 150, 232";
+    const target = { x: W / 2, y: 296 };
+    const sources = [
+      { x: 62,  y: 84,  cx: 96,  cy: 210, speed: 1.05 },
+      { x: 152, y: 46,  cx: 165, cy: 180, speed: 0.85 },
+      { x: 250, y: 34,  cx: 250, cy: 170, speed: 1.25 },
+      { x: 348, y: 46,  cx: 335, cy: 180, speed: 0.95 },
+      { x: 438, y: 84,  cx: 404, cy: 210, speed: 1.15 },
+    ].map((s) => ({ ...s, particles: [], spawnAt: 0, stalledUntil: 0 }));
+
+    let scale = 1;
+    const resize = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const cssW = canvas.clientWidth || W;
+      canvas.width = cssW * dpr;
+      canvas.height = cssW * (H / W) * dpr;
+      scale = (cssW * dpr) / W;
+      if (reduce) drawFrame(0);
+    };
+
+    const pointAt = (s, t) => {
+      const a = 1 - t;
+      return {
+        x: a * a * s.x + 2 * a * t * s.cx + t * t * target.x,
+        y: a * a * s.y + 2 * a * t * s.cy + t * t * target.y,
+      };
+    };
+
+    let progress = 42, completeUntil = 0, nextStall = 2500;
+    let handoff = null;
+
+    function drawFrame(now) {
+      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+
+      for (const s of sources) {
+        const stalled = now < s.stalledUntil;
+
+        ctx.beginPath();
+        ctx.moveTo(s.x, s.y);
+        ctx.quadraticCurveTo(s.cx, s.cy, target.x, target.y);
+        ctx.strokeStyle = `rgba(${TEAL}, ${stalled ? 0.05 : 0.13})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        const pulse = 0.5 + 0.5 * Math.sin(now / 500 + s.x);
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 7 + pulse * 1.5, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${TEAL}, ${stalled ? 0.12 : 0.25 + pulse * 0.2})`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 3.2, 0, Math.PI * 2);
+        ctx.fillStyle = stalled ? "rgba(100, 119, 138, 0.6)" : `rgba(${TEAL}, 0.95)`;
+        ctx.fill();
+
+        for (const p of s.particles) {
+          const head = pointAt(s, p.t);
+          const tail = pointAt(s, Math.max(0, p.t - 0.09));
+          const grad = ctx.createLinearGradient(tail.x, tail.y, head.x, head.y);
+          grad.addColorStop(0, `rgba(${BLUE}, 0)`);
+          grad.addColorStop(1, `rgba(${TEAL}, 0.85)`);
+          ctx.beginPath();
+          ctx.moveTo(tail.x, tail.y);
+          ctx.lineTo(head.x, head.y);
+          ctx.strokeStyle = grad;
+          ctx.lineWidth = 2.4;
+          ctx.lineCap = "round";
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(head.x, head.y, 2.4, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${TEAL}, 1)`;
+          ctx.fill();
+        }
+      }
+
+      const done = now < completeUntil;
+      const tp = 0.5 + 0.5 * Math.sin(now / 350);
+      ctx.beginPath();
+      ctx.arc(target.x, target.y, 20 + (done ? tp * 3 : 0), 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${TEAL}, ${0.35 + (done ? tp * 0.3 : 0)})`;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(target.x, target.y, 13, 0, Math.PI * 2);
+      const g = ctx.createLinearGradient(target.x - 13, target.y, target.x + 13, target.y);
+      g.addColorStop(0, `rgba(${TEAL}, 0.9)`);
+      g.addColorStop(1, `rgba(${BLUE}, 0.9)`);
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(target.x, target.y - 5.5);
+      ctx.lineTo(target.x, target.y + 4.5);
+      ctx.moveTo(target.x - 4, target.y + 0.5);
+      ctx.lineTo(target.x, target.y + 4.5);
+      ctx.lineTo(target.x + 4, target.y + 0.5);
+      ctx.strokeStyle = "#06282e";
+      ctx.lineWidth = 2;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.stroke();
+
+      if (handoff && now - handoff.start < 900) {
+        const k = (now - handoff.start) / 900;
+        const f = handoff.from, t2 = handoff.to;
+        const mx = (f.x + t2.x) / 2, my = Math.min(f.y, t2.y) - 34;
+        const a = 1 - k;
+        const hx = a * a * f.x + 2 * a * k * mx + k * k * t2.x;
+        const hy = a * a * f.y + 2 * a * k * my + k * k * t2.y;
+        ctx.setLineDash([3, 5]);
+        ctx.beginPath();
+        ctx.moveTo(f.x, f.y);
+        ctx.quadraticCurveTo(mx, my, t2.x, t2.y);
+        ctx.strokeStyle = `rgba(${TEAL}, ${0.3 * (1 - k)})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.arc(hx, hy, 3, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${TEAL}, ${1 - k * 0.5})`;
+        ctx.fill();
+      }
+
+      const bx = 70, bw = W - 140, by = 352;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, bw, 6, 3);
+      ctx.fillStyle = "rgba(148, 197, 222, 0.10)";
+      ctx.fill();
+      const pw = Math.max(6, bw * (progress / 100));
+      const pg = ctx.createLinearGradient(bx, 0, bx + pw, 0);
+      pg.addColorStop(0, `rgba(${TEAL}, 0.95)`);
+      pg.addColorStop(1, `rgba(${BLUE}, 0.95)`);
+      ctx.beginPath();
+      ctx.roundRect(bx, by, pw, 6, 3);
+      ctx.fillStyle = pg;
+      ctx.fill();
+      ctx.font = "12px 'Geist Mono', monospace";
+      ctx.textAlign = "right";
+      ctx.fillStyle = "rgba(147, 164, 180, 0.9)";
+      ctx.fillText(`${Math.floor(progress)}%`, bx + bw, by - 10);
+      ctx.textAlign = "left";
+      ctx.fillStyle = "rgba(100, 119, 138, 0.9)";
+      const anyStalled = sources.some((s) => now < s.stalledUntil);
+      ctx.fillText(
+        done ? "complete, checksum verified"
+          : anyStalled ? "slow mirror detected, ranges reassigned"
+          : "downloading from 5 mirrors",
+        bx, by - 10
+      );
+    }
+
+    function step(now, dt) {
+      const done = now < completeUntil;
+      const anyStalled = sources.some((s) => now < s.stalledUntil);
+      for (const s of sources) {
+        const stalled = now < s.stalledUntil;
+        const boost = anyStalled && !stalled ? 1.35 : 1;
+        if (!stalled && !done && now > s.spawnAt) {
+          s.particles.push({ t: 0 });
+          s.spawnAt = now + (260 / s.speed + Math.random() * 160) / boost;
+        }
+        for (let i = s.particles.length - 1; i >= 0; i--) {
+          const p = s.particles[i];
+          p.t += (dt / 1600) * s.speed * boost * (stalled ? 0.25 : 1);
+          if (p.t >= 1) {
+            s.particles.splice(i, 1);
+            if (!done) progress = Math.min(100, progress + 0.28);
+          }
+        }
+      }
+      if (!done && now > nextStall) {
+        const from = sources[Math.floor(Math.random() * sources.length)];
+        from.stalledUntil = now + 1600 + Math.random() * 900;
+        const peers = sources.filter((s) => s !== from);
+        const to = peers[Math.floor(Math.random() * peers.length)];
+        handoff = { from, to, start: now };
+        nextStall = now + 3800 + Math.random() * 2400;
+      }
+      if (!done && progress >= 100) completeUntil = now + 1600;
+      if (progress >= 100 && now >= completeUntil) progress = 0;
+    }
+
+    let last = 0, rafId = 0, running = false;
+    const loop = (now) => {
+      const dt = Math.min(50, now - last || 16);
+      last = now;
+      step(now, dt);
+      drawFrame(now);
+      if (running) rafId = requestAnimationFrame(loop);
+    };
+    const start = () => { if (!running && !reduce) { running = true; last = performance.now(); rafId = requestAnimationFrame(loop); } };
+    const stop = () => { running = false; cancelAnimationFrame(rafId); };
+
+    new ResizeObserver(resize).observe(canvas);
+    resize();
+
+    if (reduce) {
+      sources.forEach((s, i) => s.particles.push({ t: 0.25 + i * 0.14 }));
+      drawFrame(0);
+    } else {
+      new IntersectionObserver(([e]) => (e.isIntersecting ? start() : stop())).observe(canvas);
+      document.addEventListener("visibilitychange", () =>
+        document.hidden ? stop() : start()
+      );
+    }
+  })();
+
+  document.querySelectorAll(".copy").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(btn.dataset.copy);
+        btn.style.color = "var(--accent)";
+        setTimeout(() => { btn.style.color = ""; }, 1200);
+      } catch (_) {  }
+    });
+  });
+</script>
+
+</body>
+</html>
