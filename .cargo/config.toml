@@ -40,3 +40,14 @@
 # built it and will not start on a system with an older one. Build release
 # artifacts on the OLDEST distribution you intend to support, or target
 # `x86_64-unknown-linux-musl` for a static binary that runs anywhere.
+
+# Windows: the *-pc-windows-msvc targets default to dynamically linking the
+# MSVC C runtime, so the exe needs VCRUNTIME140.dll from the Visual C++
+# Redistributable on the machine that runs it — which a clean Windows install
+# does not have. Statically link the CRT instead so the binary is a drop-in
+# like the musl build above.
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
