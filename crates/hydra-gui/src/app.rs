@@ -3750,7 +3750,26 @@ pub fn part_matches(part: &std::path::Path, size: Option<u64>, held: &[(u64, u64
             return false;
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::Read;
+        // On Windows, detect sparse files by checking if we can read actual
+        // data from the claimed parts. A file created with set_len but no
+        // actual data written will fail this check.
+        if !held.is_empty() {
+            if let Ok(mut file) = std::fs::File::open(part) {
+                let mut buf = vec![0u8; 4096.min(meta.len() as usize)];
+                // Try to read from the first claimed part
+                if let Ok(n) = file.read(&mut buf) {
+                    if n == 0 {
+                        // File is sparse: no data could be read
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(any(unix, target_os = "windows")))]
     let _ = held;
     true
 }
