@@ -6,7 +6,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | bash
 #   ... | bash -s -- --cli            # CLI only (default installs the GUI bundle)
-#   ... | bash -s -- --version v0.2.1 # pin a release instead of latest
+#   ... | bash -s -- --version v0.2.2 # pin a release instead of latest
 #   ... | bash -s -- --prefix ~/.local
 #
 # Default install is the GUI bundle: hydra, hydra-gui, hydra-host into
