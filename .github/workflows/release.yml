@@ -154,6 +154,16 @@ jobs:
           cp target/dist/*.dmg dist/
           ls -lh dist/
 
+      - name: Build PKG (macOS)
+        if: matrix.os == 'macos'
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          scripts/package-macos-pkg.sh
+          cp target/dist/*.pkg dist/
+          ls -lh dist/
+
       - name: Build deb and rpm packages (Linux)
         if: matrix.os == 'linux'
         env:
