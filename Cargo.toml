@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/hydra-core", "crates/hydra-net", "crates/hydra-cli", "crates/hydra-gui"]
+members = ["crates/hydra-core", "crates/hydra-net", "crates/hydra-cli", "crates/hydra-gui", "crates/hydra-host"]
 resolver = "2"
 
 [workspace.package]
