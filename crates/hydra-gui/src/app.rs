@@ -534,6 +534,8 @@ pub enum Message {
 pub enum OptField {
     LaunchStartup(bool),
     StartInTray(bool),
+    /// Only where the Dock/taskbar checkbox exists (macOS/Windows).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     HideTaskbar(bool),
     PowerSave(bool),
     GpuRender(bool),
@@ -3408,6 +3410,7 @@ impl App {
         match f {
             OptField::LaunchStartup(b) => s.launch_on_startup = b,
             OptField::StartInTray(b) => s.start_in_tray = b,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             OptField::HideTaskbar(b) => s.hide_from_taskbar = b,
             OptField::PowerSave(b) => {
                 s.power_save = b;
