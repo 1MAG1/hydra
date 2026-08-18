@@ -1,0 +1,22 @@
+# Copyright (C) 2026 Javad Rajabzadeh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "hya-host"
+version.workspace = true
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository.workspace = true
+homepage.workspace = true
+description = "Native-messaging host bridging browser extensions to the Hydra GUI"
+publish = false
+
+[[bin]]
+name = "hydra-host"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
