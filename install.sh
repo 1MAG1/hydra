@@ -67,8 +67,10 @@ fetch() { # fetch URL [OUTFILE] — curl with a wget fallback
 }
 
 if [ -z "$VERSION" ]; then
-  VERSION=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep -m1 '"tag_name"' | cut -d'"' -f4)
+  # Capture the JSON before parsing: grep -m1 on a live curl pipe closes it
+  # early, which makes curl fail with exit 56 under pipefail.
+  RELEASE_JSON=$(fetch "https://api.github.com/repos/${REPO}/releases/latest") || RELEASE_JSON=""
+  VERSION=$(printf '%s\n' "$RELEASE_JSON" | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)
   [ -n "$VERSION" ] || { echo "error: could not resolve the latest release tag" >&2; exit 1; }
 fi
 VER="${VERSION#v}"
@@ -109,6 +111,16 @@ SRC="$TMP/$NAME"
 $SUDO mkdir -p "$BIN_DIR"
 $SUDO install -m 755 "$SRC/hydra" "$BIN_DIR/hydra"
 echo "installed $BIN_DIR/hydra"
+
+# Man pages (releases >= 0.2.2 ship them in the tarball as man/*.1).
+if [ -d "$SRC/man" ]; then
+  MAN_DIR="$PREFIX/share/man/man1"
+  $SUDO mkdir -p "$MAN_DIR"
+  for m in "$SRC"/man/*.1; do
+    $SUDO install -m 644 "$m" "$MAN_DIR/$(basename "$m")"
+  done
+  echo "installed man pages into $MAN_DIR (try: man hydra)"
+fi
 
 if [ "$MODE" = gui ]; then
   $SUDO install -m 755 "$SRC/hydra-gui" "$BIN_DIR/hydra-gui"

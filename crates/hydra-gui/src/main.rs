@@ -18,6 +18,8 @@ mod i18n;
 mod icons;
 mod log;
 #[cfg(target_os = "macos")]
+mod macos_dock;
+#[cfg(target_os = "macos")]
 mod macos_menu;
 mod menubus;
 mod model;
@@ -159,6 +161,11 @@ fn boot() -> (App, Task<Message>) {
         app.cfg.settings.start_in_tray,
     );
 
+    // Dock visibility before any window opens, so a hidden configuration
+    // never flashes a Dock tile at launch.
+    #[cfg(target_os = "macos")]
+    macos_dock::apply(app.cfg.settings.hide_from_taskbar);
+
     // Autostart hands us --minimized: live in the tray, no window. (The tray
     // exists on macOS/Windows; elsewhere the window always opens.)
     let start_hidden = std::env::args().any(|a| a == "--minimized")
@@ -206,13 +213,8 @@ fn view(app: &App, id: window::Id) -> app::El<'_> {
 fn title(app: &App, id: window::Id) -> String {
     use crate::i18n::tr;
     match app.windows.get(&id) {
-        Some(WinKind::Main) => {
-            format!(
-                "{} {}",
-                tr("Hydra Download Manager"),
-                env!("CARGO_PKG_VERSION")
-            )
-        }
+        // Version lives in the About dialog only.
+        Some(WinKind::Main) => tr("Hydra Download Manager"),
         Some(WinKind::AddUrl) => tr("Enter new address to download"),
         Some(WinKind::FileInfo(_)) => tr("Download File Info"),
         Some(WinKind::Progress(dl)) => windows::progress::title(app, *dl),

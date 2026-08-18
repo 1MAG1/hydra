@@ -67,6 +67,17 @@ tray-icon = "0.24"
 # build.rs is a no-op for non-Windows targets.
 embed-resource = "3"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# "Hide Dock icon": NSApplication activation policy (Regular <-> Accessory).
+# Same objc2 generation the tray/menu stack (tray-icon 0.24) already links.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSResponder",
+    "NSRunningApplication",
+] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 # "Launch on startup" is an HKCU\...\CurrentVersion\Run value:
 # no console flash at logon, and Task Manager's Startup page

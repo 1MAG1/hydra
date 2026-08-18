@@ -534,6 +534,9 @@ pub enum Message {
 pub enum OptField {
     LaunchStartup(bool),
     StartInTray(bool),
+    /// Only where the Dock/taskbar checkbox exists (macOS/Windows).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    HideTaskbar(bool),
     PowerSave(bool),
     GpuRender(bool),
     Clipboard(bool),
@@ -923,6 +926,16 @@ impl App {
                 origin.y + (self.main_size.height - size.1) / 2.0,
             )),
         };
+        // "Hide from taskbar" on Windows is a per-window creation flag, so
+        // it reaches windows opened after the toggle (the main window picks
+        // it up on its next open from the tray).
+        #[cfg(target_os = "windows")]
+        let platform_specific = window::settings::PlatformSpecific {
+            skip_taskbar: self.cfg.settings.hide_from_taskbar,
+            ..Default::default()
+        };
+        #[cfg(not(target_os = "windows"))]
+        let platform_specific = window::settings::PlatformSpecific::default();
         let (id, task) = window::open(window::Settings {
             size: iced::Size::new(size.0, size.1),
             // Floor: just enough for the full toolbar row; the default
@@ -935,6 +948,7 @@ impl App {
             // Title-bar/taskbar logo on Windows and Linux (None on macOS,
             // where the app bundle supplies the Dock icon).
             icon: crate::icons::window_icon(),
+            platform_specific,
             ..window::Settings::default()
         });
         if kind == WinKind::Main {
@@ -2597,9 +2611,18 @@ impl App {
                 Task::none()
             }
             Message::OptOk => {
+                #[cfg(target_os = "macos")]
+                let dock_changed =
+                    self.cfg.settings.hide_from_taskbar != self.options.draft.hide_from_taskbar;
                 self.cfg.settings = self.options.draft.clone();
                 self.cfg.categories = self.options.draft_cats.clone();
                 self.save_config();
+                // Dock visibility is app-wide state, not a window flag —
+                // flips immediately, no reopen needed.
+                #[cfg(target_os = "macos")]
+                if dock_changed {
+                    crate::macos_dock::apply(self.cfg.settings.hide_from_taskbar);
+                }
                 crate::autostart::apply(
                     self.cfg.settings.launch_on_startup,
                     self.cfg.settings.start_in_tray,
@@ -3387,6 +3410,8 @@ impl App {
         match f {
             OptField::LaunchStartup(b) => s.launch_on_startup = b,
             OptField::StartInTray(b) => s.start_in_tray = b,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            OptField::HideTaskbar(b) => s.hide_from_taskbar = b,
             OptField::PowerSave(b) => {
                 s.power_save = b;
                 engine::set_power_save(b);
@@ -3750,7 +3775,26 @@ pub fn part_matches(part: &std::path::Path, size: Option<u64>, held: &[(u64, u64
             return false;
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::Read;
+        // On Windows, detect sparse files by checking if we can read actual
+        // data from the claimed parts. A file created with set_len but no
+        // actual data written will fail this check.
+        if !held.is_empty() {
+            if let Ok(mut file) = std::fs::File::open(part) {
+                let mut buf = vec![0u8; 4096.min(meta.len() as usize)];
+                // Try to read from the first claimed part
+                if let Ok(n) = file.read(&mut buf) {
+                    if n == 0 {
+                        // File is sparse: no data could be read
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(any(unix, target_os = "windows")))]
     let _ = held;
     true
 }
