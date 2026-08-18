@@ -21,23 +21,68 @@
 
 ## Overview
 
-**HYDRA** is a high-performance network file retriever designed for speed, resilience, and adaptability. It dynamically partitions downloads across multiple connections and independent mirror sources, continuously rebalancing work to maximize throughput without stalling on slow peers.
+**HYDRA** is a high-performance network file retriever designed for speed, resilience, and adaptability. It dynamically partitions downloads across multiple connections and independent mirror sources, continuously rebalancing work to maximize throughput without stalling on slow peers. It ships as both a `wget`/`curl`-compatible CLI and a cross-platform desktop download manager with browser integration.
+
+<p align="center">
+  <img src="docs/img/screenshot.png" alt="Hydra Download Manager" width="720">
+</p>
 
 ## Key Features
+
+### Engine
 
 - **Multi-Source & Adaptive Concurrency**: Saturates high-bandwidth links by dynamically distributing byte ranges across connections and mirrors.
 - **Dynamic Range Stealing**: Automatically detects laggard connections and redistributes remaining work to faster peers with zero server coordination overhead.
 - **Collapse & Stall Detection**: Uses two-sided CUSUM and dual-window statistical estimators to swiftly identify degraded connections before traditional timeouts expire.
-- **`curl` & `wget` Compatibility**: Direct drop-in support for common `wget` and `curl` command-line flags and dialect personalities.
 - **Protocols & Proxies**: Supports HTTP/1.1, HTTPS (via `rustls` with Mozilla roots), FTP (RFC 959 / REST), HTTP CONNECT tunneling, and SOCKS4 / SOCKS4a / SOCKS5 proxies.
-- **Interactive Queue Manager**: Full-screen terminal UI (TUI) for managing, pausing, resuming, and monitoring queued downloads.
-- **Format Sniffing & Smart Sorting**: Content-based magic byte inspection for accurate file type detection and optional category-based directory sorting (`--sort-by-type`).
 - **Integrity & Offline Parity**: Per-chunk checksum manifest verification (`--emit-manifest`, `--chunk-digests`) and local Reed–Solomon erasure coding for bitrot protection.
 - **Constant Memory Footprint**: Positioned writes (`pwrite`) stream data directly to disk, keeping resident memory usage flat regardless of file size.
+
+### CLI
+
+- **`curl` & `wget` Compatibility**: Direct drop-in support for common `wget` and `curl` command-line flags and dialect personalities.
+- **Interactive Queue Manager**: Full-screen terminal UI (TUI) for managing, pausing, resuming, and monitoring queued downloads.
+- **Format Sniffing & Smart Sorting**: Content-based magic byte inspection for accurate file type detection and optional category-based directory sorting (`--sort-by-type`).
+- **Remote Checksum Lookup**: Inspects server-advertised digests (`Content-MD5`, `x-goog-hash`, …) and verifies downloads against a target hash.
+
+### Desktop GUI
+
+- **Cross-Platform Download Manager**: Native desktop app for Windows, macOS, and Linux with a persistent download list, categories, pause/resume, and per-download progress detail.
+- **Browser Integration**: Extensions for Chrome/Chromium, Edge, Firefox, and Safari hand downloads captured in the browser to the app — over a local WebSocket bridge, with a native-messaging host as fallback that can also launch the app on demand.
+- **Queue & Scheduler**: Queued downloads with scheduled start/stop times and retry tracking.
+- **Desktop Conveniences**: System tray with light/dark-aware icons, event sounds, launch-on-startup, and localized UI.
 
 ---
 
 ## Installation
+
+### Quick Install (prebuilt binaries)
+
+**macOS / Linux** — installs the GUI bundle (GUI + CLI + browser extensions) by default:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | bash
+```
+
+CLI only:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | bash -s -- --cli
+```
+
+**Windows (PowerShell)** — installs the GUI bundle by default:
+
+```powershell
+irm https://raw.githubusercontent.com/ja7ad/hydra/main/install.ps1 | iex
+```
+
+CLI only:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ja7ad/hydra/main/install.ps1))) -Cli
+```
+
+The scripts detect your OS and architecture (amd64/arm64), fetch the matching archive from the [latest GitHub release](https://github.com/ja7ad/hydra/releases/latest), and install it — on Linux and macOS to `/usr/local` (falling back to `~/.local`; override with `--prefix DIR`), on Windows to `%LOCALAPPDATA%\Programs\Hydra`. GUI installs also register the browser native-messaging host. Pin a release with `--version vX.Y.Z` / `-Version vX.Y.Z`, or download the archives yourself from the [releases page](https://github.com/ja7ad/hydra/releases).
 
 ### From Source
 
@@ -49,7 +94,7 @@ cd hydra
 cargo build --release
 ```
 
-The compiled binary will be located at `target/release/hydra`.
+The compiled binary will be located at `target/release/hydra`. To build the GUI and native-messaging host as well, run `make build`.
 
 ---
 
