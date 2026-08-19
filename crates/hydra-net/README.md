@@ -1,9 +1,5 @@
 # hya-net
 
-[![crates.io](https://img.shields.io/crates/v/hya-net.svg?style=flat-square)](https://crates.io/crates/hya-net)
-[![docs.rs](https://img.shields.io/docsrs/hya-net?style=flat-square)](https://docs.rs/hya-net)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square)](#license)
-
 Range transport driving the [`hya-core`](https://crates.io/crates/hya-core)
 scheduler: HTTP/1.1 and FTP over `tokio`, TLS via `rustls`, proxy support,
 positioned writes, and chunk-level integrity.
@@ -98,30 +94,6 @@ for hex encoding (measured 11.8× over the `write!` form it replaced), and
 delegation to `sha2` / `blake3` / `reed-solomon-simd` for the genuinely
 compute-bound hashing and erasure coding. Vectorized paths are covered by
 differential tests against scalar references.
-
-## Module map
-
-| Module | Contents |
-|---|---|
-| `transfer` | Drive a `Scheduler` over live connections to completion |
-| `sink` | `SparseSink`: positioned writes, no reassembly buffer |
-| `http` / `http_scheme` | HTTP/1.1 request/response, probing, per-range fetch |
-| `ftp` / `ftp_origin` | FTP protocol and its test origin |
-| `scheme` | The `Fetcher` seam: what a protocol must provide |
-| `tls` | rustls transport, roots, session resumption |
-| `socks` | SOCKS4/4a/5 and HTTP proxy support |
-| `polite` | Backoff, `Retry-After`, rate limiting, redirects |
-| `framebuf` | O(1)-consume read buffer for protocol framing |
-| `digest` / `stream_digest` / `manifest` / `parity` | Integrity: header digests, out-of-order streaming digests, chunk manifests, Reed–Solomon parity |
-| `origin` | Rate-shapeable in-process HTTP origin for hermetic tests |
-
-## Relationship to the HYDRA workspace
-
-| Crate | Role | License |
-|---|---|---|
-| [`hya-core`](https://crates.io/crates/hya-core) | Scheduler state machine, no I/O | MIT OR Apache-2.0 |
-| **`hya-net`** (this crate) | All the syscalls: transports, TLS, proxies, integrity | MIT OR Apache-2.0 |
-| `hya-cli` | The `hydra` binary: CLI, TUI queue manager, measurement harness | GPL-3.0-or-later |
 
 The libraries are deliberately permissive so they remain usable as dependencies;
 only the assembled tool is copyleft. See
