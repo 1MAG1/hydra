@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy Policy — Hydra</title>
+<meta name="description" content="Privacy policy for the Hydra Download Manager browser extension and desktop app: what data is processed, where it goes, and why.">
+<link rel="icon" type="image/png" href="logo.png">
+<style>
+  :root {
+    --bg: #0a0e13;
+    --bg-raised: #0f151d;
+    --line: rgba(148, 197, 222, 0.12);
+    --line-strong: rgba(148, 197, 222, 0.22);
+    --text: #e7edf3;
+    --text-dim: #93a4b4;
+    --text-faint: #64778a;
+    --accent: #2dd4d4;
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  a { color: var(--accent); }
+  header {
+    border-bottom: 1px solid var(--line);
+    padding: 20px 24px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  header img { width: 28px; height: 28px; border-radius: 6px; }
+  header .brand { font-weight: 600; color: var(--text); text-decoration: none; }
+  main {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 48px 24px 96px;
+  }
+  h1 { font-size: 1.75rem; margin-bottom: 4px; }
+  .updated { color: var(--text-faint); font-size: 0.9rem; margin-bottom: 40px; }
+  h2 {
+    font-size: 1.15rem;
+    margin-top: 40px;
+    border-top: 1px solid var(--line);
+    padding-top: 24px;
+  }
+  p, li { color: var(--text-dim); }
+  ul { padding-left: 1.2em; }
+  li { margin-bottom: 8px; }
+  code {
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 0.9em;
+    color: var(--text);
+  }
+  .callout {
+    background: var(--bg-raised);
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin: 24px 0;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.92rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--text); font-weight: 600; }
+  footer {
+    border-top: 1px solid var(--line);
+    padding: 24px;
+    text-align: center;
+    color: var(--text-faint);
+    font-size: 0.85rem;
+  }
+</style>
+</head>
+<body>
+<header>
+  <img src="logo.png" alt="">
+  <a class="brand" href="/">Hydra</a>
+</header>
+<main>
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated: August 19, 2026 — applies to the Hydra desktop app and its browser extensions (Chrome, Edge, Firefox, Safari).</p>
+
+  <div class="callout">
+    <p><strong>Short version:</strong> Hydra does not collect, transmit, sell, or share any of your data. The browser extension only talks to the Hydra app running on your own computer, over your machine's local loopback address. Nothing leaves your device.</p>
+  </div>
+
+  <h2>What Hydra is</h2>
+  <p>Hydra is an open-source, multi-source download manager. The browser extension ("Hydra Download Manager Integration") detects downloads and user-initiated "download" actions in your browser and hands matching files to the Hydra app installed locally on your computer, instead of your browser's built-in downloader.</p>
+
+  <h2>Data we do not collect</h2>
+  <p>Neither the extension nor the desktop app contains any analytics, telemetry, crash reporting, or advertising code. We do not operate any server that the extension or app talks to. We have no account system, and there is nothing for us to collect on our end even if we wanted to.</p>
+
+  <h2>What the extension processes, and where it goes</h2>
+  <p>To do its job, the extension reads certain data locally in your browser. None of it is sent anywhere except to the Hydra app on your own machine, reached at <code>127.0.0.1</code> (WebSocket) or via a native-messaging helper process — both are local to your device and never traverse the network.</p>
+  <table>
+    <tr><th>Data</th><th>Why it's read</th><th>Where it goes</th></tr>
+    <tr><td>Download URL, filename, MIME type, size</td><td>To decide whether a download matches your configured auto-capture rules and to hand it to Hydra</td><td>Local Hydra app only</td></tr>
+    <tr><td>Cookies for the specific URL being downloaded</td><td>So authenticated/session-protected downloads work the same as they would in your browser</td><td>Local Hydra app only, per download</td></tr>
+    <tr><td>Page links / selected links</td><td>For the "Download with Hydra" and "Download all links" right-click actions</td><td>Local Hydra app only, when you trigger the action</td></tr>
+    <tr><td>Response headers of in-page network requests (Content-Type/Length)</td><td>To detect playable media on the page for the popup's media list</td><td>Kept in the browser's local session storage; sent to Hydra only if you click Download</td></tr>
+    <tr><td>Extension settings (enabled toggle, auto-capture file types, skip-site list)</td><td>To remember your preferences</td><td>Stored locally in your browser only</td></tr>
+  </table>
+
+  <h2>Permissions</h2>
+  <p>The extension requests <code>downloads</code>, <code>cookies</code>, <code>contextMenus</code>, <code>storage</code>, <code>tabs</code>, <code>nativeMessaging</code>, <code>webRequest</code>, and host access to all sites. Each is used strictly for the local hand-off described above — capturing downloads, offering the right-click menu, remembering settings, and reaching the local Hydra app. None is used to track browsing activity, build a profile, or serve ads.</p>
+
+  <h2>Remote code</h2>
+  <p>The extension does not load, fetch, or evaluate any code from outside its own package. Everything it runs ships inside the extension itself and is reviewed as part of the Chrome Web Store listing.</p>
+
+  <h2>Children's privacy</h2>
+  <p>Hydra is a general-purpose developer/power-user tool, not directed at children, and does not knowingly collect data from anyone — children or adults — because it does not collect data at all.</p>
+
+  <h2>Changes to this policy</h2>
+  <p>If this policy changes, the "Last updated" date above will change and the new version will be posted at this same URL.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy can be filed via the <a href="https://github.com/ja7ad/hydra/issues">GitHub issue tracker</a>. Security concerns should go through <a href="https://github.com/ja7ad/hydra/security/advisories/new">GitHub security advisories</a> instead of a public issue.</p>
+</main>
+<footer>
+  Hydra is open source under GPL-3.0-or-later (CLI) with MIT / Apache-2.0 core libraries.
+  <a href="https://github.com/ja7ad/hydra">github.com/ja7ad/hydra</a>
+</footer>
+</body>
+</html>
