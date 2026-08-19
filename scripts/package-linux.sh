@@ -44,6 +44,8 @@ esac
 
 NAME=hydra-download-manager
 HOST_NAME=com.hydra.host
+# The workspace product version ([workspace.package]), shared by the
+# hydra-gui, hydra-cli and hydra-host bin crates this package bundles.
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 SUMMARY="Multi-connection download manager (GUI, CLI, browser integration)"
 OUT="$REPO/target/dist"

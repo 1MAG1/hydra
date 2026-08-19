@@ -3,6 +3,11 @@ members = ["crates/hydra-core", "crates/hydra-net", "crates/hydra-cli", "crates/
 resolver = "2"
 
 [workspace.package]
+# The product version: hya-cli, hya-gui and hya-host inherit this via
+# `version.workspace = true` and move together as one "Hydra Download
+# Manager" release. The library crates (hya-core, hya-net) do NOT inherit
+# it — each carries its own version in its manifest and bumps independently
+# on its own semver cadence.
 version = "0.2.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"

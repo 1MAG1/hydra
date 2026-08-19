@@ -37,6 +37,8 @@ case "$ARCH" in
   x64)   TARGET="x86_64-pc-windows-msvc" ;;
 esac
 
+# The workspace product version ([workspace.package]), shared by the
+# hydra-gui, hydra-cli and hydra-host bin crates this installer bundles.
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 if [ "$NO_BUILD" = 0 ]; then

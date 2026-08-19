@@ -23,6 +23,11 @@ jobs:
         name: Compare version with Git tag
         run: |
           set -euo pipefail
+          # The release tag tracks the workspace product version
+          # ([workspace.package] in Cargo.toml), which hya-gui, hya-cli and
+          # hya-host inherit and ship under as one bundle. The library crates
+          # (hya-core, hya-net) version independently and are checked by the
+          # publish-crates job against their own manifests instead.
           VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
           TAG="${GITHUB_REF_NAME#v}"
           echo "manifest=$VERSION tag=$TAG"
@@ -244,10 +249,10 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_PUBLISH_TOKEN || secrets.CRATES_IO_TOKEN }}
         run: |
           set -euo pipefail
-          VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-          echo "Publishing workspace version ${VERSION}"
 
-          USER_AGENT="hydra-release-ci (${VERSION}; +https://github.com/ja7ad/hydra)"
+          crate_version() {
+            grep -m1 '^version = ' "crates/$1/Cargo.toml" | cut -d'"' -f2
+          }
 
           sparse_index_url() {
             local name
@@ -265,34 +270,43 @@ jobs:
           }
 
           is_indexed() {
-            local name="$1"
-            curl -sf -A "$USER_AGENT" "$(sparse_index_url "$name")" \
-              | grep -q "\"vers\":\"${VERSION}\""
+            local name="$1" version="$2" user_agent="$3"
+            curl -sf -A "$user_agent" "$(sparse_index_url "$name")" \
+              | grep -q "\"vers\":\"${version}\""
           }
 
           publish_crate() {
             local name="$1"
-            if is_indexed "$name"; then
-              echo "${name} ${VERSION} is already published, skipping"
+            # crates.io name -> manifest directory: crates/hydra-core holds
+            # the hya-core crate, crates/hydra-net holds hya-net.
+            local dir="hydra-${name#hya-}"
+            local version user_agent
+            version=$(crate_version "$dir")
+            user_agent="hydra-release-ci (${name} ${version}; +https://github.com/ja7ad/hydra)"
+            if is_indexed "$name" "$version" "$user_agent"; then
+              echo "${name} ${version} is already published, skipping"
               return
             fi
-            echo "Publishing ${name} ${VERSION}"
+            echo "Publishing ${name} ${version}"
             cargo publish -p "${name}" --locked
-            echo "Waiting for ${name} ${VERSION} to be indexed on crates.io..."
+            echo "Waiting for ${name} ${version} to be indexed on crates.io..."
             for _ in $(seq 1 60); do
-              if is_indexed "$name"; then
-                echo "${name} ${VERSION} is live"
+              if is_indexed "$name" "$version" "$user_agent"; then
+                echo "${name} ${version} is live"
                 return
               fi
               sleep 10
             done
-            echo "Timed out waiting for ${name} ${VERSION} to be indexed" >&2
+            echo "Timed out waiting for ${name} ${version} to be indexed" >&2
             exit 1
           }
 
-          # Publish in topological dependency order. Only the library crates go
-          # to crates.io; hya-cli / hya-gui / hya-host are `publish = false`
-          # and ship as release binaries instead:
+          # Publish in topological dependency order. The library crates each
+          # carry their own independent version (crates/hydra-{core,net}/
+          # Cargo.toml), separate from the workspace product version, so each
+          # is read and published against its own manifest. Only the library
+          # crates go to crates.io; hya-cli / hya-gui / hya-host are
+          # `publish = false` and ship as release binaries instead:
           # 1. hya-core (pure algorithmic foundation, no intra-workspace deps)
           # 2. hya-net (depends on hya-core)
           publish_crate hya-core

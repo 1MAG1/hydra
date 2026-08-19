@@ -29,6 +29,8 @@ cd "$REPO"
 
 scripts/macos-app-bundle.sh
 
+# The workspace product version ([workspace.package]), shared by the
+# hydra-gui, hydra-cli and hydra-host bin crates the .pkg carries.
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 # With CARGO_BUILD_TARGET set (CI cross-arch builds), the bundle script puts
 # the .app under target/<triple>/release, and the arch in the package name
