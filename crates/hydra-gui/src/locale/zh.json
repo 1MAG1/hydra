@@ -196,7 +196,7 @@
   "Remember this path for": "记住此路径用于",
   "Remove": "移除",
   "Remove from queue": "从队列中移除",
-  "Removes Hydra from the Dock and Cmd-Tab; reach it from the menu-bar tray icon. The app menu bar is unavailable while hidden. Applies immediately.": "将 Hydra 从 Dock 和 Cmd-Tab 中移除；可通过菜单栏托盘图标访问。隐藏期间应用菜单栏不可用。立即生效。",
+  "Removes Hydra from the Dock and Cmd-Tab while it runs in the tray; the Dock icon and menu bar return while a window is open.": "Hydra 在托盘运行时从 Dock 和 Cmd-Tab 中移除；窗口打开时 Dock 图标和菜单栏会恢复显示。",
   "Reserved for the per-tab hide buttons; it has no effect yet.": "为各标签页的隐藏按钮预留；目前尚无效果。",
   "Result:": "结果：",
   "Resume": "恢复",

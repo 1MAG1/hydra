@@ -161,15 +161,16 @@ fn boot() -> (App, Task<Message>) {
         app.cfg.settings.start_in_tray,
     );
 
-    // Dock visibility before any window opens, so a hidden configuration
-    // never flashes a Dock tile at launch.
-    #[cfg(target_os = "macos")]
-    macos_dock::apply(app.cfg.settings.hide_from_taskbar);
-
     // Autostart hands us --minimized: live in the tray, no window. (The tray
     // exists on macOS/Windows; elsewhere the window always opens.)
     let start_hidden = std::env::args().any(|a| a == "--minimized")
         && cfg!(any(target_os = "macos", target_os = "windows"));
+
+    // Dock visibility before any window opens, so a tray-only launch never
+    // flashes a Dock tile. A window about to open forces Regular: Accessory
+    // apps get no menu bar, and on macOS every Hydra menu lives there.
+    #[cfg(target_os = "macos")]
+    macos_dock::sync(app.cfg.settings.hide_from_taskbar, !start_hidden);
     if start_hidden {
         log::info("started minimized to tray");
         // The tray needs one WindowOpened to install; open the main window

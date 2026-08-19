@@ -71,7 +71,7 @@ fn general(app: &App) -> El<'_> {
             .size(15.0)
             .text_size(theme::FONT_SIZE)
             .style(theme::check),
-        tr("Removes Hydra from the Dock and Cmd-Tab; reach it from the menu-bar tray icon. The app menu bar is unavailable while hidden. Applies immediately."),
+        tr("Removes Hydra from the Dock and Cmd-Tab while it runs in the tray; the Dock icon and menu bar return while a window is open."),
     ));
     #[cfg(target_os = "windows")]
     let hide_taskbar: Option<El<'_>> = Some(hinted(

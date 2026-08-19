@@ -196,7 +196,7 @@
   "Remember this path for": "Dit pad onthouden voor",
   "Remove": "Verwijderen",
   "Remove from queue": "Uit wachtrij verwijderen",
-  "Removes Hydra from the Dock and Cmd-Tab; reach it from the menu-bar tray icon. The app menu bar is unavailable while hidden. Applies immediately.": "Verwijdert Hydra uit het Dock en Cmd-Tab; bereik de app via het pictogram in de menubalk. De menubalk van de app is niet beschikbaar zolang deze verborgen is. Wordt direct toegepast.",
+  "Removes Hydra from the Dock and Cmd-Tab while it runs in the tray; the Dock icon and menu bar return while a window is open.": "Verwijdert Hydra uit het Dock en Cmd-Tab zolang het in het systeemvak draait; het Dock-icoon en de menubalk keren terug zolang er een venster open is.",
   "Reserved for the per-tab hide buttons; it has no effect yet.": "Gereserveerd voor verbergknoppen per tabblad; heeft momenteel nog geen effect.",
   "Result:": "Resultaat:",
   "Resume": "Hervatten",

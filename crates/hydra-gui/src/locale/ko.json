@@ -196,7 +196,7 @@
   "Remember this path for": "이 경로 기억하기:",
   "Remove": "제거",
   "Remove from queue": "대기열에서 제거",
-  "Removes Hydra from the Dock and Cmd-Tab; reach it from the menu-bar tray icon. The app menu bar is unavailable while hidden. Applies immediately.": "Hydra를 Dock과 Cmd-Tab에서 제거합니다. 메뉴 막대의 트레이 아이콘으로 접근하세요. 숨겨진 동안에는 앱 메뉴 막대를 사용할 수 없습니다. 즉시 적용됩니다.",
+  "Removes Hydra from the Dock and Cmd-Tab while it runs in the tray; the Dock icon and menu bar return while a window is open.": "트레이에서 실행되는 동안 Hydra를 Dock과 Cmd-Tab에서 제거합니다. 창이 열려 있는 동안에는 Dock 아이콘과 메뉴 막대가 다시 표시됩니다.",
   "Reserved for the per-tab hide buttons; it has no effect yet.": "탭별 숨기기 버튼용(아직 적용되지 않음).",
   "Result:": "결과:",
   "Resume": "재개",

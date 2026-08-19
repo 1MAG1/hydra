@@ -1716,6 +1716,10 @@ impl App {
             Message::WindowOpened(id) => {
                 #[cfg(target_os = "macos")]
                 {
+                    // Back to Regular before installing the menu: with the
+                    // Dock hidden the app sat in Accessory, which has no
+                    // menu bar to install into.
+                    crate::macos_dock::sync(self.cfg.settings.hide_from_taskbar, true);
                     let state = crate::macos_menu::MenuState {
                         dark_mode: self.cfg.settings.dark_mode,
                         show_categories: self.cfg.settings.show_categories,
@@ -1752,6 +1756,13 @@ impl App {
             }
             Message::WindowClosed(id) => {
                 let kind = self.windows.remove(&id);
+                // Last window gone + hide-Dock on: drop to Accessory now
+                // that no menu bar is needed (tray-only from here).
+                #[cfg(target_os = "macos")]
+                crate::macos_dock::sync(
+                    self.cfg.settings.hide_from_taskbar,
+                    !self.windows.is_empty(),
+                );
                 match kind {
                     Some(WinKind::Main) => {
                         self.save_state();
@@ -2611,18 +2622,16 @@ impl App {
                 Task::none()
             }
             Message::OptOk => {
-                #[cfg(target_os = "macos")]
-                let dock_changed =
-                    self.cfg.settings.hide_from_taskbar != self.options.draft.hide_from_taskbar;
                 self.cfg.settings = self.options.draft.clone();
                 self.cfg.categories = self.options.draft_cats.clone();
                 self.save_config();
-                // Dock visibility is app-wide state, not a window flag —
-                // flips immediately, no reopen needed.
+                // Re-assert Dock policy for the new setting. Windows are
+                // still open here (Options itself), so this stays Regular;
+                // the actual hide happens when the last window closes —
+                // Accessory apps get no menu bar, so hiding the Dock while
+                // a window is up would strip every Hydra menu.
                 #[cfg(target_os = "macos")]
-                if dock_changed {
-                    crate::macos_dock::apply(self.cfg.settings.hide_from_taskbar);
-                }
+                crate::macos_dock::sync(self.cfg.settings.hide_from_taskbar, true);
                 crate::autostart::apply(
                     self.cfg.settings.launch_on_startup,
                     self.cfg.settings.start_in_tray,
