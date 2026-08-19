@@ -15,6 +15,8 @@ cd "$(dirname "$0")/.."
 INSTALL=0
 [ "${1:-}" = "--install" ] && INSTALL=1
 
+# The workspace product version ([workspace.package]), shared by the
+# hydra-gui, hydra-cli and hydra-host bin crates this bundle carries.
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 cargo build --release -p hya-gui -p hya-host -p hya-cli

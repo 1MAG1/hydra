@@ -11,6 +11,9 @@
 # PROFILE=dist make build   selects the smaller panic=abort profile (Cargo.toml).
 
 UNAME   := $(shell uname -s)
+# The workspace product version ([workspace.package] in Cargo.toml), shared
+# by the GUI, CLI and host bin crates that every package target bundles.
+# The library crates version independently and don't affect artifact names.
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 PROFILE ?= release
 CARGO   ?= cargo
