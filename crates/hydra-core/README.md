@@ -1,9 +1,5 @@
 # hya-core
 
-[![crates.io](https://img.shields.io/crates/v/hya-core.svg?style=flat-square)](https://crates.io/crates/hya-core)
-[![docs.rs](https://img.shields.io/docsrs/hya-core?style=flat-square)](https://docs.rs/hya-core)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square)](#license)
-
 I/O-free multi-source download scheduler: interval algebra, divergence-triggered
 repair, and liveness — as a pure state machine.
 
@@ -92,24 +88,6 @@ while !sched.is_complete() {
 There is no step 4: the scheduler never blocks, sleeps, or reads a clock.
 `now` is whatever timebase the caller has — simulated seconds in tests,
 `Instant`-derived seconds in production.
-
-## Module map
-
-| Module | Contents |
-|---|---|
-| `sched` | The scheduler kernel: `Scheduler`, `Action`, `Source`, `Capability`, stall reclamation, greedy concurrency |
-| `intervals` | `IntervalSet` / `Range`: half-open byte ranges, kept sorted and coalesced, exact `total()` |
-| `detect` | `CollapseDetector` / `Health`: two-sided CUSUM rate-collapse detection |
-| `admission` | `Admission` / `DeltaEstimator`: incremental greedy connection-count probing |
-| `format` | Magic-byte / extension / media-type file classification |
-
-## Relationship to the HYDRA workspace
-
-| Crate | Role | License |
-|---|---|---|
-| **`hya-core`** (this crate) | Scheduler state machine, no I/O | MIT OR Apache-2.0 |
-| [`hya-net`](https://crates.io/crates/hya-net) | HTTP/1.1 + FTP range transport, TLS, proxies, integrity | MIT OR Apache-2.0 |
-| `hya-cli` | The `hydra` binary: CLI, TUI queue manager, measurement harness | GPL-3.0-or-later |
 
 The libraries are deliberately permissive so they remain usable as dependencies;
 only the assembled tool is copyleft. See
