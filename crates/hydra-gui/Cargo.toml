@@ -58,8 +58,12 @@ png = "0.18"
 # System tray icon + native menus. `tray-icon` re-exports muda as
 # `tray_icon::menu`; using that everywhere (tray AND the macOS menu bar)
 # keeps one muda instance and therefore one global menu-event channel.
-# Linux tray support needs a GTK event loop and is deferred.
-tray-icon = "0.24"
+# Linux tray support needs a GTK event loop and is deferred. Default
+# features (`gtk`, `libxdo`) only feed that unused Linux backend, yet they
+# drag libappindicator -> gtk -> glib into Cargo.lock for every platform
+# (RUSTSEC-2024-0429: unsound `glib::VariantStrIter`, unfixable while the
+# discontinued gtk3 bindings pin glib < 0.20), so keep them off.
+tray-icon = { version = "0.24", default-features = false }
 
 [build-dependencies]
 # Compiles the generated .rc (app icon + VERSIONINFO) into hydra-gui.exe —
