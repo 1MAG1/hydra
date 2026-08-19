@@ -196,7 +196,7 @@
   "Remember this path for": "このパスを記憶する:",
   "Remove": "削除",
   "Remove from queue": "キューから削除",
-  "Removes Hydra from the Dock and Cmd-Tab; reach it from the menu-bar tray icon. The app menu bar is unavailable while hidden. Applies immediately.": "Hydra を Dock と Cmd-Tab から取り除きます。メニューバーのトレイアイコンからアクセスできます。非表示の間はアプリのメニューバーは利用できません。即座に適用されます。",
+  "Removes Hydra from the Dock and Cmd-Tab while it runs in the tray; the Dock icon and menu bar return while a window is open.": "トレイで動作している間は Hydra を Dock と Cmd-Tab から取り除きます。ウィンドウが開いている間は Dock アイコンとメニューバーが戻ります。",
   "Reserved for the per-tab hide buttons; it has no effect yet.": "タブ非表示ボタン用（現在未実装）。",
   "Result:": "結果:",
   "Resume": "再開",

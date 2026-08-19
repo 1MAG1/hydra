@@ -196,7 +196,7 @@
   "Remember this path for": "به‌خاطرسپاری این مسیر برای",
   "Remove": "حذف",
   "Remove from queue": "حذف از صف",
-  "Removes Hydra from the Dock and Cmd-Tab; reach it from the menu-bar tray icon. The app menu bar is unavailable while hidden. Applies immediately.": "هایدرا از Dock و Cmd-Tab حذف می‌شود؛ از طریق آیکون سینی در نوار منو به آن دسترسی داشته باشید. تا زمانی که پنهان است نوار منوی برنامه در دسترس نیست. بلافاصله اعمال می‌شود.",
+  "Removes Hydra from the Dock and Cmd-Tab while it runs in the tray; the Dock icon and menu bar return while a window is open.": "هایدرا تا زمانی که در سینی اجرا می‌شود از Dock و Cmd-Tab حذف می‌شود؛ با باز بودن هر پنجره، آیکون Dock و نوار منو بازمی‌گردند.",
   "Reserved for the per-tab hide buttons; it has no effect yet.": "برای دکمه‌های پنهان‌سازی زبانه رزرو شده و فعلاً اثری ندارد.",
   "Result:": "نتیجه:",
   "Resume": "ادامه",

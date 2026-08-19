@@ -196,7 +196,7 @@
   "Remember this path for": "Запомнить этот путь для",
   "Remove": "Удалить",
   "Remove from queue": "Удалить из очереди",
-  "Removes Hydra from the Dock and Cmd-Tab; reach it from the menu-bar tray icon. The app menu bar is unavailable while hidden. Applies immediately.": "Убирает Hydra из Dock и Cmd-Tab; доступ через значок в строке меню. Пока приложение скрыто, его строка меню недоступна. Применяется сразу.",
+  "Removes Hydra from the Dock and Cmd-Tab while it runs in the tray; the Dock icon and menu bar return while a window is open.": "Убирает Hydra из Dock и Cmd-Tab, пока приложение работает в трее; значок Dock и строка меню возвращаются, пока открыто окно.",
   "Reserved for the per-tab hide buttons; it has no effect yet.": "Зарезервировано для кнопок скрытия вкладок; пока не используется.",
   "Result:": "Результат:",
   "Resume": "Возобновить",

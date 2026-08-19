@@ -196,7 +196,7 @@
   "Remember this path for": "تذكر هذا المسار لـ",
   "Remove": "إزالة",
   "Remove from queue": "إزالة من قائمة الانتظار",
-  "Removes Hydra from the Dock and Cmd-Tab; reach it from the menu-bar tray icon. The app menu bar is unavailable while hidden. Applies immediately.": "يزيل Hydra من Dock ومن Cmd-Tab؛ يمكن الوصول إليه عبر أيقونة شريط القوائم. شريط قوائم التطبيق غير متاح أثناء الإخفاء. يُطبَّق فورًا.",
+  "Removes Hydra from the Dock and Cmd-Tab while it runs in the tray; the Dock icon and menu bar return while a window is open.": "يزيل Hydra من الـ Dock ومن Cmd-Tab أثناء عمله في شريط النظام؛ وتعود أيقونة الـ Dock وشريط القوائم ما دامت هناك نافذة مفتوحة.",
   "Reserved for the per-tab hide buttons; it has no effect yet.": "محجوز لأزرار إخفاء التبويبات؛ ليس له أي تأثير بعد.",
   "Result:": "النتيجة:",
   "Resume": "استئناف",
