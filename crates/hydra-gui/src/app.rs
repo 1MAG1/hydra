@@ -2325,6 +2325,15 @@ impl App {
                     Task::batch([open, self.update(Message::BatchLoaded(Some(text)))])
                 }
                 crate::extbus::ExtEvent::Open => self.open_window(WinKind::Main),
+                crate::extbus::ExtEvent::Shutdown => {
+                    // A newer build is taking over the single-instance slot
+                    // (extbus::signal_existing): leave the way tray Exit does.
+                    crate::log::info("ext: shutdown requested by a newer build; exiting");
+                    self.save_state();
+                    self.save_config();
+                    self.flush_saves();
+                    iced::exit()
+                }
             },
 
             // ---------------------------------------------------- file info

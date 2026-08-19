@@ -62,6 +62,9 @@ pub enum ExtEvent {
     Links(Vec<String>),
     /// Popup's "Open Hydra": surface the main window.
     Open,
+    /// A newer build launched and asked this instance to step aside so the
+    /// surviving process is the new version (see `signal_existing`).
+    Shutdown,
 }
 
 /// Capture-policy snapshot the UI thread publishes for the socket threads.
@@ -149,6 +152,13 @@ fn make_token() -> String {
 /// `--minimized` launch — then a bare ping) and report `true` so the caller
 /// can exit: one instance owns the state db, the tray, and this socket.
 /// A stale ipc.json (dead port, wrong token) reads as "no instance".
+///
+/// Exception: when the answering instance reports a DIFFERENT version, an
+/// old build is still resident after an upgrade — handing over would keep
+/// the old code (and its About-window version) on screen forever. Instead
+/// it is asked to quit, and once its socket goes dark this returns `false`
+/// so the caller boots as the new instance. Builds that predate "shutdown"
+/// refuse it as unknown; they get the classic hand-over.
 pub fn signal_existing(minimized: bool) -> bool {
     let Ok(text) = std::fs::read_to_string(crate::model::app_dir().join("ipc.json")) else {
         return false;
@@ -163,22 +173,45 @@ pub fn signal_existing(minimized: bool) -> bool {
         return false;
     };
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port as u16));
-    let Ok(mut s) = TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(400)) else {
+    let Ok(s) = TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(400)) else {
         return false;
     };
     let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
-    let kind = if minimized { "ping" } else { "open" };
-    if writeln!(s, "{{\"type\":\"{kind}\",\"token\":\"{token}\"}}").is_err() {
+    let Ok(mut out) = s.try_clone() else {
+        return false;
+    };
+    let mut reader = BufReader::new(s);
+    let mut request = move |kind: &str| -> Option<serde_json::Value> {
+        writeln!(out, "{{\"type\":\"{kind}\",\"token\":\"{token}\"}}").ok()?;
+        let mut line = String::new();
+        reader.read_line(&mut line).ok()?;
+        serde_json::from_str(&line).ok()
+    };
+    let acked = |r: &serde_json::Value| r.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
+
+    let Some(pong) = request("ping") else {
+        return false;
+    };
+    if !acked(&pong) {
         return false;
     }
-    let mut line = String::new();
-    if BufReader::new(s).read_line(&mut line).is_err() {
-        return false;
+
+    let theirs = pong.get("version").and_then(|t| t.as_str()).unwrap_or("");
+    if theirs != env!("CARGO_PKG_VERSION") && request("shutdown").is_some_and(|r| acked(&r)) {
+        // It saves state and exits; the socket dying is the all-clear.
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)).is_err() {
+                return false;
+            }
+        }
+        // Still alive after 5 s (wedged exit path?): treat it as the owner.
     }
-    serde_json::from_str::<serde_json::Value>(&line)
-        .ok()
-        .and_then(|r| r.get("ok").and_then(|o| o.as_bool()))
-        .unwrap_or(false)
+
+    if !minimized {
+        return request("open").is_some_and(|r| acked(&r));
+    }
+    true
 }
 
 /// Bind the listener and publish `<app_dir>/ipc.json`. Failure to bind is
@@ -276,11 +309,20 @@ const WS_PORTS: &[u16] = &[6799, 16799];
 
 /// Handle one authenticated request; the reply always carries the capture
 /// settings and echoes any `id` (the WebSocket path multiplexes on it).
-fn dispatch(req: &serde_json::Value) -> serde_json::Value {
+/// `trusted` is true for the token-bearing line protocol only — the
+/// WebSocket path is origin-authenticated, which any extension context
+/// satisfies, so takeover commands are refused there.
+fn dispatch(req: &serde_json::Value, trusted: bool) -> serde_json::Value {
     let (ok, err): (bool, Option<&str>) = match req.get("type").and_then(|t| t.as_str()) {
         Some("ping") | Some("config") => (true, None),
         Some("open") => {
             let _ = sender().send(ExtEvent::Open);
+            (true, None)
+        }
+        // Version-mismatch takeover from signal_existing: quit gracefully
+        // so the newly launched build can become the instance.
+        Some("shutdown") if trusted => {
+            let _ = sender().send(ExtEvent::Shutdown);
             (true, None)
         }
         Some("download") => match serde_json::from_value::<ExtDownload>(req.clone()) {
@@ -359,7 +401,9 @@ fn serve(stream: TcpStream, token: &str) {
             break;
         }
         let reply = match serde_json::from_str::<serde_json::Value>(&line) {
-            Ok(req) if req.get("token").and_then(|t| t.as_str()) == Some(token) => dispatch(&req),
+            Ok(req) if req.get("token").and_then(|t| t.as_str()) == Some(token) => {
+                dispatch(&req, true)
+            }
             Ok(_) => {
                 let _ = writeln!(
                     out,
@@ -474,7 +518,7 @@ fn serve_ws(stream: TcpStream) {
                     .ok()
                     .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
                 {
-                    Some(req) => dispatch(&req),
+                    Some(req) => dispatch(&req, false),
                     None => serde_json::json!({"ok": false, "error": "bad json"}),
                 };
                 if ws_write_frame(&mut out, 0x1, reply.to_string().as_bytes()).is_err() {
