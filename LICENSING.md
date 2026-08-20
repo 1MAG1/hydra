@@ -5,6 +5,7 @@
 | `hydra-cli` (the `hydra` binary) | `GPL-3.0-or-later` | The product surface. Copyleft here means a modified hydra distributed to users must ship its source. |
 | `hydra-core` | `MIT OR Apache-2.0` | An I/O-free scheduler built to be depended on. |
 | `hya-net` | `MIT OR Apache-2.0` | Transport, same reasoning. |
+| `hya-ffi` (`libhydra`) | `MIT OR Apache-2.0` | The embeddable C ABI. Its entire purpose is being linked into somebody else's application. |
 
 Files: `LICENSE` (GPL-3.0 text, verbatim), `LICENSE-MIT`, `LICENSE-APACHE`,
 `THIRD-PARTY-NOTICES.md`.
@@ -22,6 +23,22 @@ scheduler would get used.
 The binary is the opposite case. Nobody links a CLI, so GPL on `hydra-cli` costs
 nothing in adoption while still preventing a closed-source fork of the tool from
 being shipped to users.
+
+`hya-ffi` makes the same argument as sharply as it can be made. It exists so a
+third party can embed the engine in an Android app, an iOS framework, a Go
+program or a Flutter plugin; a copyleft `libhydra` would propagate into every
+one of those and there would be no reason for the crate to exist. Two
+consequences follow, and both are load-bearing rather than incidental:
+
+* **`hya-ffi` must never depend on `hya-cli`, `hya-gui` or `hya-host`.** Those
+  are GPL, and a single such dependency would relicense the embeddable library
+  by accident. The dependency direction is `hya-ffi -> {hya-core, hya-net}` and
+  nothing else from this workspace.
+* **A libhydra distribution is a different artifact from a hydra distribution.**
+  A package containing `libhydra.a` and `include/hydra.h` carries the MIT/Apache
+  terms and the third-party notices for the library graph. A package containing
+  the `hydra` binary carries GPL-3.0-or-later. Shipping an Android AAR or an
+  iOS XCFramework means shipping the first kind, and its `NOTICE` must say so.
 
 The cost of this split, stated plainly: someone may take `hydra-core`'s
 scheduling algorithms into a proprietary product without contributing anything

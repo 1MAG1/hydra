@@ -19,6 +19,32 @@
 
 ---
 
+## Contents
+
+- [Overview](#overview)
+- [Key Features](#key-features)
+  - [Engine](#engine)
+  - [CLI](#cli)
+  - [Desktop GUI](#desktop-gui)
+- [Installation](#installation)
+  - [Homebrew (macOS / Linux)](#homebrew-macos--linux)
+  - [Quick Install (prebuilt binaries)](#quick-install-prebuilt-binaries)
+  - [From Source](#from-source)
+- [Uninstall](#uninstall)
+  - [Quick Uninstall (prebuilt installs)](#quick-uninstall-prebuilt-installs)
+- [Usage](#usage)
+  - [Basic Download](#basic-download)
+  - [Multi-Connection & Mirror Sources](#multi-connection--mirror-sources)
+  - [CLI Compatibility (`wget` / `curl` Mode)](#cli-compatibility-wget--curl-mode)
+  - [Interactive Queue Manager (TUI)](#interactive-queue-manager-tui)
+  - [Remote Checksum Lookup & Verification](#remote-checksum-lookup--verification)
+- [Embedding HYDRA — `libhydra`](#embedding-hydra--libhydra)
+  - [Platform guides](#platform-guides)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
 ## Overview
 
 **HYDRA** is a high-performance network file retriever designed for speed, resilience, and adaptability. It dynamically partitions downloads across multiple connections and independent mirror sources, continuously rebalancing work to maximize throughput without stalling on slow peers. It ships as both a `wget`/`curl`-compatible CLI and a cross-platform desktop download manager with browser integration.
@@ -238,6 +264,68 @@ hydra --checksum sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b
 
 ---
 
+## Embedding HYDRA — `libhydra`
+
+The engine is not only a CLI. `hya-ffi` exposes `hya-core` and `hya-net`
+through a stable **C ABI**, so a desktop application, an Android app, an iOS
+app, or a program in Go, Swift, Kotlin, Dart, C# or Python can run the same
+download engine without taking the CLI or the GUI with it.
+
+```bash
+make ffi        # libhydra.a, libhydra.so/.dylib, and include/hydra.h
+make ffi-test   # the ABI suite plus a C conformance program
+```
+
+```c
+#include "hydra.h"
+
+hydra_engine_config_t cfg;
+HYDRA_ENGINE_CONFIG_INIT(&cfg);
+cfg.state_path = "hydra-state.json";     /* jobs survive a process restart */
+
+hydra_engine_t *engine = hydra_engine_create(&cfg);
+
+const char *urls[] = { "https://example.com/big.iso" };
+hydra_job_config_t job;
+HYDRA_JOB_CONFIG_INIT(&job);
+job.urls = urls; job.url_count = 1; job.output_path = "big.iso";
+
+hydra_job_id_t id;
+hydra_job_create(engine, &job, &id);
+hydra_job_start(engine, id);
+```
+
+Job identity is a durable `uint64_t` rather than a pointer, so it survives an
+app restart, a UI rebuild or a killed Android service; the event queue is the
+asynchronous interface, so it becomes a Go channel, a Kotlin `Flow`, a Swift
+`AsyncStream` or a Dart `Stream`; and file bytes never cross the boundary, so
+resident memory stays independent of object size.
+
+Every release publishes a prebuilt archive — static library, shared library,
+header, pkg-config metadata and these guides — for Linux (glibc and musl),
+macOS, Windows, Android and iOS. Any other target builds from source with
+`scripts/build-ffi.sh --target <triple>`, the same script CI runs.
+
+### Platform guides
+
+| | |
+|---|---|
+| [Getting started](docs/ffi/README.md) | The contract, the archive layout, sixty seconds of C |
+| [Linux](docs/ffi/linux.md) | glibc vs musl, pkg-config, CMake, containers, systemd |
+| [macOS](docs/ffi/macos.md) | universal binaries, Xcode, App Sandbox, notarisation |
+| [Windows](docs/ffi/windows.md) | MSVC, the static CRT, `hydra.lib` vs `hydra.dll` |
+| [Android](docs/ffi/android.md) | jniLibs, JNI, CMake, `Flow`, background execution |
+| [iOS](docs/ffi/ios.md) | `Hydra.xcframework`, SwiftPM, `AsyncStream`, app lifecycle |
+| [Any other platform](docs/ffi/other-platforms.md) | building for a triple outside the release matrix |
+| [Language bindings](docs/ffi/bindings.md) | Go, Python, C#, Dart, C++, Zig, and writing your own |
+
+See also [`crates/hydra-ffi/README.md`](crates/hydra-ffi/README.md) for the full
+contract, [`include/hydra.h`](include/hydra.h) for the published ABI, and
+[`examples/ffi-c/download.c`](examples/ffi-c/download.c) for a complete C
+client with mirrors, pause and resume.
+
+---
+
 ## Contributing
 
 Contributions are welcome! Please read the [Contributing Guide](CONTRIBUTING.md) for the project layout, build instructions, pre-submit checks (`fmt`, `clippy`, tests), commit conventions, and how licensing applies to each crate. In short:
@@ -255,6 +343,6 @@ Bug reports and feature requests go to the [issue tracker](https://github.com/ja
 ## License
 
 - The `hydra` CLI binary is licensed under the **GNU General Public License v3.0 or later** ([GPL-3.0-or-later](LICENSE)).
-- The `hydra-core` and `hya-net` libraries are dual-licensed under **MIT** or **Apache-2.0** ([LICENSE-MIT](LICENSE-MIT) / [LICENSE-APACHE](LICENSE-APACHE)).
+- The `hydra-core`, `hya-net` and `hya-ffi` libraries are dual-licensed under **MIT** or **Apache-2.0** ([LICENSE-MIT](LICENSE-MIT) / [LICENSE-APACHE](LICENSE-APACHE)).
 
 For more details, see [LICENSING.md](LICENSING.md) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

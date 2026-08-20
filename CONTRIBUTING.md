@@ -16,12 +16,13 @@ Thanks for your interest in improving HYDRA! Contributions of all kinds are welc
 
 ## Project Layout
 
-HYDRA is a Cargo workspace with five crates:
+HYDRA is a Cargo workspace with six crates:
 
 | Crate directory | Published as | What it is |
 |---|---|---|
 | `crates/hydra-core` | [`hya-core`](https://crates.io/crates/hya-core) | I/O-free download scheduler: range partitioning, range stealing, collapse/stall detection |
 | `crates/hydra-net` | `hya-net` | Transport layer: HTTP/1.1, HTTPS (`rustls`), FTP, HTTP CONNECT, SOCKS proxies |
+| `crates/hydra-ffi` | `libhydra` | Stable C ABI over the engine, for embedding in other languages and on mobile |
 | `crates/hydra-cli` | `hydra` binary | The CLI, `wget`/`curl` compatibility dialects, and the interactive TUI |
 | `crates/hydra-gui` | — | Cross-platform desktop download manager (iced) |
 | `crates/hydra-host` | — | Native-messaging host bridging browser extensions to the app |
@@ -51,7 +52,7 @@ cargo build --release          # binary at target/release/hydra
 make build
 ```
 
-Other useful Makefile targets: `make cli`, `make gui`, `make host`, and platform packaging targets (`make dmg` on macOS, `make deb` / `make rpm` on Linux, `make windows`).
+Other useful Makefile targets: `make cli`, `make gui`, `make host`, `make ffi` (the embeddable `libhydra` plus its header), and platform packaging targets (`make dmg` on macOS, `make deb` / `make rpm` on Linux, `make windows`).
 
 ## Before You Submit
 
@@ -69,10 +70,33 @@ cargo test --all-targets --all-features
 cargo test --release --all-targets --all-features
 ```
 
+If you touched `crates/hydra-ffi`, three more:
+
+```bash
+# 4. include/hydra.h is generated and committed; CI fails if it drifted.
+#    Needs cbindgen: cargo install cbindgen --locked
+make header-check
+
+# 5. The check no Rust test can perform: a C compiler accepting the header,
+#    the two sides agreeing on struct layout, every promised symbol present.
+#    Also compiles the header alone as C11/C17 and C++11/C++17.
+make ffi-test
+
+# 6. If you changed the packaging, the release archive still builds.
+#    This is the same script the release workflow runs.
+make ffi-dist
+```
+
+`libhydra` is released for Linux (glibc and musl), macOS, Windows, Android and
+iOS. The per-platform integration guides are in [`docs/ffi/`](docs/ffi/) and are
+copied into every release archive, so a change to the ABI usually means a change
+to one of them too.
+
 ## Testing
 
 - Put unit tests next to the code they cover; integration tests go in each crate's `tests/` directory.
 - New engine behavior in `hydra-core` should come with tests — the scheduler is deliberately I/O-free precisely so it can be tested deterministically without a network.
+- Anything added to the C ABI needs a test in `crates/hydra-ffi/tests/abi.rs`, which calls the exported symbols the way a C program does. Reaching into the crate's internals from there defeats the purpose: the point is evidence that the *interface* works. If the change alters the header, add a check to `examples/ffi-c/abi_smoke.c` as well — struct-layout and linkage faults are invisible to Rust tests by construction.
 - Coverage is tracked on [Codecov](https://codecov.io/gh/ja7ad/hydra). A PR doesn't need to hit a specific number, but changes that add meaningful logic without any tests will usually get pushback.
 - To reproduce the coverage report locally:
 
@@ -122,7 +146,7 @@ For security vulnerabilities, please **do not** open a public issue — report t
 
 HYDRA uses a split licensing model (see [LICENSING.md](LICENSING.md)):
 
-- Contributions to `crates/hydra-core` and `crates/hydra-net` are accepted under **MIT OR Apache-2.0** (dual license).
+- Contributions to `crates/hydra-core`, `crates/hydra-net` and `crates/hydra-ffi` are accepted under **MIT OR Apache-2.0** (dual license). `crates/hydra-ffi` must never gain a dependency on `hydra-cli`, `hydra-gui` or `hydra-host`: those are GPL, and Rust links statically, so one such dependency would relicense the embeddable library by accident.
 - Contributions to `crates/hydra-cli` (and the rest of the workspace) are accepted under **GPL-3.0-or-later**.
 
 By submitting a pull request, you agree that your contribution is licensed under the license(s) of the crate(s) it modifies. Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion shall be licensed as above, without any additional terms or conditions (per Apache-2.0 §5 for the dual-licensed crates).
