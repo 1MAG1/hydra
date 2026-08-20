@@ -2006,6 +2006,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hya-ffi"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hya-core",
+ "hya-net",
+ "md-5",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "hya-gui"
 version = "0.3.1"
 dependencies = [

@@ -1,0 +1,319 @@
+# Header generation for libhydra.
+#
+# The Rust definitions in `src/abi.rs` and `src/exports.rs` are the single
+# source of truth; `include/hydra.h` is generated from them and committed as a
+# published ABI artifact. CI regenerates and diffs, so the header cannot drift
+# from the implementation without the build saying so.
+#
+#   make header      regenerate include/hydra.h
+#   make header-check  fail if it would change
+
+language = "C"
+# Use the typedef name in signatures rather than `struct X`: it is what C
+# programmers write, and it keeps declarations readable.
+style = "type"
+header = """/*
+ * libhydra - a stable C ABI over the hydra download engine.
+ *
+ * Copyright (C) 2026 Javad Rajabzadeh
+ * SPDX-License-Identifier: MIT OR Apache-2.0
+ *
+ * GENERATED FILE - do not edit. Regenerate with `make header`.
+ * The source of truth is crates/hydra-ffi/src/{abi,exports}.rs.
+ *
+ * ---------------------------------------------------------------------------
+ * THE CONTRACT
+ * ---------------------------------------------------------------------------
+ *
+ * OWNERSHIP
+ *   Memory allocated by hydra is freed by hydra, through the matching *_free
+ *   function and NEVER through free(). A statically linked libhydra may not
+ *   share an allocator with your program, and on Windows it may not share a
+ *   CRT; a cross-allocator free corrupts the heap intermittently and far from
+ *   the call that caused it.
+ *   Strings you pass IN are borrowed for the duration of that call only. hydra
+ *   copies whatever it needs before returning, so you never have to keep a
+ *   buffer alive on hydra's behalf.
+ *
+ * ENCODING
+ *   Every string crossing this boundary is UTF-8. Invalid UTF-8 supplied by a
+ *   caller is HYDRA_ERR_INVALID_ARGUMENT, never a lossy conversion.
+ *
+ * LANGUAGE BASELINE
+ *   C11 or later, or C++11 or later. This header uses fixed-width integer
+ *   types and static assertions and does not attempt to support older
+ *   dialects; every language this ABI targets can meet that baseline.
+ *
+ * ENUM REPRESENTATION
+ *   Every ABI-visible enum VALUE is represented as a uint32_t. That is the
+ *   promise, and it is deliberately a statement about values rather than about
+ *   enumeration types: under C++ and C23 the typedef names a real enum with
+ *   uint32_t as its fixed underlying type, while under C11 the typedef IS
+ *   uint32_t and the enumerators are ordinary constants. C11 says nothing
+ *   about the width of an enumeration type itself, so nothing here depends on
+ *   it. The assertions at the foot of this header check the promise in
+ *   whichever mode you compile.
+ *
+ *   Note the asymmetry in struct fields: a field hydra WRITES (an event's kind,
+ *   a snapshot's state, an error's code) is declared as the enum, because hydra
+ *   constructs it. A field hydra READS from you is a uint32_t and is validated,
+ *   because you can put any bit pattern in a struct field and an out-of-range
+ *   enum value would otherwise be undefined behaviour on the Rust side.
+ *
+ * ERRORS
+ *   Every fallible call returns hydra_error_code_t. The detail behind it -
+ *   message, errno, HTTP status - is in a THREAD-LOCAL slot readable with
+ *   hydra_last_error(), cleared at the start of every call. Branch on the
+ *   code; never parse the message.
+ *
+ *   HYDRA_ERR_AGAIN is not a failure. It means "nothing to report right now",
+ *   and the non-blocking event calls return it constantly. Use HYDRA_IS_ERROR()
+ *   rather than a bare != HYDRA_OK when you mean "something went wrong".
+ *
+ * PANICS
+ *   No Rust panic crosses this boundary. An internal failure becomes
+ *   HYDRA_ERR_INTERNAL with the detail preserved.
+ *
+ * THREADS
+ *   hydra_engine_t*      thread-safe
+ *   job operations       thread-safe
+ *   event consumption    thread-safe, but intended for ONE consumer
+ *   hydra_engine_destroy synchronisation-sensitive: must not race with any
+ *                        other call on the same engine
+ *   Each function's own comment states whether it blocks and whether it
+ *   allocates.
+ *
+ * RUNTIME
+ *   The engine owns its own threads. Your program needs no async runtime, no
+ *   event loop and no particular thread. No Rust future appears in this ABI.
+ *
+ * EVENTS
+ *   The queue is the fundamental mechanism; callbacks are an optional
+ *   convenience and are marked EXPERIMENTAL for now, because getting a
+ *   foreign callback right differs sharply between the JVM, .NET, Go, Swift
+ *   and Python. The queue is bounded, so:
+ *     - progress events COALESCE (at most one pending per job; a newer sample
+ *       replaces an older one),
+ *     - terminal events (COMPLETED, FAILED, CANCELLED, ENGINE_SHUTDOWN) are
+ *       NEVER dropped,
+ *     - life-cycle events drop oldest-first once the bound is reached, and
+ *       every drop is counted in hydra_event_t.dropped_events.
+ *
+ *   ORDERING. Guaranteed WITHIN a single job, and only there. It is a PARTIAL
+ *   order, not a single sequence - a job can fail while resolving, so RESOLVED
+ *   is not something every run reaches:
+ *
+ *       JOB_CREATED -> JOB_QUEUED -> JOB_STARTED
+ *
+ *       after JOB_STARTED, in this relative order where they occur at all:
+ *           RESOLVED        at most once per attempt, once size and range
+ *                           support are known
+ *           PROGRESS        zero or more times, only after RESOLVED
+ *           RETRYING        zero or more times
+ *           STALLED         zero or more times
+ *           SOURCE_CHANGED  zero or more times
+ *           VERIFYING       at most once, and always before COMPLETED
+ *
+ *       PAUSED -> RESUMED, and a RESUMED job re-enters at JOB_QUEUED
+ *
+ *       COMPLETED, FAILED and CANCELLED are terminal: each is that job's last
+ *       event until the job is started again, and exactly one of them ends an
+ *       attempt that was not paused. Any of them may follow JOB_STARTED
+ *       directly - a bad URL fails before RESOLVED, a cancel can land at any
+ *       point.
+ *
+ *   There is NO ordering guarantee between events belonging to different jobs.
+ *   Two jobs run concurrently on threads hydra owns, so an application must
+ *   treat each job's stream as independent - which is also what makes the
+ *   queue easy to demultiplex into one stream per job in a binding.
+ *
+ *   There is ONE consumer. Several threads may call the event functions
+ *   safely, but every event is delivered exactly once, so a thread draining
+ *   the queue while waiting for job A will consume and discard job B's
+ *   completion unless it keeps it. Drain in one place and dispatch from there.
+ *
+ * CALLBACK POINTERS
+ *   user_data is NEVER owned by hydra and is NEVER freed by hydra. It is
+ *   stored, never dereferenced, and handed back to your function verbatim. It
+ *   must outlive the callback registration; freeing it while a callback is
+ *   installed is a use-after-free in your program, not in hydra's. This applies
+ *   to both hydra_event_set_callback() and hydra_engine_set_log_callback().
+ *
+ * MACROS
+ *   The helpers below are thin wrappers over static inline functions, so an
+ *   argument with side effects is evaluated exactly once. HYDRA_IS_ERROR(f())
+ *   calls f() one time, which a naive macro would not.
+ *
+ * CREDENTIALS
+ *   Passwords, proxy passwords and the Authorization, Proxy-Authorization and
+ *   Cookie headers never appear in a job snapshot, an event, an error message,
+ *   the log sink, the metrics, or the persisted state file. Userinfo embedded
+ *   in a URL (ftp://user:pass@host/path) is stripped at hydra_job_create() and
+ *   moved into the job's credentials, so the URL hydra stores and reports
+ *   carries no secret either. A restored job therefore comes back without its
+ *   credentials by design - re-arm it with hydra_job_set_credentials().
+ *
+ * BYTES
+ *   File data never crosses this ABI. hydra writes the object directly to its
+ *   destination by positioned writes; this interface carries control, state,
+ *   progress and errors only. That is what keeps resident memory independent
+ *   of file size.
+ *
+ * RATE LIMITS
+ *   Exactly:
+ *
+ *       engine_max = hydra_engine_config_t.max_bytes_per_second  (0 = none)
+ *       job_max    = hydra_job_config_t.max_bytes_per_second     (0 = none)
+ *
+ *       job_max == 0 and engine_max == 0  ->  unlimited
+ *       job_max == 0 and engine_max  > 0  ->  every such job shares ONE
+ *                                             limiter at engine_max, so the
+ *                                             cap is a true aggregate
+ *       job_max  > 0                      ->  that job gets its OWN limiter at
+ *                                             min(job_max, engine_max), and
+ *                                             engine_max acts as a per-job
+ *                                             ceiling rather than an aggregate
+ *
+ *   In other words, mixing per-job caps with an engine-wide cap gives up the
+ *   aggregate guarantee for the jobs that set one. Stated rather than hidden.
+ *
+ * DESTINATIONS
+ *   In this ABI version a destination is a filesystem path, and that is all.
+ *   It is enough for Linux, macOS, Windows and for an app-private directory on
+ *   Android or iOS. It is NOT enough for a content URI, a security-scoped
+ *   resource or a document-provider handle, and a future ABI may add other
+ *   destination kinds alongside the path. Do not assume a path is permanently
+ *   the only storage model; do assume it will keep working.
+ *
+ * PERSISTENCE
+ *   The state file is written ATOMICALLY - a temporary file and a rename - so
+ *   a process death mid-write cannot leave a truncated one. Atomic is not the
+ *   same as durable: hydra does not fsync the file or its directory, so a
+ *   sudden power loss may lose the most recent snapshot entirely, and you get
+ *   the previous consistent one instead. Nothing is ever half-written; the
+ *   newest write may simply not be there. Do not read more into "atomic" than
+ *   that.
+ *
+ *   state_path is this version's persistence mechanism: hydra owns the file and
+ *   its format. A future ABI may add host-managed persistence, so that an
+ *   application can put job state in Room, Core Data or its own database. Do
+ *   not depend on the file's contents or its format - only on the API.
+ *
+ * CRATE NAMES
+ *   The engine crates are named hya-core and hya-net (in directories
+ *   crates/hydra-core and crates/hydra-net). That prefix is deliberate and is
+ *   not a typo where it appears below.
+ *
+ * VERSIONING
+ *   HYDRA_FFI_ABI_VERSION is independent of the library version. Within one
+ *   ABI version: fields are only ever added to the END of versioned structs,
+ *   existing fields never move, enum values never change meaning, and
+ *   ownership rules never change. Compare the macro below against
+ *   hydra_ffi_abi_version() at startup and refuse to continue on a mismatch.
+ *
+ * STABILITY
+ *   Everything here is STABLE except hydra_job_get_sources,
+ *   hydra_source_info_t and hydra_source_array_t, which are EXPERIMENTAL and
+ *   may change within ABI 1.
+ */"""
+after_includes = """
+/* --------------------------------------------------------------------------
+ * These macros are defined here, before the declarations they wrap, because
+ * this is the hook that lands INSIDE the include guard. A macro is expanded at
+ * its use site, so it does not need the function to be declared yet - and
+ * being inside the guard is what makes a second #include of this header
+ * harmless.
+ * -------------------------------------------------------------------------- */
+
+/* Initialise a configuration struct.
+ *
+ * These pass sizeof(*(c)) as the caller's header declares it, which is what
+ * makes initialisation safe when your header is OLDER than the library you
+ * link against: the library writes at most the number of bytes your struct
+ * actually has, and everything past that keeps its documented default. Always
+ * prefer these to calling the underlying function with a hand-written size.
+ *
+ * `c` appears twice but is evaluated once: sizeof does not evaluate its
+ * operand. */
+#define HYDRA_ENGINE_CONFIG_INIT(c) \\
+    hydra_engine_config_init((c), (uint32_t)sizeof(*(c)))
+#define HYDRA_JOB_CONFIG_INIT(c) \\
+    hydra_job_config_init((c), (uint32_t)sizeof(*(c)))
+
+/* Static assertions, spelled for whichever language is compiling this. */
+#if defined(__cplusplus)
+  #define HYDRA_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+  #define HYDRA_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
+/* The code classifiers (hydra_succeeded / hydra_failed / hydra_is_error and
+ * their uppercase aliases) are at the FOOT of this header, not here: they are
+ * inline functions rather than bare macros, so their bodies need HYDRA_OK to
+ * be declared first. */
+
+/* Import/export decoration. A static build needs none; a shared build on
+ * Windows needs both halves, and which half depends on who is compiling. */
+#if defined(_WIN32)
+  #if defined(HYDRA_BUILD_SHARED)
+    #define HYDRA_API __declspec(dllexport)
+  #elif defined(HYDRA_USE_SHARED)
+    #define HYDRA_API __declspec(dllimport)
+  #else
+    #define HYDRA_API
+  #endif
+#else
+  #define HYDRA_API
+#endif
+"""
+include_guard = "HYDRA_H"
+autogen_warning = ""
+documentation = true
+documentation_style = "doxy"
+# Emit items in source order rather than alphabetically, so the header reads
+# the way the ABI is organised.
+sort_by = "None"
+usize_is_size_t = true
+cpp_compat = true
+no_includes = true
+sys_includes = ["stdint.h", "stddef.h"]
+
+[export]
+include = [
+  "hydra_engine_t",
+  "hydra_error_code_t",
+  "hydra_job_state_t",
+  "hydra_event_type_t",
+  "hydra_cancel_mode_t",
+  "hydra_priority_t",
+  "hydra_network_policy_t",
+  "hydra_power_mode_t",
+  "hydra_proxy_type_t",
+  "hydra_checksum_algorithm_t",
+  "hydra_log_level_t",
+  "hydra_string_t",
+  "hydra_error_t",
+  "hydra_header_t",
+  "hydra_proxy_config_t",
+  "hydra_checksum_t",
+  "hydra_runtime_policy_t",
+  "hydra_engine_config_t",
+  "hydra_job_config_t",
+  "hydra_progress_t",
+  "hydra_event_t",
+  "hydra_job_snapshot_t",
+  "hydra_source_info_t",
+  "hydra_source_array_t",
+  "hydra_job_id_array_t",
+  "hydra_metrics_t",
+]
+
+[enum]
+prefix_with_name = false
+
+[fn]
+prefix = "HYDRA_API"
+args = "vertical"
+
+[parse]
+parse_deps = false
