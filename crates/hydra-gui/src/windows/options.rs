@@ -97,6 +97,14 @@ fn general(app: &App) -> El<'_> {
             tr("Registers Hydra as a login item so downloads and queues continue after a reboot."),
         ),
         hinted(
+            checkbox(s.check_updates_on_startup).label(tr("Check for updates on startup"))
+                .on_toggle(|b| o(OptField::CheckUpdates(b)))
+                .size(15.0)
+                .text_size(theme::FONT_SIZE)
+                .style(theme::check),
+            tr("Asks the release server for a newer Hydra when the app starts. Only the check is automatic; installing always waits for your confirmation."),
+        ),
+        hinted(
             checkbox(s.start_in_tray).label(tr("Launch minimized to system tray"))
                 .on_toggle(|b| o(OptField::StartInTray(b)))
                 .size(15.0)
@@ -354,14 +362,15 @@ fn connection(app: &App) -> El<'_> {
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center),
-        checkbox(s.adaptive_conns)
-            .label(tr(
-                "Measure and adapt connection count (max. number becomes a ceiling)"
-            ))
-            .on_toggle(|b| o(OptField::AdaptiveConns(b)))
-            .size(15.0)
-            .text_size(theme::FONT_SIZE)
-            .style(theme::check),
+        hinted(
+            checkbox(s.adaptive_conns)
+                .label(tr("Measure and adapt connection count"))
+                .on_toggle(|b| o(OptField::AdaptiveConns(b)))
+                .size(15.0)
+                .text_size(theme::FONT_SIZE)
+                .style(theme::check),
+            tr("Starts each transfer with one connection and adds more only while they measurably improve speed; the default max. number acts as a ceiling."),
+        ),
         text(tr("Exceptions:")).size(theme::FONT_SIZE),
         container(exc)
             .padding(8)

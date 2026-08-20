@@ -175,6 +175,7 @@ pub fn reinstall(state: &MenuState, queues: &[String], languages: &[String]) {
         &item("Hydra Home Page", MenuAction::HomePage),
         &item("Keyboard Shortcuts", MenuAction::Shortcuts),
         &item("Permissions", MenuAction::Permissions),
+        &item("Check for updates", MenuAction::CheckUpdates),
         &item("About Hydra", MenuAction::About),
     ]);
     let _ = menu.append(&help);

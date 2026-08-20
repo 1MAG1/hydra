@@ -15,6 +15,8 @@ path = "src/main.rs"
 [dependencies]
 hya-core = { workspace = true }
 hya-net = { workspace = true }
+# `hydra update`: release check + download-link resolution (report-only).
+hya-updater = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 crossterm = { workspace = true }

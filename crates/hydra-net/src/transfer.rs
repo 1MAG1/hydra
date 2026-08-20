@@ -294,6 +294,13 @@ pub async fn run_transfer_cancellable<C: Connector>(
             sched.n_conns(),
         );
         r.start(0.0, sched.worst_delta().max(1e-3));
+        // Measure levels, not handshakes. `delta` is the per-request cost on a
+        // pooled connection; opening a new one costs a TCP and a TLS handshake on
+        // top of it, which on a high-RTT path outlasts the whole measurement window
+        // — so the level read as no better than the one below it and the search
+        // settled at one connection. The gate holds the window shut until the
+        // level's connections are actually on the wire.
+        r.arm_warmup(0.0, sched.worst_delta().max(1e-3));
         Some(r)
     } else {
         None
@@ -331,6 +338,21 @@ pub async fn run_transfer_cancellable<C: Connector>(
             let held = sched.bytes_held();
             r.observe(held.saturating_sub(ramp_last_held), now);
             ramp_last_held = held;
+            // A connection counts as delivering once its cursor has moved off the
+            // start of its range: bytes have arrived on THIS request, so its
+            // handshake, its request and its first byte are all behind it. The
+            // scheduler's rate estimate is not the same test — it survives a
+            // connection going idle, so it would report a connection as warm
+            // before its replacement request has produced anything.
+            let live = (0..sched.n_conns())
+                .filter(|&j| {
+                    sched
+                        .conn_range(j)
+                        .map(|(lo, pos, _hi)| pos > lo)
+                        .unwrap_or(false)
+                })
+                .count();
+            r.note_delivering(live);
             match r.poll(now, sched.worst_delta().max(1e-3)) {
                 hya_core::Ramp::Raise(n) => sched.set_active_limit(n),
                 hya_core::Ramp::Settled(n) => {

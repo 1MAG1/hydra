@@ -217,7 +217,7 @@ pub fn entries(kind: MenuBarKind, app: &App) -> Vec<Entry> {
             Entry::item(tr("Hydra Home Page"), MenuAction::HomePage),
             Entry::item(tr("Keyboard Shortcuts"), MenuAction::Shortcuts),
             Entry::item(tr("Permissions"), MenuAction::Permissions),
-            Entry::disabled(tr("Check for updates")).sep(),
+            Entry::item(tr("Check for updates"), MenuAction::CheckUpdates).sep(),
             Entry::item(tr("About Hydra"), MenuAction::About).sep(),
         ],
     }

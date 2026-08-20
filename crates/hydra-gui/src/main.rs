@@ -28,6 +28,7 @@ mod theme;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod tray;
 mod ui;
+mod update;
 mod windows;
 
 use app::{App, Message, WinKind};
@@ -111,6 +112,7 @@ fn boot() -> (App, Task<Message>) {
         file_info: app::FileInfoState::default(),
         prog: std::collections::HashMap::new(),
         options: app::OptionsState::default(),
+        updater: app::UpdateUiState::default(),
         sch: app::SchState::default(),
         batch: app::BatchState::default(),
         confirm: None,
@@ -161,6 +163,10 @@ fn boot() -> (App, Task<Message>) {
         app.cfg.settings.start_in_tray,
     );
 
+    // `.old` files a previous update's finisher could not delete (Windows
+    // keeps the outgoing exe locked through teardown) get swept now.
+    update::sweep_leftovers();
+
     // Autostart hands us --minimized: live in the tray, no window. (The tray
     // exists on macOS/Windows; elsewhere the window always opens.)
     let start_hidden = std::env::args().any(|a| a == "--minimized")
@@ -185,7 +191,14 @@ fn boot() -> (App, Task<Message>) {
     } else {
         let open_main = app.open_window(WinKind::Main);
         let perm = app.check_folder_access();
-        (app, Task::batch([open_main, perm]))
+        // Startup update check (Options > General). A modal only ever opens
+        // on a positive answer; failures are silent — offline is normal.
+        let check = if app.cfg.settings.check_updates_on_startup {
+            Task::perform(update::check(), Message::UpdateChecked)
+        } else {
+            Task::none()
+        };
+        (app, Task::batch([open_main, perm, check]))
     }
 }
 
@@ -203,6 +216,7 @@ fn view(app: &App, id: window::Id) -> app::El<'_> {
         Some(WinKind::Shortcuts) => windows::shortcuts::view(app),
         Some(WinKind::Confirm) => windows::confirm::view(app),
         Some(WinKind::Permissions) => windows::permissions::view(app),
+        Some(WinKind::Update) => windows::update::view(app),
         None => iced::widget::container(iced::widget::text(""))
             .width(iced::Length::Fill)
             .height(iced::Length::Fill)
@@ -227,6 +241,7 @@ fn title(app: &App, id: window::Id) -> String {
         Some(WinKind::Shortcuts) => tr("Keyboard Shortcuts"),
         Some(WinKind::Confirm) => tr("Hydra"),
         Some(WinKind::Permissions) => tr("Permissions"),
+        Some(WinKind::Update) => tr("Update Hydra"),
         None => "Hydra".into(),
     }
 }

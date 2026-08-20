@@ -71,3 +71,12 @@ require-linux:
 clean:
 	$(CARGO) clean
 	rm -rf target/dist
+
+fmt:
+	cargo fmt --all
+
+lint:
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+test:
+	cargo test --workspace --all-features

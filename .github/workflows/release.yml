@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.check.outputs.version }}
+      tag_version: ${{ steps.check.outputs.tag_version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,16 +28,33 @@ jobs:
           # The release tag tracks the workspace product version
           # ([workspace.package] in Cargo.toml), which hya-gui, hya-cli and
           # hya-host inherit and ship under as one bundle. The library crates
-          # (hya-core, hya-net) version independently and are checked by the
-          # publish-crates job against their own manifests instead.
+          # (hya-core, hya-net) version independently of it and are published
+          # by .github/workflows/publish-crates.yml on their own manifest bump,
+          # not by a release tag.
           VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
           TAG="${GITHUB_REF_NAME#v}"
-          echo "manifest=$VERSION tag=$TAG"
-          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$VERSION" != "$TAG" ]; then
+          # A tag may carry a semver pre-release suffix (v0.3.0-rc,
+          # v0.3.0-rc.2, v0.3.0-beta1) that the manifest does not. Both spellings
+          # are accepted: the manifest may stay on the plain release version
+          # while release candidates are cut from tags, or it may carry the same
+          # suffix so the shipped binaries report it. Everything after the first
+          # `-` marks the tag as a pre-release.
+          BASE="${TAG%%-*}"
+          if [ "$TAG" != "$BASE" ]; then
+            PRERELEASE=true
+          else
+            PRERELEASE=false
+          fi
+          echo "manifest=$VERSION tag=$TAG base=$BASE prerelease=$PRERELEASE"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$VERSION" != "$TAG" ] && [ "$VERSION" != "$BASE" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not match workspace version $VERSION"
             exit 1
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$VERSION"
+            echo "tag_version=$TAG"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.os }}-${{ matrix.arch }}
@@ -104,8 +123,8 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Build CLI, GUI, and native-messaging host
-        run: cargo build --release --locked --target ${{ matrix.target }} -p hya-cli -p hya-gui -p hya-host
+      - name: Build CLI, GUI, native-messaging host, and update finisher
+        run: cargo build --release --locked --target ${{ matrix.target }} -p hya-cli -p hya-gui -p hya-host -p hya-updater
 
       - name: Package artifacts
         shell: bash
@@ -136,7 +155,10 @@ jobs:
           # parent of its own directory, so it must sit in scripts/ with
           # extensions/ as a sibling.
           mkdir -p "stage/${GUI_NAME}/scripts"
-          cp "${BIN}/hydra-gui${EXT}" "${BIN}/hydra${EXT}" "${BIN}/hydra-host${EXT}" "stage/${GUI_NAME}/"
+          # hydra-updater is the self-update finisher: the GUI extracts a new
+          # release, runs this binary from a temp dir, exits, and the finisher
+          # swaps the installed files and relaunches.
+          cp "${BIN}/hydra-gui${EXT}" "${BIN}/hydra${EXT}" "${BIN}/hydra-host${EXT}" "${BIN}/hydra-updater${EXT}" "stage/${GUI_NAME}/"
           cp -R extensions/chrome extensions/firefox extensions/safari "stage/${GUI_NAME}/extensions/"
           if [ "${{ matrix.os }}" = windows ]; then
             cp scripts/install-native-host.ps1 "stage/${GUI_NAME}/scripts/"
@@ -226,88 +248,15 @@ jobs:
           sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      # A pre-release tag (v0.3.0-rc) is published as a GitHub pre-release and
+      # is never marked latest, so `releases/latest` — what the in-app updater
+      # polls — keeps pointing at the last stable release. A plain tag
+      # (v0.3.0) becomes the latest release.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: hydra ${{ needs.verify-version.outputs.version }}
+          name: hydra ${{ needs.verify-version.outputs.tag_version }}
           files: dist/*
           generate_release_notes: true
-
-  publish-crates:
-    name: Publish crates.io release
-    runs-on: ubuntu-latest
-    needs: [verify-version]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        run: rustup toolchain install stable --profile minimal
-
-      - name: Publish workspace crates in dependency order
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_PUBLISH_TOKEN || secrets.CRATES_IO_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          crate_version() {
-            grep -m1 '^version = ' "crates/$1/Cargo.toml" | cut -d'"' -f2
-          }
-
-          sparse_index_url() {
-            local name
-            name=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-            local len=${#name}
-            if [ "$len" -eq 1 ]; then
-              echo "https://index.crates.io/1/${name}"
-            elif [ "$len" -eq 2 ]; then
-              echo "https://index.crates.io/2/${name}"
-            elif [ "$len" -eq 3 ]; then
-              echo "https://index.crates.io/3/${name:0:1}/${name}"
-            else
-              echo "https://index.crates.io/${name:0:2}/${name:2:2}/${name}"
-            fi
-          }
-
-          is_indexed() {
-            local name="$1" version="$2" user_agent="$3"
-            curl -sf -A "$user_agent" "$(sparse_index_url "$name")" \
-              | grep -q "\"vers\":\"${version}\""
-          }
-
-          publish_crate() {
-            local name="$1"
-            # crates.io name -> manifest directory: crates/hydra-core holds
-            # the hya-core crate, crates/hydra-net holds hya-net.
-            local dir="hydra-${name#hya-}"
-            local version user_agent
-            version=$(crate_version "$dir")
-            user_agent="hydra-release-ci (${name} ${version}; +https://github.com/ja7ad/hydra)"
-            if is_indexed "$name" "$version" "$user_agent"; then
-              echo "${name} ${version} is already published, skipping"
-              return
-            fi
-            echo "Publishing ${name} ${version}"
-            cargo publish -p "${name}" --locked
-            echo "Waiting for ${name} ${version} to be indexed on crates.io..."
-            for _ in $(seq 1 60); do
-              if is_indexed "$name" "$version" "$user_agent"; then
-                echo "${name} ${version} is live"
-                return
-              fi
-              sleep 10
-            done
-            echo "Timed out waiting for ${name} ${version} to be indexed" >&2
-            exit 1
-          }
-
-          # Publish in topological dependency order. The library crates each
-          # carry their own independent version (crates/hydra-{core,net}/
-          # Cargo.toml), separate from the workspace product version, so each
-          # is read and published against its own manifest. Only the library
-          # crates go to crates.io; hya-cli / hya-gui / hya-host are
-          # `publish = false` and ship as release binaries instead:
-          # 1. hya-core (pure algorithmic foundation, no intra-workspace deps)
-          # 2. hya-net (depends on hya-core)
-          publish_crate hya-core
-          publish_crate hya-net
+          prerelease: ${{ needs.verify-version.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.verify-version.outputs.prerelease != 'true' }}

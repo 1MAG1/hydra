@@ -79,6 +79,15 @@ pub struct ConcurrencyRamp {
     /// Held rather than recorded so `Admission` sees exactly one sample per level; see
     /// the confirmation block in `poll` for why one window is not enough.
     held_rate: Option<f64>,
+    /// Connections the transport reports as actually delivering bytes.
+    ///
+    /// `None` means the caller does not supply the signal, which disables the
+    /// warm-up gate below and leaves the timing exactly as it was.
+    delivering: Option<usize>,
+    /// While set, a level has been admitted whose connections have not all
+    /// delivered a byte yet, and the measurement window is held open. The value is
+    /// the wall clock past which the ramp stops waiting and measures anyway.
+    warm_deadline: Option<f64>,
 }
 
 /// How long a measurement window runs, in multiples of the measured setup cost.
@@ -122,6 +131,21 @@ const SETTLE_DELTAS: f64 = 1.5;
 /// Floor on both, so a path reporting an implausibly small setup cost cannot
 /// collapse the windows to noise.
 const MIN_WINDOW_S: f64 = 0.25;
+
+/// How long the ramp waits for a newly admitted connection to deliver its first
+/// byte before measuring the level without it, in multiples of `delta`.
+///
+/// Generous relative to the windows on purpose: this is not a measurement window
+/// but a bound on patience, and the thing it waits for (connect + TLS + first byte)
+/// costs several `delta` on any path where `delta` is a single round trip.
+const WARM_DELTAS: f64 = 8.0;
+
+/// Bounds on that patience. The floor covers a fast path whose `delta` estimate is
+/// small enough that eight of them still land inside one handshake; the ceiling is
+/// what keeps a connection that never delivers from stalling the search — the
+/// scheduler's stall detection and reclaim own that connection, not the ramp.
+const MIN_WARM_S: f64 = 1.0;
+const MAX_WARM_S: f64 = 8.0;
 
 /// Ceiling on both.
 ///
@@ -171,6 +195,49 @@ impl ConcurrencyRamp {
             counting_since: 0.0,
             settled: None,
             held_rate: None,
+            delivering: None,
+            warm_deadline: None,
+        }
+    }
+
+    /// Opt in to the warm-up gate, and arm it for the level the search starts at.
+    ///
+    /// # The measurement this exists to prevent
+    ///
+    /// The windows are scaled by `delta`, the per-REQUEST setup cost, which on a
+    /// pooled connection is one round trip and is measured at 50-100 ms on the paths
+    /// this was tuned against. Admitting a CONNECTION costs something else entirely:
+    /// a TCP handshake, a TLS handshake and a first byte, and on a 250 ms-RTT path
+    /// that is 1.2-1.6 s before a single byte arrives — longer than `SETTLE_DELTAS`
+    /// and `WINDOW_DELTAS` together, both of which are clamped at `MAX_WINDOW_S`.
+    ///
+    /// The window therefore opened and closed while the new connection was still
+    /// handshaking, the level measured as no better than the one below it, and the
+    /// search settled at ONE on a path with real headroom. Reported from the field
+    /// as "only two of eight connections start": the second connection had delivered
+    /// 240 KB — the tail of its slow start — when the ramp judged it and stopped.
+    ///
+    /// A low-RTT path escapes it by luck: there the handshake fits inside the settle
+    /// delay, so the same code measures a warm connection and climbs to the ceiling.
+    /// That is what made this look path-specific rather than systematic.
+    ///
+    /// So the settle delay cannot be a duration alone. The transport reports how many
+    /// connections are actually delivering (`note_delivering`), and the window does
+    /// not open until the level's connections are among them, or until the deadline
+    /// this arms expires — a connection that never delivers must not stall the search
+    /// forever; the scheduler's own stall detectors own that case.
+    pub fn arm_warmup(&mut self, now: f64, delta: f64) {
+        self.delivering = Some(0);
+        self.warm_deadline = Some(now + (delta * WARM_DELTAS).clamp(MIN_WARM_S, MAX_WARM_S));
+    }
+
+    /// Report how many connections are currently delivering bytes.
+    ///
+    /// Aggregate count, not a set: the gate only asks whether the level it is about
+    /// to measure is fully on the wire.
+    pub fn note_delivering(&mut self, n: usize) {
+        if self.delivering.is_some() {
+            self.delivering = Some(n);
         }
     }
 
@@ -211,6 +278,24 @@ impl ConcurrencyRamp {
     pub fn poll(&mut self, now: f64, delta: f64) -> Ramp {
         if let Some(n) = self.settled {
             return Ramp::Settled(n);
+        }
+        // ---- warm-up gate --------------------------------------------------
+        //
+        // Hold the window at arm's length while the level's connections are still
+        // coming up: `start` is called on every poll, so `window_ends_at` keeps
+        // moving and no window can close over a handshake. See `arm_warmup` for the
+        // measurement error this prevents.
+        if let Some(deadline) = self.warm_deadline {
+            let warm = self.delivering.unwrap_or(usize::MAX) >= self.level;
+            if warm || now >= deadline {
+                self.warm_deadline = None;
+            }
+            // Either way the windows restart from HERE: on the warm path so the
+            // first window measures a delivering level, and on the deadline path so
+            // the level is judged over a full window rather than whatever remained.
+            self.held_rate = None;
+            self.start(now, delta);
+            return Ramp::Hold;
         }
         if now < self.window_ends_at {
             return Ramp::Hold;
@@ -303,6 +388,13 @@ impl ConcurrencyRamp {
                 // connection finishes the range it holds and then goes quiet.
                 self.level = (self.level * 2).min(self.max);
                 self.held_rate = None;
+                // Re-arm the warm-up gate for the connections this admits: they have
+                // a handshake ahead of them, and measuring them through it is what
+                // settled the search at one on high-RTT paths.
+                if self.delivering.is_some() {
+                    self.warm_deadline =
+                        Some(now + (delta * WARM_DELTAS).clamp(MIN_WARM_S, MAX_WARM_S));
+                }
                 self.start(now, delta);
                 Ramp::Raise(self.level)
             }
@@ -446,5 +538,135 @@ mod tests {
         let out = r.poll(10.0, 0.12);
         assert_eq!(out, Ramp::Hold, "silence must not be read as saturation");
         assert!(r.settled().is_none());
+    }
+
+    /// A path where opening a connection costs `handshake` seconds before its first
+    /// byte and `slow_start` more before it runs at `per_conn`.
+    ///
+    /// The first connection is modelled as POOLED — no handshake — because that is
+    /// what the transfer sees: the probe leaves a live connection behind, so
+    /// connection 0 starts delivering at once while every connection the ramp admits
+    /// later pays the full cost. That asymmetry is the whole point: the baseline is
+    /// measured warm and the step is measured cold.
+    fn run_warming(
+        sat: usize,
+        max: usize,
+        per_conn: f64,
+        delta: f64,
+        handshake: f64,
+        slow_start: f64,
+        gate: bool,
+    ) -> (usize, f64) {
+        let mut r = ConcurrencyRamp::new(0.15, max);
+        let mut now = 0.0;
+        r.start(now, delta);
+        if gate {
+            r.arm_warmup(now, delta);
+        }
+        // Wall clock at which each connection was opened; connection 0 with the
+        // transfer, the rest when the ramp admitted them.
+        let mut opened = vec![0.0f64];
+        let mut hs = vec![0.0f64];
+        let step = 0.02;
+        while now < 60.0 {
+            now += step;
+            // Per-connection contribution: nothing through the handshake, then a
+            // linear climb to full rate over `slow_start`.
+            let mut live = 0usize;
+            let mut rate = 0.0;
+            for (i, &t0) in opened.iter().enumerate() {
+                let since = now - t0 - hs[i];
+                if since >= 0.0 {
+                    live += 1;
+                    rate += per_conn * (since / slow_start).clamp(0.0, 1.0);
+                }
+            }
+            // The path saturates at `sat` connections' worth of aggregate rate.
+            rate = rate.min(per_conn * sat as f64);
+            r.observe((rate * step) as u64, now);
+            if gate {
+                r.note_delivering(live);
+            }
+            match r.poll(now, delta) {
+                Ramp::Raise(n) => {
+                    while opened.len() < n {
+                        opened.push(now);
+                        hs.push(handshake);
+                    }
+                }
+                Ramp::Settled(n) => return (n, now),
+                Ramp::Hold => {}
+            }
+        }
+        (r.level(), now)
+    }
+
+    /// The field failure, reproduced: a high-RTT path with eight-way headroom on
+    /// which the search stops at ONE connection.
+    ///
+    /// Reported as "only two of eight connections start" on a 116 MB GitHub release
+    /// asset. The second connection had moved 240 KB — the tail of its slow start —
+    /// when the ramp judged the level and stopped, and the six above it were never
+    /// admitted at all.
+    ///
+    /// The cause is a units mismatch, not a threshold: the windows are scaled by
+    /// `delta`, the per-request cost on a POOLED connection, while what they have to
+    /// outlast is a fresh TCP plus TLS handshake. Where the handshake is longer than
+    /// settle-plus-window (both clamped at `MAX_WINDOW_S` = 0.6 s), the level is
+    /// measured entirely through the new connection's silence, reads as no better
+    /// than the level below it, and the search settles at the bottom.
+    ///
+    /// Kept as a test of the UNGATED path so the defect cannot come back silently:
+    /// if this ever settles high on its own, the gate has stopped being what fixes it
+    /// and the reason for that should be understood.
+    #[test]
+    fn a_slow_handshake_defeats_the_ungated_search() {
+        let (n, _) = run_warming(8, 8, 2.4e6, 0.4, 2.5, 2.0, false);
+        assert_eq!(
+            n, 1,
+            "expected the ungated ramp to be fooled by a 2.5 s handshake; it settled \
+             at {n}, so this test no longer covers the defect it was written for"
+        );
+    }
+
+    /// With the gate armed, the same path is used.
+    ///
+    /// The window does not open until the level's connections are delivering, so the
+    /// step is measured on what the connections carry rather than on how long they
+    /// took to open.
+    #[test]
+    fn the_warm_up_gate_finds_the_headroom_a_slow_handshake_hides() {
+        let (n, t) = run_warming(8, 8, 2.4e6, 0.4, 2.5, 2.0, true);
+        assert!(
+            n >= 4,
+            "settled at {n} on a path that scales to 8: the gate did not restore the \
+             measurement"
+        );
+        // Waiting for the handshake costs clock, and it must stay bounded: four
+        // levels at a 2.5 s handshake plus two windows each is the budget here.
+        assert!(
+            t <= 30.0,
+            "took {t:.1}s to settle at {n}: patience is not free and must be bounded"
+        );
+    }
+
+    /// A connection that never delivers must not stall the search.
+    ///
+    /// The gate waits for the wire, so a black-holed connection would hold the window
+    /// open forever without the deadline. Reclaiming that connection is the
+    /// scheduler's job, not the ramp's; the ramp's job is to stop waiting.
+    #[test]
+    fn the_gate_gives_up_on_a_connection_that_never_delivers() {
+        // A handshake longer than the whole simulation: nothing admitted after
+        // connection 0 ever produces a byte.
+        let (n, t) = run_warming(8, 8, 2.4e6, 0.4, 1e6, 2.0, true);
+        assert!(
+            n <= 2,
+            "settled at {n} on a path where only one connection ever delivered"
+        );
+        assert!(
+            t < 60.0,
+            "the search never settled: the warm-up deadline is not bounding the wait"
+        );
     }
 }

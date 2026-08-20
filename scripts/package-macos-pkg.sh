@@ -132,7 +132,7 @@ pkgbuild --root "$STAGE" \
   --component-plist "$PLIST" \
   --scripts "$SCRIPTS" \
   --identifier "$IDENTIFIER" \
-  --version "$VERSION" \
+  --version "${VERSION%%-*}" \
   --install-location / \
   "$PKG" >/dev/null
 echo "Built: $PKG"

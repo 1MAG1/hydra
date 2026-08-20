@@ -840,6 +840,19 @@ pub enum Command {
         shell: clap_complete::Shell,
     },
 
+    /// Check whether a newer hydra release is available.
+    ///
+    /// Asks the release API for the latest version and, when it is newer than
+    /// this binary, prints the release notes, the release page, and the direct
+    /// download link for this OS and architecture. It never installs anything:
+    /// the CLI's update story is "here is the link", by design — package
+    /// managers and scripted installs own the actual replacement.
+    Update {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Generate a completion script AND install it into the shell's standard
     /// completion directory.
     ///
