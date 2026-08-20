@@ -18,6 +18,10 @@ INSTALL=0
 # The workspace product version ([workspace.package]), shared by the
 # hydra-gui, hydra-cli and hydra-host bin crates this bundle carries.
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+# CFBundleVersion / CFBundleShortVersionString take period-separated integers
+# only, so a pre-release suffix (0.3.0-rc1) is dropped from the plist; the DMG
+# and PKG file names still carry the full version.
+NUM_VERSION="${VERSION%%-*}"
 
 cargo build --release -p hya-gui -p hya-host -p hya-cli
 
@@ -59,8 +63,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key><string>Hydra Download Manager</string>
     <key>CFBundleExecutable</key><string>Hydra Download Manager</string>
     <key>CFBundleIdentifier</key><string>io.github.ja7ad.hydra</string>
-    <key>CFBundleVersion</key><string>${VERSION}</string>
-    <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+    <key>CFBundleVersion</key><string>${NUM_VERSION}</string>
+    <key>CFBundleShortVersionString</key><string>${NUM_VERSION}</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>hydra</string>
     <key>NSHighResolutionCapable</key><true/>
