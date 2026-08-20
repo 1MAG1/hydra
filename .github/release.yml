@@ -1,0 +1,40 @@
+# Configures the notes GitHub generates for `generate_release_notes: true`
+# (used by .github/workflows/release.yml when a release is published). Native
+# GitHub feature — no extra workflow or Action involved, and it's computed
+# correctly at actual release time for both stable and RC tags.
+#
+# Categorization is by PR label, so PRs need the matching label applied before
+# merge (labels below follow the `<type>(<scope>): summary` convention already
+# documented in CONTRIBUTING.md).
+changelog:
+  exclude:
+    labels:
+      - 'skip-changelog'
+  categories:
+    - title: '⚠️ Breaking Changes'
+      labels:
+        - 'breaking-change'
+    - title: '🚀 Features'
+      labels:
+        - 'feature'
+    - title: '🐛 Bug Fixes'
+      labels:
+        - 'bug'
+    - title: '⚡ Performance'
+      labels:
+        - 'performance'
+    - title: '📝 Documentation'
+      labels:
+        - 'documentation'
+    - title: '♻️ Refactoring'
+      labels:
+        - 'refactor'
+    - title: '📦 Dependencies'
+      labels:
+        - 'dependencies'
+    - title: '🔧 Maintenance'
+      labels:
+        - 'maintenance'
+    - title: 'Other Changes'
+      labels:
+        - '*'
