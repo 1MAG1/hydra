@@ -49,6 +49,12 @@ SetCompressor /SOLID lzma
 !ifndef VERSION
   !define VERSION "0.2.0"
 !endif
+; VIProductVersion accepts only x.x.x.x numerics, so a pre-release VERSION
+; (0.3.0-rc1) passes its numeric part separately; display strings keep the
+; full version.
+!ifndef NUM_VERSION
+  !define NUM_VERSION "${VERSION}"
+!endif
 !ifndef ARCH
   !define ARCH "x64"
 !endif
@@ -74,7 +80,7 @@ RequestExecutionLevel user
 InstallDir "$LOCALAPPDATA\Programs\Hydra"
 InstallDirRegKey HKCU "${UNINST_KEY}" "InstallLocation"
 
-VIProductVersion "${VERSION}.0"
+VIProductVersion "${NUM_VERSION}.0"
 VIAddVersionKey "ProductName"     "${APP_NAME}"
 VIAddVersionKey "ProductVersion"  "${VERSION}"
 VIAddVersionKey "FileVersion"     "${VERSION}"
