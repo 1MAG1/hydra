@@ -78,6 +78,65 @@ jobs:
       - name: Run release tests
         run: cargo test --release --all-targets --all-features
 
+  ffi-abi:
+    name: FFI ABI Conformance
+    needs: [fmt, clippy]
+    # Three platforms, because the failures this job exists to catch are
+    # platform-specific by nature: a struct that packs differently, a symbol the
+    # linker cannot find, a system library the static archive needs and does not
+    # declare. A Linux-only run would find none of them.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cbindgen
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cbindgen
+
+      # The committed header is a published ABI artifact. If it no longer
+      # matches the Rust definitions it was generated from, third parties are
+      # compiling against a description of a library that does not exist.
+      - name: Check include/hydra.h is up to date
+        if: runner.os != 'Windows'
+        run: scripts/gen-ffi-header.sh --check
+
+      - name: Run the FFI test suite
+        run: cargo test -p hya-ffi --all-targets
+
+      # The checks Rust tests structurally cannot perform: that a C compiler and
+      # a C++ compiler both accept the header, that all three sides agree on
+      # struct layout, that a second #include is harmless, and that every symbol
+      # the header promises is really in the archive.
+      - name: Build and run the C ABI smoke test (Unix)
+        if: runner.os != 'Windows'
+        run: scripts/ffi-c-example.sh
+
+      - name: Build and run the C ABI smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo rustc -p hya-ffi --crate-type staticlib -- --print native-static-libs 2>&1 |
+            Tee-Object -FilePath native-libs.txt
+          $libs = (Select-String -Path native-libs.txt -Pattern 'native-static-libs: (.*)').Matches.Groups[1].Value
+          cl /nologo /W3 /WX /I include examples\ffi-c\abi_smoke.c `
+             target\debug\hydra.lib $libs.Split(' ') /Fe:abi_smoke.exe
+          .\abi_smoke.exe
+          # The header on its own, as C and as C++, each including it twice.
+          cl /nologo /W3 /WX /I include /c examples\ffi-c\header_c.c /Fo:header_c.obj
+          cl /nologo /W3 /WX /EHsc /I include /c examples\ffi-c\header_cxx.cpp /Fo:header_cxx.obj
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest

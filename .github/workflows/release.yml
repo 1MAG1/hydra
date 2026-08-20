@@ -5,6 +5,25 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      extra_ffi_target:
+        description: >-
+          Optional extra Rust target triple to build libhydra for, on top of the
+          release matrix (e.g. riscv64gc-unknown-linux-gnu). Leave empty to skip.
+        required: false
+        default: ""
+      extra_ffi_runner:
+        description: >-
+          Runner for the extra libhydra target. Pick one whose OS can host a
+          toolchain for that triple.
+        required: false
+        default: ubuntu-latest
+        type: choice
+        options:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - windows-latest
 
 permissions:
   contents: read
@@ -227,10 +246,269 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # ---------------------------------------------------------------- libhydra
+  #
+  # The embeddable C ABI is a SEPARATE deliverable from the CLI/GUI bundle, and
+  # is built by separate jobs for two reasons: its matrix is much wider (mobile,
+  # musl, cross-compiled architectures), and its licence is different — the
+  # archives are MIT/Apache-2.0 and must never pick up GPL code from the CLI.
+  #
+  # Every job below runs the same scripts a developer runs locally. CI has no
+  # private build steps, because an "official" artifact produced by steps that
+  # exist only in a YAML file is one nobody outside CI can reproduce.
+
+  ffi-header:
+    name: Verify the published ABI header
+    needs: [verify-version]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cbindgen
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cbindgen
+
+      # include/hydra.h is generated from the Rust definitions and committed.
+      # Every archive below ships the committed copy, so if it has drifted, the
+      # release would hand third parties a description of a library that does
+      # not exist. Fail here rather than there.
+      - name: Check include/hydra.h is current
+        run: scripts/gen-ffi-header.sh --check
+
+  build-ffi:
+    name: libhydra ${{ matrix.target }}
+    needs: [verify-version, ffi-header]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- Linux, glibc -------------------------------------------------
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: armv7-unknown-linux-gnueabihf
+            runner: ubuntu-latest
+            # `ring` and `blake3` compile C and assembly, so a Rust target is
+            # not enough — cross-compiling needs a cross C toolchain.
+            apt: gcc-arm-linux-gnueabihf
+            env_cc: arm-linux-gnueabihf-gcc
+            env_ar: arm-linux-gnueabihf-ar
+          # ---- Linux, musl: static, no host glibc dependency -----------------
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            apt: musl-tools
+            env_cc: musl-gcc
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            apt: musl-tools
+            env_cc: musl-gcc
+          # ---- macOS ---------------------------------------------------------
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          # ---- Windows, MSVC ABI ---------------------------------------------
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cross toolchain
+        if: matrix.apt != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.apt }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ffi-${{ matrix.target }}
+
+      # cc-rs and cargo look these up under the target triple, upper-cased with
+      # dashes turned into underscores. Set here rather than in the script so the
+      # script stays about packaging and the toolchain choice stays visible.
+      - name: Point the build at the cross toolchain
+        if: matrix.env_cc != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          UP="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
+          {
+            echo "CC_${{ matrix.target }}=${{ matrix.env_cc }}"
+            echo "CARGO_TARGET_${UP}_LINKER=${{ matrix.env_cc }}"
+          } >> "$GITHUB_ENV"
+          if [ -n "${{ matrix.env_ar }}" ]; then
+            echo "AR_${{ matrix.target }}=${{ matrix.env_ar }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build and package libhydra
+        shell: bash
+        run: scripts/build-ffi.sh --target ${{ matrix.target }} --out dist
+
+      # The check no Rust test can perform: that a C compiler accepts the
+      # header, that both sides agree on struct layout, and that every symbol
+      # the header promises is really in the archive. Native targets only —
+      # a cross-built archive cannot be run here.
+      - name: ABI conformance test
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOST="$(rustc -vV | sed -n 's/^host: //p')"
+          if [ "$HOST" = "${{ matrix.target }}" ]; then
+            scripts/ffi-c-example.sh
+          else
+            # A cross-built archive cannot run here, and compiling the C client
+            # against it would need the cross toolchain's headers rather than
+            # the runner's. The native legs of this matrix cover the check.
+            echo "cross-built for ${{ matrix.target }} on $HOST; conformance run skipped"
+          fi
+
+      - name: Upload libhydra artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libhydra-${{ matrix.target }}
+          # .tar.gz for Unix targets, .zip for Windows ones; the build script
+          # picks per target, so both globs are listed and one matches.
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  build-ffi-android:
+    name: libhydra Android (4 ABIs)
+    needs: [verify-version, ffi-header]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ffi-android
+
+      # cargo-ndk sets the clang wrappers, AR, the API-level suffix and the
+      # libunwind link path that NDK r23+ requires. Hand-rolled toolchain
+      # environments get that last one wrong and fail at link time with an
+      # unresolved `__aeabi_unwind_cpp_pr0` on armeabi-v7a.
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # The script resolves the NDK from ANDROID_NDK_HOME, ANDROID_NDK_ROOT,
+      # ANDROID_NDK_LATEST_HOME or $ANDROID_HOME/ndk, and prints which it used.
+      # GitHub's ubuntu images set the third.
+      - name: Build and package libhydra for Android
+        run: scripts/package-ffi-android.sh --out dist
+
+      - name: Upload libhydra Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libhydra-android
+          path: dist/*.zip
+          if-no-files-found: error
+
+  build-ffi-apple:
+    name: libhydra Apple (XCFramework)
+    needs: [verify-version, ffi-header]
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ffi-apple
+
+      # Hydra.xcframework carries iOS device, iOS simulator and macOS slices.
+      # One artifact, because iOS-device arm64 and iOS-simulator arm64 are the
+      # same architecture for different platforms and `lipo` cannot hold both.
+      - name: Build Hydra.xcframework
+        run: scripts/package-ffi-apple.sh --out dist
+
+      - name: Upload libhydra Apple artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libhydra-apple
+          path: dist/*.zip
+          if-no-files-found: error
+
+  build-ffi-extra:
+    name: libhydra ${{ inputs.extra_ffi_target }} (manual)
+    needs: [verify-version, ffi-header]
+    if: github.event_name == 'workflow_dispatch' && inputs.extra_ffi_target != ''
+    runs-on: ${{ inputs.extra_ffi_runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.extra_ffi_target }}
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ffi-extra-${{ inputs.extra_ffi_target }}
+
+      # `cross` supplies a container carrying the C toolchain for the target,
+      # which is what ring and blake3 need and what a bare runner has for
+      # exactly one triple. build-ffi.sh honours $CARGO, so the same script
+      # drives it.
+      - name: Install cross
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      # --static-only: a staticlib never invokes a linker, so it builds on
+      # targets where none is configured. The static archive is the primary
+      # deliverable anyway.
+      - name: Build and package libhydra
+        shell: bash
+        env:
+          CARGO: ${{ runner.os == 'Linux' && 'cross' || 'cargo' }}
+        run: scripts/build-ffi.sh --target ${{ inputs.extra_ffi_target }} --static-only --out dist
+
+      - name: Upload libhydra artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libhydra-${{ inputs.extra_ffi_target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [verify-version, build]
+    needs: [verify-version, build, build-ffi, build-ffi-android, build-ffi-apple]
     if: github.ref_type == 'tag'
     permissions:
       contents: write
