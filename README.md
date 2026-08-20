@@ -29,28 +29,38 @@
 
 ## Key Features
 
+<table>
+<tr><td valign="top" width="33%">
+
 ### Engine
 
-- **Multi-Source & Adaptive Concurrency**: Saturates high-bandwidth links by dynamically distributing byte ranges across connections and mirrors.
-- **Dynamic Range Stealing**: Automatically detects laggard connections and redistributes remaining work to faster peers with zero server coordination overhead.
-- **Collapse & Stall Detection**: Uses two-sided CUSUM and dual-window statistical estimators to swiftly identify degraded connections before traditional timeouts expire.
-- **Protocols & Proxies**: Supports HTTP/1.1, HTTPS (via `rustls` with Mozilla roots), FTP (RFC 959 / REST), HTTP CONNECT tunneling, and SOCKS4 / SOCKS4a / SOCKS5 proxies.
-- **Integrity & Offline Parity**: Per-chunk checksum manifest verification (`--emit-manifest`, `--chunk-digests`) and local Reed–Solomon erasure coding for bitrot protection.
-- **Constant Memory Footprint**: Positioned writes (`pwrite`) stream data directly to disk, keeping resident memory usage flat regardless of file size.
+- **Adaptive Concurrency** — splits files across connections and mirrors, rebalancing live
+- **Range Stealing** — reassigns work from slow peers to fast ones automatically
+- **Stall Detection** — statistical estimators catch degraded connections early
+- **Broad Protocol Support** — HTTP(S), FTP, CONNECT tunneling, SOCKS4/4a/5
+- **Integrity Checks** — checksum manifests plus Reed–Solomon bitrot protection
+- **Flat Memory Use** — direct positioned writes keep RAM usage constant
+
+</td><td valign="top" width="33%">
 
 ### CLI
 
-- **`curl` & `wget` Compatibility**: Direct drop-in support for common `wget` and `curl` command-line flags and dialect personalities.
-- **Interactive Queue Manager**: Full-screen terminal UI (TUI) for managing, pausing, resuming, and monitoring queued downloads.
-- **Format Sniffing & Smart Sorting**: Content-based magic byte inspection for accurate file type detection and optional category-based directory sorting (`--sort-by-type`).
-- **Remote Checksum Lookup**: Inspects server-advertised digests (`Content-MD5`, `x-goog-hash`, …) and verifies downloads against a target hash.
+- **`wget` / `curl` Compatible** — drop-in flag and dialect support
+- **Interactive TUI** — manage, pause, resume, and monitor queued downloads
+- **Smart File Sorting** — content-based type detection and auto-sort
+- **Remote Checksum Lookup** — verify server-advertised digests before or after download
+
+</td><td valign="top" width="33%">
 
 ### Desktop GUI
 
-- **Cross-Platform Download Manager**: Native desktop app for Windows, macOS, and Linux with a persistent download list, categories, pause/resume, and per-download progress detail.
-- **Browser Integration**: Extensions for Chrome/Chromium, Edge, Firefox, and Safari hand downloads captured in the browser to the app — over a local WebSocket bridge, with a native-messaging host as fallback that can also launch the app on demand.
-- **Queue & Scheduler**: Queued downloads with scheduled start/stop times and retry tracking.
-- **Desktop Conveniences**: System tray with light/dark-aware icons, event sounds, launch-on-startup, and localized UI.
+- **Cross-Platform App** — Windows, macOS, and Linux with categories and progress detail
+- **Browser Integration** — Chrome, Edge, Firefox, and Safari extensions hand off downloads
+- **Queue & Scheduler** — scheduled start/stop times with retry tracking
+- **Desktop Niceties** — tray icon, sounds, launch-on-startup, localized UI
+
+</td></tr>
+</table>
 
 ---
 
@@ -83,6 +93,24 @@ CLI only:
 ```
 
 The scripts detect your OS and architecture (amd64/arm64), fetch the matching archive from the [latest GitHub release](https://github.com/ja7ad/hydra/releases/latest), and install it — on Linux and macOS to `/usr/local` (falling back to `~/.local`; override with `--prefix DIR`), on Windows to `%LOCALAPPDATA%\Programs\Hydra`. GUI installs also register the browser native-messaging host. Pin a release with `--version vX.Y.Z` / `-Version vX.Y.Z`, or download the archives yourself from the [releases page](https://github.com/ja7ad/hydra/releases).
+
+**Beta channel** — `--beta` (`-Beta` on Windows) installs the newest `-rc` pre-release when it is ahead of the latest stable release; otherwise it installs the stable release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | bash -s -- --beta
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ja7ad/hydra/main/install.ps1))) -Beta
+```
+
+The GUI's in-app updater follows the same rule: enable **Options → General → Download Beta channel** and update checks will also offer release candidates while one is ahead of stable.
+
+**macOS notes**: since the app isn't notarized yet, Gatekeeper may block it — see the [macOS Permissions Guide](https://github.com/ja7ad/hydra/wiki/macOS-Permissions-Guide-for-Hydra) for granting the required permissions. If you installed via the `.dmg` and macOS refuses to open the app ("damaged" or "unidentified developer"), clear the quarantine attribute:
+
+```bash
+xattr -cr /Applications/Hydra\ Download\ Manager.app
+```
 
 ### From Source
 

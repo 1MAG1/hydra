@@ -105,6 +105,14 @@ fn general(app: &App) -> El<'_> {
             tr("Asks the release server for a newer Hydra when the app starts. Only the check is automatic; installing always waits for your confirmation."),
         ),
         hinted(
+            checkbox(s.beta_channel).label(tr("Download Beta channel"))
+                .on_toggle(|b| o(OptField::BetaChannel(b)))
+                .size(15.0)
+                .text_size(theme::FONT_SIZE)
+                .style(theme::check),
+            tr("Update checks also offer release candidates (-rc tags) when one is ahead of the stable release; otherwise the stable release is used. Beta builds may be less stable."),
+        ),
+        hinted(
             checkbox(s.start_in_tray).label(tr("Launch minimized to system tray"))
                 .on_toggle(|b| o(OptField::StartInTray(b)))
                 .size(15.0)
