@@ -67,5 +67,6 @@ cd scripts/windows
 # while writing the output (NSIS bug #1165); non-login shells (CI, editors)
 # often have no LC_ALL set.
 LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
-  makensis -DARCH="$ARCH" -DVERSION="$VERSION" hydra-installer.nsi
+  makensis -DARCH="$ARCH" -DVERSION="$VERSION" \
+    -DNUM_VERSION="${VERSION%%-*}" hydra-installer.nsi
 echo "Built: target/hydra-$VERSION-windows-$ARCH-setup.exe"
