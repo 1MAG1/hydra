@@ -74,7 +74,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     echo "error: jq not found (brew install jq)" >&2
     exit 1
   }
-  cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
 
   status=0
   printf '%-10s %-12s %-12s %s\n' CRATE MANIFEST REGISTRY STATUS

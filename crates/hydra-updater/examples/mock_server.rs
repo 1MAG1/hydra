@@ -277,7 +277,8 @@ fn serve_one(
     // rate MB/s in 64 KB slices: sleep (64 KB / rate) per slice. Coarse but
     // plenty accurate for making a progress bar move at a believable pace.
     let slice = 64 * 1024;
-    let pause = std::time::Duration::from_secs_f64(slice as f64 / (rate_mbps as f64 * 1024.0 * 1024.0));
+    let pause =
+        std::time::Duration::from_secs_f64(slice as f64 / (rate_mbps as f64 * 1024.0 * 1024.0));
     for chunk in body.chunks(slice) {
         if sock.write_all(chunk).is_err() {
             return; // client cancelled mid-download
