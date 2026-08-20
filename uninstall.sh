@@ -68,6 +68,16 @@ if [ "$OS" = linux ]; then
   fi
 fi
 
+# Homebrew installs are managed by brew.
+if command -v brew >/dev/null 2>&1; then
+  if brew list --formula hydra >/dev/null 2>&1 || brew list --formula ja7ad/tap/hydra >/dev/null 2>&1; then
+    echo "note: hydra CLI was installed via Homebrew; to remove run: brew uninstall hydra" >&2
+  fi
+  if brew list --cask hydra >/dev/null 2>&1 || brew list --cask ja7ad/tap/hydra >/dev/null 2>&1; then
+    echo "note: hydra app was installed via Homebrew Cask; to remove run: brew uninstall --cask hydra" >&2
+  fi
+fi
+
 # Man pages, by exact name: a glob like hydra*.1 could hit the unrelated
 # THC hydra(1) if it shares the prefix.
 MAN_PAGES=(hydra.1 hydra-interactive.1 hydra-checksum.1 hydra-parity.1
