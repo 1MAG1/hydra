@@ -237,6 +237,10 @@ pub struct SoundRow {
 pub struct Settings {
     // General tab
     pub launch_on_startup: bool,
+    /// Ask the release API for a newer version when the app starts; a hit
+    /// opens the update dialog. Only the check is automatic — downloading
+    /// and installing always wait for the user's "Update Now".
+    pub check_updates_on_startup: bool,
     /// Autostart launches come up in the tray without opening the window.
     pub start_in_tray: bool,
     /// Fewer wakeups everywhere: slower UI refresh, no glide animation,
@@ -319,6 +323,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             launch_on_startup: true,
+            check_updates_on_startup: true,
             start_in_tray: true,
             power_save: false,
             hide_from_taskbar: false,

@@ -13,6 +13,7 @@ pub mod permissions;
 pub mod progress;
 pub mod scheduler;
 pub mod shortcuts;
+pub mod update;
 
 use crate::app::{El, Message};
 use crate::theme;

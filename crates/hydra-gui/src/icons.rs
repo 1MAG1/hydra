@@ -362,3 +362,12 @@ pub fn warning() -> svg::Handle {
     ))
     .clone()
 }
+
+/// Blue "i" bubble for informational dialogs (e.g. "you are up to date").
+pub fn info() -> svg::Handle {
+    static C: OnceLock<svg::Handle> = OnceLock::new();
+    C.get_or_init(|| flat_icon(
+        r##"<circle cx="8" cy="8" r="6.5" fill="#2D7DD2"/><circle cx="8" cy="8" r="6.5" fill="none" stroke="#1F5FA8" stroke-width="0.8"/><circle cx="8" cy="4.9" r="1.0" fill="#FFFFFF"/><path d="M8 7.2 v4.2" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round"/>"##,
+    ))
+    .clone()
+}

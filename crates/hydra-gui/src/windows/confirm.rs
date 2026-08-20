@@ -64,6 +64,21 @@ pub fn view(app: &App) -> El<'_> {
             ),
             false,
         ),
+        Some(ConfirmKind::UpToDate) => (
+            format!(
+                "{} (Hydra {})",
+                tr("You are using the latest version of Hydra."),
+                env!("CARGO_PKG_VERSION")
+            ),
+            false,
+        ),
+        Some(ConfirmKind::UpdateCheckFailed(e)) => (
+            format!(
+                "{}\n\n{e}",
+                tr("Could not check for updates. Check your internet connection and try again.")
+            ),
+            false,
+        ),
         Some(ConfirmKind::Duplicate { existing, file }) => {
             let msg = match (existing, file) {
                 (Some(_), _) => tr("This address is already in the download list. What do you want to do?"),
@@ -172,10 +187,15 @@ pub fn view(app: &App) -> El<'_> {
         row![dlg_btn_primary(tr("OK"), close)].into()
     };
 
+    // Good news gets the info bubble; everything else warns.
+    let icon = match &app.confirm {
+        Some(ConfirmKind::UpToDate) => icons::info(),
+        _ => icons::warning(),
+    };
     container(
         column![
             row![
-                svg(icons::warning()).width(36.0).height(36.0),
+                svg(icon).width(36.0).height(36.0),
                 text(msg).size(theme::FONT_SIZE),
             ]
             .spacing(14)

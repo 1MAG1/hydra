@@ -32,6 +32,7 @@ pub enum WinKind {
     Confirm,
     Permissions,
     Shortcuts,
+    Update,
 }
 
 // ---------------------------------------------------------------- selections
@@ -110,6 +111,10 @@ pub enum MenuAction {
     OpenFolderSel,
     PowerSaveToggle,
     Shortcuts,
+    /// Help > Check for updates: a manual, user-visible version check —
+    /// unlike the silent startup check it also reports "up to date" and
+    /// connection failures.
+    CheckUpdates,
 }
 
 impl MenuAction {
@@ -154,6 +159,7 @@ impl MenuAction {
             MenuAction::OpenFolderSel => "open_folder_sel".into(),
             MenuAction::PowerSaveToggle => "power_save".into(),
             MenuAction::Shortcuts => "shortcuts".into(),
+            MenuAction::CheckUpdates => "check_updates".into(),
         }
     }
 
@@ -218,6 +224,7 @@ impl MenuAction {
             "open_folder_sel" => MenuAction::OpenFolderSel,
             "power_save" => MenuAction::PowerSaveToggle,
             "shortcuts" => MenuAction::Shortcuts,
+            "check_updates" => MenuAction::CheckUpdates,
             _ => return None,
         })
     }
@@ -338,6 +345,36 @@ impl Default for OptionsState {
     }
 }
 
+/// State of the update dialog (`WinKind::Update`).
+#[derive(Debug, Default)]
+pub struct UpdateUiState {
+    /// The newer release, filled by the startup check.
+    pub info: Option<crate::update::UpdateInfo>,
+    pub phase: UpdatePhase,
+    /// Cooperative cancel for the in-flight download; the stream checks it
+    /// on every chunk.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The pending check came from Help > Check for updates: report
+    /// "up to date" and failures too, where the startup check stays silent.
+    pub manual: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum UpdatePhase {
+    /// Notes are on screen; nothing has been downloaded.
+    #[default]
+    Idle,
+    Downloading {
+        got: u64,
+        total: Option<u64>,
+    },
+    Verifying,
+    Preparing,
+    /// The finisher process is live; the app is about to exit.
+    Restarting,
+    Failed(String),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SchTab {
     #[default]
@@ -399,6 +436,10 @@ pub enum ConfirmKind {
     PermissionWarn {
         dir: String,
     },
+    /// Help > Check for updates found nothing newer (info box, OK).
+    UpToDate,
+    /// Help > Check for updates could not reach the release server.
+    UpdateCheckFailed(String),
     /// "Warn me before stopping downloads" (Connection tab): the stop only
     /// happens once the user confirms. `stop_queues` carries the Pause All /
     /// Stop All variant, which also halts queue processing.
@@ -490,6 +531,14 @@ pub enum Message {
     OptTabSet(OptTab),
     OptOk,
     OptDraft(OptField),
+    // update dialog
+    /// Startup (or manual) check finished: newer release / up to date / error.
+    UpdateChecked(Result<Option<crate::update::UpdateInfo>, String>),
+    UpdateNow,
+    UpdateCancel,
+    UpdateOpenPage,
+    /// Progress of a running update, streamed from `update::run`.
+    UpdateEvent(crate::update::UpdateEvent),
     // scheduler
     SchQueue(String),
     SchNameEdit,
@@ -533,6 +582,7 @@ pub enum Message {
 #[derive(Clone, Debug)]
 pub enum OptField {
     LaunchStartup(bool),
+    CheckUpdates(bool),
     StartInTray(bool),
     /// Only where the Dock/taskbar checkbox exists (macOS/Windows).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -637,6 +687,7 @@ pub struct App {
     pub file_info: FileInfoState,
     pub prog: HashMap<DlId, ProgState>,
     pub options: OptionsState,
+    pub updater: UpdateUiState,
     pub sch: SchState,
     pub batch: BatchState,
     pub confirm: Option<ConfirmKind>,
@@ -916,6 +967,7 @@ impl App {
             WinKind::Shortcuts => ((520.0, 460.0), false),
             WinKind::Confirm => ((500.0, 200.0), false),
             WinKind::Permissions => ((640.0, 580.0), false),
+            WinKind::Update => ((560.0, 520.0), false),
         };
         let minimizable = matches!(kind, WinKind::Main | WinKind::Progress(_));
         // Centre sub-windows over the main window when its bounds are known.
@@ -1794,6 +1846,18 @@ impl App {
                             Task::none()
                         }
                     }
+                    Some(WinKind::Update) => {
+                        // OS close button is Cancel: stop an in-flight
+                        // download and forget the offer (unless the finisher
+                        // is already live — then the exit is imminent).
+                        if self.updater.phase != UpdatePhase::Restarting {
+                            if let Some(c) = &self.updater.cancel {
+                                c.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            self.updater = UpdateUiState::default();
+                        }
+                        Task::none()
+                    }
                     _ => Task::none(),
                 }
             }
@@ -2649,6 +2713,128 @@ impl App {
             }
             Message::OptDraft(f) => self.on_opt_field(f),
 
+            // ------------------------------------------------------- update
+            Message::UpdateChecked(res) => {
+                let manual = std::mem::take(&mut self.updater.manual);
+                match res {
+                    Ok(Some(info)) => {
+                        crate::log::info(&format!("update available: {}", info.version));
+                        self.updater = UpdateUiState {
+                            info: Some(info),
+                            ..UpdateUiState::default()
+                        };
+                        self.open_window(WinKind::Update)
+                    }
+                    Ok(None) if manual => {
+                        self.confirm = Some(ConfirmKind::UpToDate);
+                        self.open_window(WinKind::Confirm)
+                    }
+                    Ok(None) => Task::none(),
+                    Err(e) if manual => {
+                        crate::log::warn(&format!("update check failed: {e}"));
+                        self.confirm = Some(ConfirmKind::UpdateCheckFailed(e));
+                        self.open_window(WinKind::Confirm)
+                    }
+                    Err(e) => {
+                        // A failed startup check is a log line, never a
+                        // dialog: offline startups are normal.
+                        crate::log::warn(&format!("update check failed: {e}"));
+                        Task::none()
+                    }
+                }
+            }
+            Message::UpdateNow => {
+                let Some(info) = self.updater.info.clone() else {
+                    return Task::none();
+                };
+                crate::log::info(&format!(
+                    "update: user chose Update Now for {}",
+                    info.version
+                ));
+                if !matches!(
+                    self.updater.phase,
+                    UpdatePhase::Idle | UpdatePhase::Failed(_)
+                ) {
+                    return Task::none();
+                }
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.updater.cancel = Some(cancel.clone());
+                self.updater.phase = UpdatePhase::Downloading {
+                    got: 0,
+                    total: (info.size > 0).then_some(info.size),
+                };
+                Task::run(crate::update::run(info, cancel), Message::UpdateEvent)
+            }
+            Message::UpdateCancel => {
+                match self.updater.phase {
+                    // Mid-download: raise the flag; the stream answers with
+                    // Cancelled once the transfer notices, which closes the
+                    // window and cleans the partial file.
+                    UpdatePhase::Downloading { .. } => {
+                        if let Some(c) = &self.updater.cancel {
+                            c.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Task::none()
+                    }
+                    // Too late to stop; ignore.
+                    UpdatePhase::Verifying | UpdatePhase::Preparing | UpdatePhase::Restarting => {
+                        Task::none()
+                    }
+                    _ => {
+                        self.updater = UpdateUiState::default();
+                        self.close_window(WinKind::Update)
+                    }
+                }
+            }
+            Message::UpdateOpenPage => {
+                if let Some(info) = &self.updater.info {
+                    if !info.html_url.is_empty() {
+                        let _ = open::that_detached(&info.html_url);
+                    }
+                }
+                Task::none()
+            }
+            Message::UpdateEvent(ev) => {
+                use crate::update::UpdateEvent as Ev;
+                match ev {
+                    Ev::Progress(got, total) => {
+                        if let UpdatePhase::Downloading { total: known, .. } = self.updater.phase {
+                            self.updater.phase = UpdatePhase::Downloading {
+                                got,
+                                total: total.or(known),
+                            };
+                        }
+                        Task::none()
+                    }
+                    Ev::Verifying => {
+                        self.updater.phase = UpdatePhase::Verifying;
+                        Task::none()
+                    }
+                    Ev::Preparing => {
+                        self.updater.phase = UpdatePhase::Preparing;
+                        Task::none()
+                    }
+                    Ev::Cancelled => {
+                        self.updater = UpdateUiState::default();
+                        self.close_window(WinKind::Update)
+                    }
+                    Ev::Failed(e) => {
+                        self.updater.phase = UpdatePhase::Failed(e);
+                        self.updater.cancel = None;
+                        Task::none()
+                    }
+                    Ev::ReadyToRestart => {
+                        // The finisher waits for this process to exit before
+                        // swapping files; leave with everything persisted.
+                        self.updater.phase = UpdatePhase::Restarting;
+                        self.save_state();
+                        self.save_config();
+                        self.flush_saves();
+                        iced::exit()
+                    }
+                }
+            }
+
             // ---------------------------------------------------- scheduler
             Message::SchQueue(q) => {
                 self.sch.rename_draft = q.clone();
@@ -3285,6 +3471,15 @@ impl App {
                 );
                 self.open_window(WinKind::Options)
             }
+            MenuAction::CheckUpdates => {
+                // A known offer just reopens its dialog; otherwise run a
+                // fresh check in manual mode so the result is always shown.
+                if self.updater.info.is_some() {
+                    return self.open_window(WinKind::Update);
+                }
+                self.updater.manual = true;
+                Task::perform(crate::update::check(), Message::UpdateChecked)
+            }
             MenuAction::HideCategories => {
                 self.cfg.settings.show_categories = !self.cfg.settings.show_categories;
                 self.save_config();
@@ -3427,6 +3622,7 @@ impl App {
         let s = &mut self.options.draft;
         match f {
             OptField::LaunchStartup(b) => s.launch_on_startup = b,
+            OptField::CheckUpdates(b) => s.check_updates_on_startup = b,
             OptField::StartInTray(b) => s.start_in_tray = b,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             OptField::HideTaskbar(b) => s.hide_from_taskbar = b,

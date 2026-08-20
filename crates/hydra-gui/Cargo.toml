@@ -15,6 +15,8 @@ path = "src/main.rs"
 [dependencies]
 hya-core = { workspace = true }
 hya-net = { workspace = true }
+# Startup update check + the Update-Now download/extract/finisher pipeline.
+hya-updater = { workspace = true }
 # WebSocket handshake for the browser-extension bridge (extbus): the accept
 # key is base64(SHA-1(key+GUID)) per RFC 6455.
 sha1 = { workspace = true }

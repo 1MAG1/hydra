@@ -40,6 +40,7 @@ mod prompt;
 mod queue;
 mod realnet;
 mod tui;
+mod update;
 mod url;
 mod xval;
 
@@ -412,6 +413,9 @@ async fn async_main() -> std::process::ExitCode {
         }) => {
             print_formats(*json, category.as_deref(), what.as_deref());
             return std::process::ExitCode::SUCCESS;
+        }
+        Some(cli::Command::Update { json }) => {
+            return update::run(*json).await;
         }
         Some(cli::Command::Completions { shell }) => {
             print!("{}", completions::render(*shell));
