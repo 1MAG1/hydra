@@ -241,6 +241,9 @@ pub struct Settings {
     /// opens the update dialog. Only the check is automatic — downloading
     /// and installing always wait for the user's "Update Now".
     pub check_updates_on_startup: bool,
+    /// Update checks also consider `-rc` pre-releases: a release candidate
+    /// ahead of the stable release is offered, otherwise stable is.
+    pub beta_channel: bool,
     /// Autostart launches come up in the tray without opening the window.
     pub start_in_tray: bool,
     /// Fewer wakeups everywhere: slower UI refresh, no glide animation,
@@ -324,6 +327,7 @@ impl Default for Settings {
         Settings {
             launch_on_startup: true,
             check_updates_on_startup: true,
+            beta_channel: false,
             start_in_tray: true,
             power_save: false,
             hide_from_taskbar: false,

@@ -194,7 +194,8 @@ fn boot() -> (App, Task<Message>) {
         // Startup update check (Options > General). A modal only ever opens
         // on a positive answer; failures are silent — offline is normal.
         let check = if app.cfg.settings.check_updates_on_startup {
-            Task::perform(update::check(), Message::UpdateChecked)
+            let beta = app.cfg.settings.beta_channel;
+            Task::perform(update::check(beta), Message::UpdateChecked)
         } else {
             Task::none()
         };

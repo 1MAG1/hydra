@@ -7,6 +7,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | bash
 #   ... | bash -s -- --cli            # CLI only (default installs the GUI bundle)
 #   ... | bash -s -- --version vx.x.x # pin a release instead of latest
+#   ... | bash -s -- --beta           # newest -rc pre-release when ahead of latest
 #   ... | bash -s -- --prefix ~/.local
 #
 # Default install is the GUI bundle: hydra, hydra-gui, hydra-host into
@@ -24,13 +25,16 @@ REPO="ja7ad/hydra"
 MODE="gui"
 VERSION=""
 PREFIX=""
+BETA=0
 
 usage() {
   cat >&2 <<EOF
-Usage: install.sh [--cli] [--version vX.Y.Z] [--prefix DIR]
+Usage: install.sh [--cli] [--version vX.Y.Z] [--beta] [--prefix DIR]
 
   --cli            install only the hydra CLI binary
   --version TAG    install a specific release tag (default: latest)
+  --beta           install the newest -rc pre-release when it is ahead of the
+                   latest stable release (otherwise the stable release)
   --prefix DIR     install root (default: /usr/local, falling back to ~/.local)
 EOF
   exit 2
@@ -41,6 +45,7 @@ while [ $# -gt 0 ]; do
     --cli) MODE="cli" ;;
     --gui) MODE="gui" ;;
     --version) VERSION="$2"; shift ;;
+    --beta) BETA=1 ;;
     --prefix) PREFIX="$2"; shift ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage ;;
@@ -70,12 +75,34 @@ fetch() { # fetch URL [OUTFILE] — curl with a wget fallback
   fi
 }
 
+ver_gt() { # ver_gt A B — true when A's numeric core is ahead of B's
+  awk -v a="${1#v}" -v b="${2#v}" 'BEGIN{
+    sub(/[-+].*/, "", a); sub(/[-+].*/, "", b)
+    n = split(a, x, "."); m = split(b, y, ".")
+    for (i = 1; i <= 3; i++) {
+      ai = (i <= n ? x[i] : 0) + 0; bi = (i <= m ? y[i] : 0) + 0
+      if (ai > bi) exit 0
+      if (ai < bi) exit 1
+    }
+    exit 1
+  }'
+}
+
 if [ -z "$VERSION" ]; then
   # Capture the JSON before parsing: grep -m1 on a live curl pipe closes it
   # early, which makes curl fail with exit 56 under pipefail.
   RELEASE_JSON=$(fetch "https://api.github.com/repos/${REPO}/releases/latest") || RELEASE_JSON=""
   VERSION=$(printf '%s\n' "$RELEASE_JSON" | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)
   [ -n "$VERSION" ] || { echo "error: could not resolve the latest release tag" >&2; exit 1; }
+  if [ "$BETA" = 1 ]; then
+    # The newest -rc pre-release wins only while its version is ahead of the
+    # stable release; once stable catches up, --beta installs stable.
+    LIST_JSON=$(fetch "https://api.github.com/repos/${REPO}/releases?per_page=30") || LIST_JSON=""
+    RC_TAG=$(printf '%s\n' "$LIST_JSON" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4 | grep -m1 -- '-rc' || true)
+    if [ -n "$RC_TAG" ] && ver_gt "$RC_TAG" "$VERSION"; then
+      VERSION="$RC_TAG"
+    fi
+  fi
 fi
 VER="${VERSION#v}"
 

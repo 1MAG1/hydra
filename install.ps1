@@ -6,6 +6,7 @@
 #   powershell -ExecutionPolicy Bypass -File install.ps1          # GUI bundle (default)
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Cli     # CLI only
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Version v0.2.0
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Beta    # newest -rc pre-release when ahead of latest
 #
 # Or straight from the repo:
 #   irm https://raw.githubusercontent.com/ja7ad/hydra/main/install.ps1 | iex
@@ -16,6 +17,7 @@
 
 param(
   [switch]$Cli,
+  [switch]$Beta,
   [string]$Version = "",
   [string]$InstallDir = ""
 )
@@ -32,10 +34,31 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
   default { throw "unsupported architecture: $env:PROCESSOR_ARCHITECTURE" }
 }
 
+function Get-CoreVersion([string]$Tag) {
+  # v0.3.0-rc1 -> [version]0.3.0 (the numeric core decides channel order)
+  [version](($Tag.TrimStart("v") -split "[-+]")[0])
+}
+
 if (-not $Version) {
-  $Version = (Invoke-RestMethod -UseBasicParsing `
-    -Uri "https://api.github.com/repos/$Repo/releases/latest").tag_name
-  if (-not $Version) { throw "could not resolve the latest release tag" }
+  if ($Beta) {
+    # The newest -rc pre-release wins only while its version is ahead of the
+    # stable release; once stable catches up, -Beta installs stable.
+    $Releases = Invoke-RestMethod -UseBasicParsing `
+      -Uri "https://api.github.com/repos/$Repo/releases?per_page=30"
+    $Stable = ($Releases | Where-Object { -not $_.prerelease } | Select-Object -First 1).tag_name
+    $Rc = ($Releases | Where-Object { $_.prerelease -or $_.tag_name -match "-rc" } |
+      Select-Object -First 1).tag_name
+    if (-not $Stable -and -not $Rc) { throw "could not resolve a release tag" }
+    if ($Rc -and (-not $Stable -or ((Get-CoreVersion $Rc) -gt (Get-CoreVersion $Stable)))) {
+      $Version = $Rc
+    } else {
+      $Version = $Stable
+    }
+  } else {
+    $Version = (Invoke-RestMethod -UseBasicParsing `
+      -Uri "https://api.github.com/repos/$Repo/releases/latest").tag_name
+    if (-not $Version) { throw "could not resolve the latest release tag" }
+  }
 }
 $Ver = $Version.TrimStart("v")
 

@@ -583,6 +583,7 @@ pub enum Message {
 pub enum OptField {
     LaunchStartup(bool),
     CheckUpdates(bool),
+    BetaChannel(bool),
     StartInTray(bool),
     /// Only where the Dock/taskbar checkbox exists (macOS/Windows).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -3478,7 +3479,10 @@ impl App {
                     return self.open_window(WinKind::Update);
                 }
                 self.updater.manual = true;
-                Task::perform(crate::update::check(), Message::UpdateChecked)
+                Task::perform(
+                    crate::update::check(self.cfg.settings.beta_channel),
+                    Message::UpdateChecked,
+                )
             }
             MenuAction::HideCategories => {
                 self.cfg.settings.show_categories = !self.cfg.settings.show_categories;
@@ -3623,6 +3627,7 @@ impl App {
         match f {
             OptField::LaunchStartup(b) => s.launch_on_startup = b,
             OptField::CheckUpdates(b) => s.check_updates_on_startup = b,
+            OptField::BetaChannel(b) => s.beta_channel = b,
             OptField::StartInTray(b) => s.start_in_tray = b,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             OptField::HideTaskbar(b) => s.hide_from_taskbar = b,

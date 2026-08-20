@@ -47,11 +47,13 @@ fn user_agent() -> String {
 }
 
 /// Ask the release API whether a newer GUI bundle exists for this machine.
+/// `beta` (Options > General > "Download Beta channel") also considers `-rc`
+/// pre-releases when one is ahead of the stable release.
 ///
 /// `Ok(None)` covers both "up to date" and "newer release exists but has no
 /// asset for this OS/arch" — the dialog can only offer what it can install.
-pub async fn check() -> Result<Option<UpdateInfo>, String> {
-    let rel = hya_updater::check_latest(&user_agent())
+pub async fn check(beta: bool) -> Result<Option<UpdateInfo>, String> {
+    let rel = hya_updater::check_channel(&user_agent(), beta)
         .await
         .map_err(|e| e.to_string())?;
     if !hya_updater::is_newer(rel.version(), env!("CARGO_PKG_VERSION")) {

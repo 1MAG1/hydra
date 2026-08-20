@@ -58,6 +58,9 @@ pub struct ReleaseAsset {
 pub struct Release {
     /// `v0.2.4` — the leading `v` is the tag convention, not the version.
     pub tag_name: String,
+    /// GitHub's pre-release flag; `-rc` tags are published with it set.
+    #[serde(default)]
+    pub prerelease: bool,
     /// Human release title (`hydra 0.2.4`).
     #[serde(default)]
     pub name: String,
@@ -85,9 +88,11 @@ impl Release {
 }
 
 /// `latest` is strictly newer than `current`, comparing dotted numeric parts
-/// (`v` prefixes and any `-pre`/`+build` suffix are ignored). Unparsable
-/// versions compare as not-newer — an updater must never "upgrade" onto a
-/// version it cannot read.
+/// (`v` prefixes and any `+build` suffix are ignored). On an equal core a
+/// stable release outranks any `-rc` build and rc builds order by their
+/// number: `0.3.0 > 0.3.0-rc2 > 0.3.0-rc1`. Unparsable versions compare as
+/// not-newer — an updater must never "upgrade" onto a version it cannot
+/// read.
 pub fn is_newer(latest: &str, current: &str) -> bool {
     match (parse_version(latest), parse_version(current)) {
         (Some(l), Some(c)) => l > c,
@@ -95,14 +100,28 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+/// `((maj, min, pat), pre_rank)` — `pre_rank` is `u64::MAX` for a stable
+/// version and the suffix's number for a pre-release (`-rc2` → 2, bare
+/// `-rc` → 0), so tuple order IS release order.
+fn parse_version(v: &str) -> Option<((u64, u64, u64), u64)> {
     let v = v.trim().trim_start_matches('v');
-    let core = v.split(['-', '+']).next().unwrap_or("");
+    let v = v.split('+').next().unwrap_or("");
+    let (core, pre) = match v.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (v, None),
+    };
     let mut it = core.split('.');
     let maj = it.next()?.parse().ok()?;
     let min = it.next().unwrap_or("0").parse().ok()?;
     let pat = it.next().unwrap_or("0").parse().ok()?;
-    Some((maj, min, pat))
+    let rank = match pre {
+        None => u64::MAX,
+        Some(p) => {
+            let digits: String = p.chars().filter(|c| c.is_ascii_digit()).collect();
+            digits.parse().unwrap_or(0)
+        }
+    };
+    Some(((maj, min, pat), rank))
 }
 
 // ----------------------------------------------------------------- platform
@@ -174,6 +193,61 @@ pub async fn check_latest_at(base: &str, repo: &str, user_agent: &str) -> io::Re
     let body = http::get_bytes(&url, user_agent, 4 * 1024 * 1024).await?;
     serde_json::from_slice(&body)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("release JSON: {e}")))
+}
+
+/// Fetch the release the given channel should offer.
+///
+/// Stable (`beta == false`) is exactly [`check_latest`]: `/releases/latest`,
+/// where GitHub never lists pre-releases. The beta channel additionally
+/// scans the release list for the newest `-rc` pre-release and offers it
+/// only while it is ahead of the stable release — once stable catches up
+/// (`0.3.0` after `0.3.0-rc2`), beta serves the stable release again.
+pub async fn check_channel(user_agent: &str, beta: bool) -> io::Result<Release> {
+    check_channel_at(&api_base(), REPO, user_agent, beta).await
+}
+
+/// [`check_channel`] against an explicit API base — the mock-test entry
+/// point.
+pub async fn check_channel_at(
+    base: &str,
+    repo: &str,
+    user_agent: &str,
+    beta: bool,
+) -> io::Result<Release> {
+    let latest = check_latest_at(base, repo, user_agent).await;
+    if !beta {
+        return latest;
+    }
+    let url = format!("{base}/repos/{repo}/releases?per_page=30");
+    // A failed or unparsable list degrades beta to stable behaviour rather
+    // than blocking updates: the pre-release is an extra offer, not a
+    // dependency.
+    let pre = match http::get_bytes(&url, user_agent, 8 * 1024 * 1024).await {
+        Ok(body) => serde_json::from_slice::<Vec<Release>>(&body)
+            .ok()
+            .and_then(newest_prerelease),
+        Err(_) => None,
+    };
+    match (latest, pre) {
+        (Ok(stable), Some(pre)) if is_newer(pre.version(), stable.version()) => Ok(pre),
+        (Ok(stable), _) => Ok(stable),
+        // A repo whose only releases are pre-releases has no `latest`
+        // (GitHub 404s); the rc is still a valid beta offer.
+        (Err(_), Some(pre)) => Ok(pre),
+        (Err(e), None) => Err(e),
+    }
+}
+
+/// The highest-versioned pre-release in a release list. The GitHub flag is
+/// authoritative; a `-rc` tag counts too, so a release someone forgot to
+/// mark pre-release still reaches the beta channel.
+fn newest_prerelease(list: Vec<Release>) -> Option<Release> {
+    list.into_iter()
+        .filter(|r| r.prerelease || r.version().contains("-rc"))
+        .fold(None::<Release>, |best, r| match best {
+            Some(b) if !is_newer(r.version(), b.version()) => Some(b),
+            _ => Some(r),
+        })
 }
 
 // ----------------------------------------------------------------- checksums
@@ -378,9 +452,44 @@ mod tests {
         assert!(!is_newer("0.2.3", "0.2.3"));
         assert!(!is_newer("v0.2.2", "0.2.3"));
         assert!(is_newer("0.3.0-rc1", "0.2.9"));
+        // On an equal core, stable outranks rc and rc numbers order.
+        assert!(is_newer("0.3.0", "0.3.0-rc2"));
+        assert!(!is_newer("0.3.0-rc1", "0.3.0"));
+        assert!(is_newer("0.3.0-rc2", "0.3.0-rc1"));
+        assert!(is_newer("v0.3.0-rc1", "0.3.0-rc"));
+        assert!(!is_newer("0.3.0-rc", "0.3.0-rc"));
         // Unparsable input must never look like an upgrade.
         assert!(!is_newer("nightly", "0.2.3"));
         assert!(!is_newer("0.3.0", "unknown"));
+    }
+
+    fn rel(tag: &str, prerelease: bool) -> Release {
+        Release {
+            tag_name: tag.into(),
+            prerelease,
+            name: String::new(),
+            body: String::new(),
+            html_url: String::new(),
+            published_at: String::new(),
+            assets: vec![],
+        }
+    }
+
+    #[test]
+    fn beta_channel_picks_the_newest_prerelease() {
+        // Flagged pre-releases and unflagged `-rc` tags both qualify; the
+        // highest version wins regardless of list order.
+        let list = vec![
+            rel("v0.2.4", false),
+            rel("v0.3.0-rc1", true),
+            rel("v0.3.0-rc2", false), // forgot the flag; the tag still counts
+            rel("v0.2.3", false),
+        ];
+        assert_eq!(
+            newest_prerelease(list).map(|r| r.tag_name),
+            Some("v0.3.0-rc2".into())
+        );
+        assert!(newest_prerelease(vec![rel("v0.2.4", false)]).is_none());
     }
 
     #[test]

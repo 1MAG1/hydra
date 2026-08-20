@@ -275,6 +275,96 @@ async fn cancelled_download_removes_the_partial_file() {
     let _ = std::fs::remove_dir_all(&stage);
 }
 
+/// Serve only the two check routes: `/releases/latest` with the stable
+/// release and `/releases` with the full list (rc first, like GitHub's
+/// newest-first order).
+async fn mock_channel_server(
+    stable: &str,
+    rc: Option<&str>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let release = |v: &str, pre: bool| format!("{{\"tag_name\":\"v{v}\",\"prerelease\":{pre}}}");
+    let latest_json = release(stable, false);
+    let list_json = match rc {
+        Some(rc) => format!("[{},{latest_json}]", release(rc, true)),
+        None => format!("[{latest_json}]"),
+    };
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let latest_json = latest_json.clone();
+            let list_json = list_json.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let mut req = Vec::new();
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&req);
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let (status, body) = if path == "/repos/ja7ad/hydra/releases/latest" {
+                    ("200 OK", latest_json)
+                } else if path.split('?').next() == Some("/repos/ja7ad/hydra/releases") {
+                    ("200 OK", list_json)
+                } else {
+                    ("404 Not Found", "not found".to_string())
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(body.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    (base, handle)
+}
+
+#[tokio::test]
+async fn beta_channel_offers_the_rc_only_while_it_is_ahead() {
+    let ua = "hydra-test/0.0";
+
+    // rc ahead of stable: stable channel stays put, beta gets the rc.
+    let (base, server) = mock_channel_server("0.2.4", Some("0.3.0-rc1")).await;
+    let stable = hya_updater::check_channel_at(&base, "ja7ad/hydra", ua, false)
+        .await
+        .unwrap();
+    assert_eq!(stable.version(), "0.2.4");
+    let beta = hya_updater::check_channel_at(&base, "ja7ad/hydra", ua, true)
+        .await
+        .unwrap();
+    assert_eq!(beta.version(), "0.3.0-rc1");
+    server.abort();
+
+    // Stable caught up with the rc's core version: beta falls back to it.
+    let (base, server) = mock_channel_server("0.3.0", Some("0.3.0-rc1")).await;
+    let beta = hya_updater::check_channel_at(&base, "ja7ad/hydra", ua, true)
+        .await
+        .unwrap();
+    assert_eq!(beta.version(), "0.3.0");
+    server.abort();
+
+    // No pre-release published: both channels serve the stable release.
+    let (base, server) = mock_channel_server("0.2.4", None).await;
+    let beta = hya_updater::check_channel_at(&base, "ja7ad/hydra", ua, true)
+        .await
+        .unwrap();
+    assert_eq!(beta.version(), "0.2.4");
+    server.abort();
+}
+
 #[tokio::test]
 async fn up_to_date_release_is_not_an_upgrade() {
     let archive = make_tar_gz("hydra-9.9.9-x-y", &[("hydra", b"x")]);
