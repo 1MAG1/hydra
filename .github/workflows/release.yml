@@ -235,6 +235,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -260,3 +263,24 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ needs.verify-version.outputs.prerelease == 'true' }}
           make_latest: ${{ needs.verify-version.outputs.prerelease != 'true' }}
+
+      - name: Update Homebrew Tap
+        if: needs.verify-version.outputs.prerelease != 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/ja7ad/homebrew-tap.git" tap
+            scripts/update-homebrew.sh "${{ needs.verify-version.outputs.version }}" dist tap
+            cd tap
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add Formula/hydra.rb Casks/hydra.rb
+            if ! git diff --staged --quiet; then
+              git commit -m "chore(hydra): bump to v${{ needs.verify-version.outputs.version }}"
+              git push origin main
+            fi
+          else
+            echo "note: HOMEBREW_TAP_TOKEN not set; skipping automated tap update"
+          fi

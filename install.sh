@@ -13,6 +13,10 @@
 # <prefix>/bin, browser extensions + native-host installer into
 # <prefix>/share/hydra. On Linux this uses the release tarball (no deb/rpm
 # needed). --cli installs only the hydra binary.
+#
+# Homebrew users on macOS/Linux can also run:
+#   brew install ja7ad/tap/hydra         # CLI
+#   brew install --cask ja7ad/tap/hydra  # macOS Desktop GUI bundle
 
 set -euo pipefail
 

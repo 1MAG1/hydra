@@ -56,6 +56,20 @@
 
 ## Installation
 
+### Homebrew (macOS / Linux)
+
+**CLI**:
+
+```bash
+brew install ja7ad/tap/hydra
+```
+
+**macOS Desktop App (GUI)**:
+
+```bash
+brew install --cask ja7ad/tap/hydra
+```
+
 ### Quick Install (prebuilt binaries)
 
 **macOS / Linux** — installs the GUI bundle (GUI + CLI + browser extensions) by default:
@@ -124,6 +138,16 @@ To also delete config and state:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/ja7ad/hydra/main/uninstall.ps1))) -Purge
+```
+
+**Homebrew**:
+
+```bash
+# Uninstall CLI
+brew uninstall hydra
+
+# Uninstall macOS Desktop App (and zap settings)
+brew uninstall --cask --zap hydra
 ```
 
 The scripts remove binaries, extensions, manifests, desktop shortcuts, and startup entries. On macOS, they also remove the bundled app and package receipts. Config and state are kept by default (`~/.config/hydra` on Linux/macOS, `%APPDATA%\hydra` on Windows); use `--purge` / `-Purge` to delete them.
