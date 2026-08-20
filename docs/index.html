@@ -549,11 +549,18 @@
       <div class="install-tabs">
         <div class="tab-row" role="tablist" aria-label="Install command by platform">
           <button class="tab active" role="tab" aria-selected="true" data-target="cmd-unix">macOS / Linux</button>
+          <button class="tab" role="tab" aria-selected="false" data-target="cmd-brew">Homebrew</button>
           <button class="tab" role="tab" aria-selected="false" data-target="cmd-win">Windows</button>
         </div>
         <div class="cmd active" id="cmd-unix">
           <code><b>curl</b> -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | <b>bash</b></code>
           <button class="copy" aria-label="Copy install command" data-copy="curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | bash">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
+          </button>
+        </div>
+        <div class="cmd" id="cmd-brew">
+          <code><b>brew</b> install ja7ad/tap/hydra</code>
+          <button class="copy" aria-label="Copy install command" data-copy="brew install ja7ad/tap/hydra">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
           </button>
         </div>

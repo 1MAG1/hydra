@@ -7,7 +7,7 @@
 ;
 ;   makensis -DARCH=x64   hydra-installer.nsi
 ;   makensis -DARCH=arm64 hydra-installer.nsi
-;   makensis -DVERSION=0.2.0 -DBUILD_DIR=..\..\target\custom\release hydra-installer.nsi
+;   makensis -DVERSION=0.3.0 -DBUILD_DIR=..\..\target\custom\release hydra-installer.nsi
 ;
 ; Expects hydra-gui.exe, hydra-host.exe, and hydra.exe already built in
 ; BUILD_DIR (default: target\<rust-triple>\release for the chosen ARCH).
@@ -47,7 +47,18 @@ SetCompressor /SOLID lzma
 !define FIREFOX_EXT_ID "hydra@ja7ad.github.io"
 
 !ifndef VERSION
-  !define VERSION "0.2.0"
+  ; Falls back to the workspace product version ([workspace.package] in
+  ; ../../Cargo.toml) so this never drifts out of sync when no -DVERSION is
+  ; passed on the command line. Same grep+cut extraction as
+  ; .github/workflows/release.yml; piped through a tempfile (rather than
+  ; !searchparse /file) because Cargo.toml's UTF-8 comments (em dashes) trip
+  ; NSIS's "Bad text encoding" check when read directly, and NSIS strips
+  ; backslashes from !system strings so a sed capture-group regex can't be
+  ; used inline.
+  !tempfile VERSIONFILE
+  !system `grep -m1 "^version = " "../../Cargo.toml" | cut -d'"' -f2 > "${VERSIONFILE}"`
+  !define /file VERSION "${VERSIONFILE}"
+  !delfile "${VERSIONFILE}"
 !endif
 ; VIProductVersion accepts only x.x.x.x numerics, so a pre-release VERSION
 ; (0.3.0-rc1) passes its numeric part separately; display strings keep the
