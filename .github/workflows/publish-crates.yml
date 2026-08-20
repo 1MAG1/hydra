@@ -94,12 +94,13 @@ jobs:
           publish_crate() {
             local name="$1" version
             version=$(crate_version "$name")
+            shift
             if is_indexed "$name" "$version"; then
               echo "${name} ${version} is already published, skipping"
               return
             fi
             echo "Publishing ${name} ${version}"
-            cargo publish -p "${name}" --locked
+            cargo publish -p "${name}" --locked "$@"
             echo "Waiting for ${name} ${version} to be indexed on crates.io..."
             for _ in $(seq 1 60); do
               if is_indexed "$name" "$version"; then
@@ -118,4 +119,13 @@ jobs:
           # 1. hya-core (pure algorithmic foundation, no intra-workspace deps)
           # 2. hya-net (depends on hya-core, so it needs hya-core indexed first)
           publish_crate hya-core
-          publish_crate hya-net
+
+          # hya-net depends on hya-core through a path-only workspace
+          # dependency (intentional for local builds, see
+          # pin_workspace_dependency_version's comment in
+          # scripts/crates-io-index.sh) which `cargo publish` rejects for
+          # lacking a version requirement. Stamp one into this checkout's
+          # Cargo.toml, which leaves it uncommitted — nothing is pushed back —
+          # so only hya-net's publish needs --allow-dirty.
+          pin_workspace_dependency_version hya-core
+          publish_crate hya-net --allow-dirty

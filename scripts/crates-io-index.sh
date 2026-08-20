@@ -64,6 +64,21 @@ version_gt() {
   [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]
 }
 
+# `cargo publish` rejects any dependency, including a workspace-internal path
+# dep, that carries no version requirement. [workspace.dependencies] in the
+# root Cargo.toml intentionally omits one (see commit d8b0285: local builds
+# would otherwise need the pin bumped in lockstep with every hya-core/hya-net
+# version change). The publish job stamps the pin in here instead, against its
+# own ephemeral checkout right before publishing the dependent crate — nothing
+# is committed back.
+pin_workspace_dependency_version() {
+  local name="$1" dir version
+  dir=$(crate_dir "$name")
+  version=$(crate_version "$name")
+  sed -i.bak -E "s#^${name}[[:space:]]*=[[:space:]]*\{[[:space:]]*path[[:space:]]*=[[:space:]]*\"crates/${dir}\"[[:space:]]*\}#${name} = { version = \"${version}\", path = \"crates/${dir}\" }#" Cargo.toml
+  rm -f Cargo.toml.bak
+}
+
 # --- status report ------------------------------------------------------------
 # Only when executed, not when sourced: report each library crate's manifest
 # version against the registry, and exit non-zero if one sits behind what is
