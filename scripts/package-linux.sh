@@ -47,6 +47,18 @@ HOST_NAME=com.hydra.host
 # The workspace product version ([workspace.package]), shared by the
 # hydra-gui, hydra-cli and hydra-host bin crates this package bundles.
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+# A pre-release version (0.3.0-rc1) has to be spelled differently per format:
+# dpkg treats `-` as the start of the Debian revision and would sort
+# 0.3.0-rc1 *after* the final 0.3.0, so the suffix becomes `~rc1`, which sorts
+# before it. rpm forbids `-` in Version entirely, so the suffix moves into
+# Release as 0.<suffix> (which sorts before the plain release's `1`).
+DEB_VERSION="${VERSION/-/~}"
+RPM_VERSION="${VERSION%%-*}"
+RPM_RELEASE=1
+if [ "$VERSION" != "$RPM_VERSION" ]; then
+  RPM_RELEASE="0.${VERSION#*-}"
+  RPM_RELEASE="${RPM_RELEASE//-/.}"
+fi
 SUMMARY="Multi-connection download manager (GUI, CLI, browser integration)"
 OUT="$REPO/target/dist"
 mkdir -p "$OUT"
@@ -210,7 +222,7 @@ build_deb() {
   (cd "$ROOT" && find etc -type f | sed 's|^|/|') > "$ROOT/DEBIAN/conffiles"
   cat > "$ROOT/DEBIAN/control" <<EOF
 Package: $NAME
-Version: $VERSION
+Version: $DEB_VERSION
 Section: net
 Priority: optional
 Architecture: $DEB_ARCH
@@ -241,7 +253,7 @@ EOF
     chmod 755 "$ROOT/DEBIAN/$s"
   done
 
-  local DEB="$OUT/${NAME}_${VERSION}_${DEB_ARCH}.deb"
+  local DEB="$OUT/${NAME}_${DEB_VERSION}_${DEB_ARCH}.deb"
   dpkg-deb --build --root-owner-group "$ROOT" "$DEB" >/dev/null
   echo "built: $DEB"
 }
@@ -258,8 +270,8 @@ build_rpm() {
 
   cat > "$TOP/$NAME.spec" <<EOF
 Name: $NAME
-Version: $VERSION
-Release: 1
+Version: $RPM_VERSION
+Release: $RPM_RELEASE
 Summary: $SUMMARY
 License: GPL-3.0-or-later
 URL: https://github.com/ja7ad/hydra
