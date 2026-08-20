@@ -8,6 +8,14 @@
 #   make linux      both deb and rpm
 #   make package    the right artifact(s) for the OS make runs on
 #
+#   make ffi        the embeddable C library (static + shared) -> target/<profile>
+#   make header     regenerate include/hydra.h from the Rust definitions
+#   make header-check  fail if include/hydra.h is out of date
+#   make ffi-test   the FFI test suite plus the C ABI conformance program
+#   make ffi-dist   a release archive of libhydra for the host target
+#   make ffi-android  libhydra for the four Android ABIs (needs the NDK)
+#   make ffi-apple  Hydra.xcframework: iOS device, simulator and macOS
+#
 # PROFILE=dist make build   selects the smaller panic=abort profile (Cargo.toml).
 
 UNAME   := $(shell uname -s)
@@ -19,7 +27,8 @@ PROFILE ?= release
 CARGO   ?= cargo
 
 .PHONY: all build cli gui host app dmg deb rpm linux windows package clean \
-        require-macos require-linux
+        require-macos require-linux ffi header header-check ffi-test \
+        ffi-dist ffi-android ffi-apple
 
 all: build
 
@@ -34,6 +43,57 @@ gui:
 
 host:
 	$(CARGO) build --profile $(PROFILE) -p hya-host
+
+# The embeddable library. Builds every crate-type the manifest declares, so one
+# invocation produces libhydra.a AND the shared library; the same include/hydra.h
+# works against either.
+#
+# NOT built by `make build`: the CLI, GUI and IPC host are one product that ships
+# together, and libhydra is a separate deliverable for third parties. Rolling it
+# into the default target would slow every developer build for something most of
+# them are not changing.
+ffi:
+	$(CARGO) build --profile $(PROFILE) -p hya-ffi
+	@echo
+	@echo "libhydra artifacts in target/$(PROFILE):"
+	@ls -1 target/$(PROFILE)/libhydra.a target/$(PROFILE)/libhydra.so \
+	      target/$(PROFILE)/libhydra.dylib target/$(PROFILE)/hydra.dll \
+	      target/$(PROFILE)/hydra.lib 2>/dev/null || true
+	@echo "header: include/hydra.h"
+
+# include/hydra.h is generated and committed. Generated so it cannot drift from
+# the implementation; committed so consuming libhydra needs no Rust toolchain.
+header:
+	scripts/gen-ffi-header.sh
+
+header-check:
+	scripts/gen-ffi-header.sh --check
+
+# The Rust ABI suite, then the C conformance program. The second half is the one
+# that catches a header that does not compile or a symbol that is not in the
+# archive -- things no Rust test can see.
+ffi-test:
+	$(CARGO) test -p hya-ffi --all-targets
+	scripts/ffi-c-example.sh
+
+# Release archives. These call the SAME scripts the release workflow runs --
+# an official artifact produced by steps that live only in a YAML file is one
+# nobody outside CI can reproduce, and the point of libhydra is that somebody
+# else compiles it into their own application.
+#
+#   make ffi-dist TARGET=aarch64-unknown-linux-musl   cross-compile
+ffi-dist:
+ifdef TARGET
+	scripts/build-ffi.sh --target $(TARGET)
+else
+	scripts/build-ffi.sh
+endif
+
+ffi-android:
+	scripts/package-ffi-android.sh
+
+ffi-apple: require-macos
+	scripts/package-ffi-apple.sh
 
 # Ad-hoc-signed bundle with the GUI, CLI and hydra-host inside Contents/MacOS.
 # Add ARGS=--install to also replace /Applications/Hydra Download Manager.app.
