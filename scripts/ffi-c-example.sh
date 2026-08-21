@@ -86,13 +86,13 @@ if [ -z "$native_libs" ]; then
 fi
 
 if [ "$toolchain" = "msvc" ]; then
-    lib="$root/target/$profile/hydra.lib"
+    archive="$root/target/$profile/hydra.lib"
 else
-    lib="$root/target/$profile/libhydra.a"
+    archive="$root/target/$profile/libhydra.a"
 fi
-[ -f "$lib" ] || { echo "error: $lib was not produced" >&2; exit 1; }
+[ -f "$archive" ] || { echo "error: $archive was not produced" >&2; exit 1; }
 
-echo "    $lib"
+echo "    $archive"
 echo "    system libraries: $native_libs"
 
 if [ "$toolchain" = "msvc" ]; then
@@ -112,6 +112,83 @@ if [ "$toolchain" = "msvc" ]; then
         exit 1
     }
 
+    # cl needs INCLUDE to compile and link.exe needs LIB to link, and it is LIB
+    # that goes missing under msys bash: Windows compares environment names
+    # case-insensitively while bash does not, so a pre-existing `Lib` survives
+    # next to the `LIB` a developer shell exported and the child process can end
+    # up reading the wrong one. Collapse the spellings to a single LIB.
+    normalise_lib_env() {
+        local name
+        # Every case variant Windows would treat as LIB. The script's own
+        # variables are named so that none of these collides with one.
+        for name in Lib lib LIb LiB lIb lIB liB; do
+            if [ -z "${LIB:-}" ] && [ -n "${!name:-}" ]; then
+                export LIB="${!name}"
+            fi
+            unset "$name" || true
+        done
+    }
+
+    # The static CRT is the one library that must be there: rustc built the
+    # archive with +crt-static, so the link needs libcmt.lib. Looking for it is
+    # also the cheapest way to tell a usable LIB from a missing one.
+    crt_in_lib() {
+        local dir posix
+        local IFS=';'
+        # shellcheck disable=SC2086
+        for dir in ${LIB:-}; do
+            [ -n "$dir" ] || continue
+            posix="$(cygpath -u "$dir" 2>/dev/null || printf '%s' "$dir")"
+            [ -f "$posix/libcmt.lib" ] && return 0
+        done
+        return 1
+    }
+
+    # No usable LIB: ask the Visual Studio installation itself rather than
+    # giving up. This is what a developer shell does, and it is why this script
+    # runs from a plain terminal too.
+    import_msvc_env() {
+        local vswhere vsdir vcvars arch line
+        vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+        [ -x "$vswhere" ] || return 1
+        vsdir="$("$vswhere" -latest -products '*' -property installationPath | tr -d '\r')"
+        [ -n "$vsdir" ] || return 1
+        vcvars="$(cygpath -u "$vsdir" 2>/dev/null || printf '%s' "$vsdir")"
+        vcvars="$vcvars/VC/Auxiliary/Build/vcvarsall.bat"
+        [ -f "$vcvars" ] || return 1
+        case "$host" in
+            aarch64-*) arch="arm64" ;;
+            *)         arch="x64" ;;
+        esac
+        while IFS= read -r line; do
+            line="${line%$'\r'}"
+            case "$line" in
+                LIB=*|INCLUDE=*|LIBPATH=*) export "${line%%=*}=${line#*=}" ;;
+            esac
+        done < <(cmd /c "\"$(winpath "$vcvars")\" $arch >NUL && set" 2>/dev/null)
+    }
+
+    normalise_lib_env
+    if ! crt_in_lib; then
+        echo "==> LIB carries no static CRT; asking Visual Studio for one"
+        import_msvc_env || true
+        normalise_lib_env
+    fi
+    if ! crt_in_lib; then
+        # A warning rather than an error: this is a diagnosis of a link that
+        # has not been attempted yet, and being wrong about it must not stop a
+        # build that would have worked. If the link does fail, LNK1104 on its
+        # own says nothing, and what follows is the missing half of it.
+        echo "    warning: no libcmt.lib in LIB; the link is likely to fail" >&2
+        echo "    cl:  $(command -v "$CC")" >&2
+        if [ -n "${LIB:-}" ]; then
+            echo "    LIB:" >&2
+            printf '%s\n' "$LIB" | tr ';' '\n' | sed 's/^/      /' >&2
+        else
+            echo "    LIB: not set at all" >&2
+        fi
+    fi
+
     # -MT, not the default -MD: .cargo/config.toml builds the Windows targets
     # with +crt-static, so rustc asks for libcmt and a C object compiled against
     # the DLL runtime would drag in a second, conflicting CRT.
@@ -126,7 +203,7 @@ if [ "$toolchain" = "msvc" ]; then
         "$CC" "${cflags[@]}" -std:c11 "-Fe:$(winpath "$out/$prog.exe")" \
             "-Fo:$(winpath "$out/$prog.obj")" \
             "$(winpath "$root/examples/ffi-c/$prog.c")" \
-            -link "$(winpath "$lib")" $native_libs
+            -link "$(winpath "$archive")" $native_libs
     done
 
     # The header is a published artifact, so it has to survive every dialect a
@@ -205,7 +282,7 @@ else
         echo "==> compiling $prog.c"
         # shellcheck disable=SC2086
         "$CC" "${cflags[@]}" -o "$out/$prog" "$root/examples/ffi-c/$prog.c" \
-            "$lib" $link_libs
+            "$archive" $link_libs
     done
 
     # The header is a published artifact, so it has to survive every dialect a
