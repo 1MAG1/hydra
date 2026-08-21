@@ -234,15 +234,24 @@ if [ "$toolchain" = "msvc" ]; then
     fi
 
     # rustc built the archive with +crt-static, so these four are what the link
-    # needs from the CRT. Naming them outright rather than letting the linker
-    # search for them: bash can see the files, and every Windows failure so far
-    # has been the linker not finding what bash could - through the environment
-    # and then through -LIBPATH alike. A file named in full cannot be searched
-    # for wrongly. -LIBPATH still goes along for everything else.
+    # needs from the CRT. Each is named by its full path, and each is then
+    # struck off the default-library list.
+    #
+    # That second half is the fix for this platform, and /VERBOSE:LIB is what
+    # showed why. The linker opens these libraries happily when they are named
+    # in full - it says so - and then fails on a *by-name* request for
+    # `libcmt.lib` coming from the /DEFAULTLIB:LIBCMT directive that every
+    # /MT object carries. The library it cannot find is one it already has
+    # open. /NODEFAULTLIB drops the request: the symbols come from the copy on
+    # the command line, which is the same file.
     crt_libs=()
+    crt_nodefault=()
     for name in libcmt libvcruntime libucrt oldnames; do
         if found="$(find_in_lib "$name.lib")"; then
             crt_libs+=("$found")
+            # Both spellings: the directive in the object says LIBCMT and the
+            # file is libcmt.lib, and an unmatched /NODEFAULTLIB costs nothing.
+            crt_nodefault+=("/NODEFAULTLIB:$name.lib" "/NODEFAULTLIB:$name")
         fi
     done
     if [ ${#crt_libs[@]} -eq 0 ]; then
@@ -302,6 +311,7 @@ if [ "$toolchain" = "msvc" ]; then
             for name in ${crt_libs[@]+"${crt_libs[@]}"}; do
                 printf '"%s"\n' "$name"
             done
+            printf '%s\n' ${crt_nodefault[@]+"${crt_nodefault[@]}"}
             # shellcheck disable=SC2086
             printf '%s\n' $native_libs
         } > "$rsp"
