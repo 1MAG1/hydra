@@ -100,6 +100,8 @@ if [ "$toolchain" = "msvc" ]; then
     # `/defaultlib:libcmt` into a directory list and every MSVC flag into
     # nonsense. Switch the rewriting off and convert the paths this script owns
     # by hand; MSVC flags are spelled with `-` so they are never candidates.
+    # What this does NOT fix is a space inside an argument - see the response
+    # files further down, which is where that is dealt with.
     export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
     winpath() {
         if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
@@ -216,11 +218,6 @@ if [ "$toolchain" = "msvc" ]; then
         report_link_failure
     fi
 
-    libpaths=()
-    for dir in ${lib_dirs_win[@]+"${lib_dirs_win[@]}"}; do
-        libpaths+=("-LIBPATH:$dir")
-    done
-
     # And invoke the linker ourselves rather than through cl, so that the
     # argument list this script builds is the argument list link.exe sees.
     # link.exe sits next to cl.exe; `command -v link` would find GNU coreutils'
@@ -231,28 +228,54 @@ if [ "$toolchain" = "msvc" ]; then
     # -MT, not the default -MD: .cargo/config.toml builds the Windows targets
     # with +crt-static, so rustc asks for libcmt and a C object compiled against
     # the DLL runtime would drag in a second, conflicting CRT.
-    cflags=(-nologo -W3 -WX -MT -D_CRT_SECURE_NO_WARNINGS
-            "-I$(winpath "$root/include")")
+    cflags=(-nologo -W3 -WX -MT -D_CRT_SECURE_NO_WARNINGS)
+    include_dir="$(winpath "$root/include")"
+
+    # Every MSVC tool is driven through a response file, and that is the whole
+    # Windows story of this script. An argument containing a space does not
+    # survive the msys-to-Windows boundary: `C:\Program Files\...\libcmt.lib`
+    # arrives at the linker in pieces, which is why it reported a file bash
+    # could see perfectly well as impossible to open. A response file reduces
+    # the command line to one token with no space in it, and the quoting inside
+    # the file is the tool's own to parse.
+    cl_rsp_head() {
+        printf -- '%s\n' "${cflags[@]}"
+        printf -- '-I"%s"\n' "$include_dir"
+    }
 
     for prog in abi_smoke download; do
         echo "==> compiling $prog.c"
-        # -std:c11 explicitly: cl's default dialect for .c has no
-        # _Static_assert, and the header asserts its whole layout with it.
-        "$CC" "${cflags[@]}" -std:c11 -c \
-            "-Fo:$(winpath "$out/$prog.obj")" \
-            "$(winpath "$root/examples/ffi-c/$prog.c")"
+        rsp="$out/$prog.cl.rsp"
+        {
+            cl_rsp_head
+            # -std:c11 explicitly: cl's default dialect for .c has no
+            # _Static_assert, and the header asserts its whole layout with it.
+            printf -- '-std:c11\n-c\n'
+            printf -- '-Fo:"%s"\n' "$(winpath "$out/$prog.obj")"
+            printf '"%s"\n' "$(winpath "$root/examples/ffi-c/$prog.c")"
+        } > "$rsp"
+        "$CC" "@$(winpath "$rsp")"
+
         echo "==> linking $prog.exe"
-        # $native_libs is a list of library names and must word-split.
-        # shellcheck disable=SC2206
-        link_args=(-nologo "-out:$(winpath "$out/$prog.exe")"
-                   "$(winpath "$out/$prog.obj")" "$(winpath "$archive")"
-                   ${libpaths[@]+"${libpaths[@]}"}
-                   ${crt_libs[@]+"${crt_libs[@]}"} $native_libs)
-        # Printed in full because every Windows link failure so far has come
-        # down to what the linker was actually handed, which no error message
-        # from it ever says.
-        printf '    %s' "$LINK_EXE"; printf ' %s' "${link_args[@]}"; printf '\n'
-        "$LINK_EXE" "${link_args[@]}" || { report_link_failure; exit 1; }
+        rsp="$out/$prog.link.rsp"
+        {
+            printf -- '-nologo\n'
+            printf -- '-out:"%s"\n' "$(winpath "$out/$prog.exe")"
+            printf '"%s"\n' "$(winpath "$out/$prog.obj")"
+            printf '"%s"\n' "$(winpath "$archive")"
+            for dir in ${lib_dirs_win[@]+"${lib_dirs_win[@]}"}; do
+                printf -- '-LIBPATH:"%s"\n' "$dir"
+            done
+            for name in ${crt_libs[@]+"${crt_libs[@]}"}; do
+                printf '"%s"\n' "$name"
+            done
+            # shellcheck disable=SC2086
+            printf '%s\n' $native_libs
+        } > "$rsp"
+        # Printed because every Windows failure here has come down to what the
+        # linker was handed, which no error message from it ever says.
+        sed 's/^/      /' "$rsp"
+        "$LINK_EXE" "@$(winpath "$rsp")" || { report_link_failure; exit 1; }
     done
 
     # The header is a published artifact, so it has to survive every dialect a
@@ -264,24 +287,29 @@ if [ "$toolchain" = "msvc" ]; then
     # HYDRA_STATIC_ASSERT fallback exists for. Checking only c11 and c17 would
     # never compile that branch.
     for std in default c11 c17; do
-        if [ "$std" = default ]; then
-            "$CC" "${cflags[@]}" -c \
-                "$(winpath "$root/examples/ffi-c/header_c.c")" \
-                "-Fo:$(winpath "$out/header_default.obj")"
-        else
-            "$CC" "${cflags[@]}" "-std:$std" -c \
-                "$(winpath "$root/examples/ffi-c/header_c.c")" \
-                "-Fo:$(winpath "$out/header_$std.obj")"
-        fi
+        rsp="$out/header_$std.rsp"
+        {
+            cl_rsp_head
+            [ "$std" = default ] || printf -- '-std:%s\n' "$std"
+            printf -- '-c\n'
+            printf -- '-Fo:"%s"\n' "$(winpath "$out/header_$std.obj")"
+            printf '"%s"\n' "$(winpath "$root/examples/ffi-c/header_c.c")"
+        } > "$rsp"
+        "$CC" "@$(winpath "$rsp")"
         echo "    $std ok"
     done
 
     # MSVC has no -std:c++11; C++14 is its floor.
     echo "==> checking the header across C++ dialects"
     for std in c++14 c++17; do
-        "${CXX:-$CC}" "${cflags[@]}" "-std:$std" -EHsc -c \
-            "$(winpath "$root/examples/ffi-c/header_cxx.cpp")" \
-            "-Fo:$(winpath "$out/header_$std.obj")"
+        rsp="$out/header_$std.rsp"
+        {
+            cl_rsp_head
+            printf -- '-std:%s\n-EHsc\n-c\n' "$std"
+            printf -- '-Fo:"%s"\n' "$(winpath "$out/header_$std.obj")"
+            printf '"%s"\n' "$(winpath "$root/examples/ffi-c/header_cxx.cpp")"
+        } > "$rsp"
+        "${CXX:-$CC}" "@$(winpath "$rsp")"
         echo "    $std ok"
     done
 
