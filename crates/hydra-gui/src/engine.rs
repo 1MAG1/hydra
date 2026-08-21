@@ -177,11 +177,11 @@ fn spawn_engine() -> UnboundedSender<Cmd> {
                     match cmd {
                         Cmd::Start(spec) => {
                             let cancel = Arc::new(AtomicBool::new(false));
-                            // Constructed limited (rate 1) so `Pace::shared`
-                            // keeps the limiter and `set_rate` works live in
-                            // both directions; 0 = unlimited.
-                            let limiter = Arc::new(RateLimiter::new(1));
-                            limiter.set_rate(spec.limit.unwrap_or(0));
+                            // 0 = unlimited. The limiter is handed to the
+                            // transfer either way: `Pace` reads its rate live,
+                            // so Speed Limiter switched on mid-download binds
+                            // this transfer without restarting it.
+                            let limiter = Arc::new(RateLimiter::new(spec.limit.unwrap_or(0)));
                             let final_path = Arc::new(Mutex::new(spec.final_path.clone()));
                             live.insert(
                                 spec.id,
@@ -534,7 +534,7 @@ async fn run_download(
     // object streams sequentially from one source.
     if let Ok(u) = parse_url(&spec.url) {
         if u.ftp {
-            run_ftp_download(&spec, &u, &cancel, &tx).await;
+            run_ftp_download(&spec, &u, &cancel, &limiter, &tx).await;
             return;
         }
     }
@@ -891,6 +891,7 @@ async fn run_ftp_download(
     spec: &StartSpec,
     u: &ParsedUrl,
     cancel: &Arc<AtomicBool>,
+    limiter: &Arc<RateLimiter>,
     tx: &UnboundedSender<Event>,
 ) {
     use hya_net::scheme::Fetcher;
@@ -907,7 +908,10 @@ async fn run_ftp_download(
         spec.auth.as_ref().map(|(l, _)| l.as_str()),
         spec.auth.as_ref().map(|(_, p)| p.as_str()),
     );
-    let fetcher = hya_net::ftp::FtpFetcher::new(Arc::new(hya_net::TcpConnector));
+    // The same limiter the HTTP path answers to, so Speed Limiter means the
+    // same thing on an ftp:// download — including switched on mid-transfer.
+    let fetcher = hya_net::ftp::FtpFetcher::new(Arc::new(hya_net::TcpConnector))
+        .with_pace(hya_net::polite::Pace::shared(limiter.clone()));
 
     let probe = match fetcher.probe(&ep).await {
         Ok(p) => p,

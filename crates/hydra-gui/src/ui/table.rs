@@ -166,7 +166,7 @@ fn data_row<'a>(app: &App, d: &'a DownloadItem) -> El<'a> {
         _ => String::new(),
     };
     let rate_txt = if d.state.is_active() && d.rate > 0.0 {
-        fmt::rate(d.rate)
+        fmt::rate_steady(d.rate, app.effective_limit(d))
     } else {
         String::new()
     };

@@ -152,16 +152,20 @@
  *       job_max    = hydra_job_config_t.max_bytes_per_second     (0 = none)
  *
  *       job_max == 0 and engine_max == 0  ->  unlimited
- *       job_max == 0 and engine_max  > 0  ->  every such job shares ONE
- *                                             limiter at engine_max, so the
- *                                             cap is a true aggregate
- *       job_max  > 0                      ->  that job gets its OWN limiter at
- *                                             min(job_max, engine_max), and
- *                                             engine_max acts as a per-job
- *                                             ceiling rather than an aggregate
+ *       job_max  > 0                      ->  that job alone is capped at
+ *                                             job_max
+ *       engine_max  > 0                   ->  every job shares ONE limiter at
+ *                                             engine_max, so the cap is a true
+ *                                             aggregate across all of them
  *
- *   In other words, mixing per-job caps with an engine-wide cap gives up the
- *   aggregate guarantee for the jobs that set one. Stated rather than hidden.
+ *   Both apply at once when both are set: a job under an engine-wide cap AND
+ *   one of its own moves at whichever is lower at that moment, and the
+ *   aggregate guarantee is not given up by the jobs that set their own.
+ *
+ *   Every cap is read live, on every read. hydra_engine_set_max_bytes_per_second
+ *   and hydra_job_set_max_bytes_per_second therefore bind a transfer that is
+ *   ALREADY RUNNING, in both directions, including a job that started with no
+ *   cap at all.
  *
  * DESTINATIONS
  *   In this ABI version a destination is a filesystem path, and that is all.
@@ -1645,9 +1649,10 @@ hydra_error_code_t hydra_engine_get_policy(hydra_engine_t *engine,
 /**
  * Change the engine-wide rate ceiling, in bytes per second. 0 = unlimited.
  *
- * Applies immediately, including to transfers already running, but only to
- * jobs that did not set a ceiling of their own — see the note on
- * `max_bytes_per_second` in the header.
+ * Applies immediately, including to transfers already running — to every job,
+ * whether or not it has a ceiling of its own, since the engine-wide limiter is
+ * an aggregate over all of them. See the note on `max_bytes_per_second` in the
+ * header.
  *
  * Thread-safe. Non-blocking. Does not allocate.
  *
@@ -1964,7 +1969,9 @@ hydra_error_code_t hydra_job_set_output_path(hydra_engine_t *engine,
 /**
  * Change a job's rate ceiling, in bytes per second. 0 = unlimited.
  *
- * Applies immediately, including to a transfer already running.
+ * Applies immediately, including to a transfer already running that started
+ * with no ceiling of its own. The engine-wide cap still applies on top: the
+ * job moves at the lower of the two.
  *
  * Thread-safe. Non-blocking. Does not allocate.
  *

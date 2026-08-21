@@ -252,8 +252,23 @@ impl RateLimiter {
         self.rate.load(Ordering::Relaxed) > 0
     }
 
+    /// Change the cap. 0 = unlimited. Takes effect on the next reservation.
     pub fn set_rate(&self, bytes_per_sec: u64) {
-        self.rate.store(bytes_per_sec, Ordering::Relaxed);
+        let prev = self.rate.swap(bytes_per_sec, Ordering::Relaxed);
+        if prev == bytes_per_sec {
+            return;
+        }
+        // Forget the debt the OLD rate accrued. The cursor is a time computed
+        // from a rate that no longer applies: a minute of queue built up at
+        // 1 KB/s is not a minute of queue at 10 MB/s, and carrying it over
+        // would make a transfer sit idle for the remainder of a schedule
+        // nobody is asking for any more — switching the Speed Limiter OFF
+        // would visibly stall the download it was meant to release.
+        //
+        // Lowering the cap forgives whatever was already reserved, which is at
+        // most one read per connection. That is the right side to err on: the
+        // cap binds from here, and a cap is not owed the bytes it did not stop.
+        *self.cursor.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     /// Reserve `n` bytes and return how long the caller must wait first.
@@ -274,36 +289,88 @@ impl RateLimiter {
     }
 }
 
-/// A shared rate cap as the byte loops see it: cheap to clone, absent by default.
+/// A rate cap as the byte loops see it: cheap to clone, absent by default.
 ///
 /// The transfer path is generic over many call sites — the multi-connection
 /// scheduler loop, the single-range retry helper, the chunked decoder — and most
-/// of them have no cap. Wrapping the `Option` in a type keeps every one of those
-/// signatures honest about that while giving the two places that DO shape bytes
-/// one thing to call.
+/// of them have no cap. Wrapping the limiters in a type keeps every one of those
+/// signatures honest about that while giving the places that DO shape bytes one
+/// thing to call.
+///
+/// Two caps can apply at once: an aggregate one shared by everything the process
+/// is fetching, and this transfer's own. Both are charged and both are waited
+/// on, so the effective ceiling is whichever is lower at that instant — no rate
+/// is ever computed once and frozen.
 #[derive(Clone, Default)]
-pub struct Pace(Option<Arc<RateLimiter>>);
+pub struct Pace {
+    /// The cap shared with other transfers (a true aggregate), if any.
+    shared: Option<Arc<RateLimiter>>,
+    /// This transfer's own cap, if any.
+    own: Option<Arc<RateLimiter>>,
+}
 
 impl Pace {
-    /// No cap: `wait` returns immediately and reads stay at full size.
+    /// No cap, and none can appear later: `wait` returns immediately and reads
+    /// stay at full size.
     pub fn unlimited() -> Self {
-        Self(None)
+        Self::default()
     }
 
-    /// Shape against `limiter`, unless it is itself unlimited.
+    /// Shape against `limiter`, live.
     ///
-    /// Collapsing an unlimited limiter to `None` here means the hot path pays a
-    /// null check rather than an atomic load and a mutex acquisition per read.
+    /// The limiter is held even when its rate is currently 0 (unlimited): the
+    /// rate is read on every single read, so a cap switched ON mid-transfer —
+    /// the GUI's "Use Speed Limiter" checkbox, `hydra_engine_set_max_bytes_per_second`
+    /// — binds the transfer that is already running.
+    ///
+    /// It used to collapse an unlimited limiter to "no cap" here to save an
+    /// atomic load per read. That froze the decision at the instant the transfer
+    /// started: every download begun without a cap ignored the limiter for the
+    /// rest of its life, and the checkbox did nothing but change a number on
+    /// screen. The load costs a few nanoseconds against a read that just came
+    /// off a socket; the collapse cost the feature.
     pub fn shared(limiter: Arc<RateLimiter>) -> Self {
-        if limiter.is_limited() {
-            Self(Some(limiter))
-        } else {
-            Self(None)
+        Self {
+            shared: Some(limiter),
+            own: None,
         }
     }
 
+    /// Shape against an aggregate cap AND this transfer's own, both live.
+    ///
+    /// Neither subsumes the other: `shared` stays a true aggregate over every
+    /// transfer holding it, while `own` binds this one alone. A transfer under
+    /// both moves at the lower of the two without either having to be recomputed
+    /// when the other changes.
+    pub fn pair(shared: Arc<RateLimiter>, own: Arc<RateLimiter>) -> Self {
+        Self {
+            shared: Some(shared),
+            own: Some(own),
+        }
+    }
+
+    /// Every limiter this pace answers to, in charge order.
+    fn limiters(&self) -> impl Iterator<Item = &Arc<RateLimiter>> {
+        [&self.shared, &self.own].into_iter().flatten()
+    }
+
+    /// The binding rate right now, in bytes/sec; 0 when nothing binds.
+    fn rate(&self) -> u64 {
+        let mut cap = 0u64;
+        for l in self.limiters() {
+            let r = l.rate.load(Ordering::Relaxed);
+            if r > 0 && (cap == 0 || r < cap) {
+                cap = r;
+            }
+        }
+        cap
+    }
+
+    /// Whether a cap binds AT THIS MOMENT. Not a property of the transfer: a
+    /// pace that answers to a limiter can go from false to true and back while
+    /// the transfer runs.
     pub fn is_limited(&self) -> bool {
-        self.0.is_some()
+        self.rate() > 0
     }
 
     /// Largest read that keeps one pause short.
@@ -315,36 +382,36 @@ impl Pace {
     /// inside that deadline, at the cost of more syscalls on a path that is by
     /// definition not throughput-bound.
     pub fn read_size(&self, want: usize) -> usize {
-        match &self.0 {
-            None => want,
-            Some(l) => {
-                let r = l.rate.load(Ordering::Relaxed);
-                if r == 0 || want == 0 {
-                    return want;
-                }
-                // An eighth of a second's worth, with a 1 KiB floor so a very low
-                // cap does not degenerate into one syscall per byte.
-                //
-                // The floor is applied BEFORE clamping against `want`, never as a
-                // `clamp(1024, want)`: on the last read of a range `want` is
-                // whatever is left, which is routinely under 1 KiB, and
-                // `clamp(1024, 969)` panics on min > max. That panic killed the
-                // connection mid-transfer — the caller saw a stall, retried, and
-                // the measured throughput came out FIVE times below the cap that
-                // was supposed to be the ceiling.
-                let slice = (r / 8).max(1024) as usize;
-                want.min(slice).max(1)
-            }
+        let r = self.rate();
+        if r == 0 || want == 0 {
+            return want;
         }
+        // An eighth of a second's worth, with a 1 KiB floor so a very low
+        // cap does not degenerate into one syscall per byte.
+        //
+        // The floor is applied BEFORE clamping against `want`, never as a
+        // `clamp(1024, want)`: on the last read of a range `want` is
+        // whatever is left, which is routinely under 1 KiB, and
+        // `clamp(1024, 969)` panics on min > max. That panic killed the
+        // connection mid-transfer — the caller saw a stall, retried, and
+        // the measured throughput came out FIVE times below the cap that
+        // was supposed to be the ceiling.
+        let slice = (r / 8).max(1024) as usize;
+        want.min(slice).max(1)
     }
 
-    /// Reserve `n` bytes against the cap and sleep for whatever it owes.
+    /// Reserve `n` bytes against every cap and sleep for the longest debt.
+    ///
+    /// Both buckets are charged even when only one of them makes the caller
+    /// wait: skipping the cheaper one would let the aggregate drift once the
+    /// tighter cap was lifted.
     pub async fn wait(&self, n: u64) {
-        if let Some(l) = &self.0 {
-            let d = l.reserve(n);
-            if !d.is_zero() {
-                tokio::time::sleep(d).await;
-            }
+        let mut owed = Duration::ZERO;
+        for l in self.limiters() {
+            owed = owed.max(l.reserve(n));
+        }
+        if !owed.is_zero() {
+            tokio::time::sleep(owed).await;
         }
     }
 }
@@ -478,6 +545,49 @@ mod tests {
         }
     }
 
+    /// Changing the cap must not carry the old cap's queue over.
+    ///
+    /// Regression test: the cursor is an absolute time, computed from whatever
+    /// rate was in force when the reservation was made. A transfer held at
+    /// 1 KB/s builds a cursor tens of seconds ahead; switching the limiter OFF
+    /// left that cursor in place, and the very next reservation — now nominally
+    /// unlimited — still waited it out. Turning a limit off is supposed to
+    /// release the transfer, not park it.
+    #[test]
+    fn changing_the_rate_forgets_the_old_rate_queue() {
+        let rl = RateLimiter::new(1024);
+        // Queue up a long debt at the low rate: 64 KiB at 1 KiB/s is a minute.
+        assert_eq!(rl.reserve(64 * 1024), Duration::ZERO);
+        let queued = rl.reserve(64 * 1024);
+        assert!(queued >= Duration::from_secs(60), "queued {queued:?}");
+
+        rl.set_rate(0);
+        assert_eq!(
+            rl.reserve(64 * 1024),
+            Duration::ZERO,
+            "an unlimited limiter must not serve out the old cap's schedule"
+        );
+
+        // Same in the other direction: raising the cap re-prices the queue.
+        let rl = RateLimiter::new(1024);
+        assert_eq!(rl.reserve(64 * 1024), Duration::ZERO);
+        assert!(rl.reserve(64 * 1024) >= Duration::from_secs(60));
+        rl.set_rate(1024 * 1024);
+        assert_eq!(rl.reserve(1024), Duration::ZERO);
+
+        // A no-op change keeps the queue: this is not a way to burst past a cap
+        // by writing the same number over and over.
+        let rl = RateLimiter::new(1024);
+        assert_eq!(rl.reserve(4096), Duration::ZERO);
+        let owed = rl.reserve(4096);
+        rl.set_rate(1024);
+        let still = rl.reserve(4096);
+        assert!(
+            still > owed,
+            "re-setting the same rate must not clear the queue ({still:?} vs {owed:?})"
+        );
+    }
+
     #[test]
     fn rate_parsing_matches_standard_forms() {
         assert_eq!(parse_rate("1024"), Some(1024));
@@ -577,6 +687,65 @@ mod tests {
         let from_unlimited = Pace::shared(Arc::new(RateLimiter::unlimited()));
         assert!(!from_unlimited.is_limited());
         assert_eq!(from_unlimited.read_size(64 * 1024), 64 * 1024);
+    }
+
+    /// A cap switched on AFTER the pace was built must bind.
+    ///
+    /// Regression test: `Pace::shared` collapsed a limiter whose rate was 0 to
+    /// "no cap at all", so the decision was frozen when the transfer started.
+    /// Every download begun without a limit ignored the limiter for the rest of
+    /// its life — the GUI's "Use Speed Limiter" checkbox and
+    /// `hydra_engine_set_max_bytes_per_second` both wrote a rate that nothing
+    /// downstream would ever read again, and an 8 MB/s transfer stayed at
+    /// 8 MB/s under a 100 KB/s cap.
+    #[test]
+    fn a_cap_set_after_the_pace_was_built_binds() {
+        let limiter = Arc::new(RateLimiter::unlimited());
+        let pace = Pace::shared(limiter.clone());
+        assert!(!pace.is_limited(), "no cap yet");
+        assert_eq!(pace.read_size(64 * 1024), 64 * 1024);
+
+        limiter.set_rate(100 * 1024);
+        assert!(
+            pace.is_limited(),
+            "the limiter was switched on mid-transfer"
+        );
+        assert!(
+            pace.read_size(64 * 1024) <= 100 * 1024 / 8,
+            "reads must shorten to the new cap's slice"
+        );
+        // And the bucket must actually owe time now.
+        assert_eq!(limiter.reserve(100 * 1024), Duration::ZERO);
+        assert!(limiter.reserve(100 * 1024) >= Duration::from_millis(800));
+
+        // Switching it off again returns full-size reads.
+        limiter.set_rate(0);
+        assert!(!pace.is_limited());
+        assert_eq!(pace.read_size(64 * 1024), 64 * 1024);
+    }
+
+    /// Under two caps the lower one binds, whichever it happens to be.
+    #[test]
+    fn a_paired_pace_obeys_the_lower_of_the_two() {
+        let aggregate = Arc::new(RateLimiter::new(1024 * 1024));
+        let own = Arc::new(RateLimiter::new(8 * 1024));
+        let pace = Pace::pair(aggregate.clone(), own.clone());
+        assert_eq!(
+            pace.rate(),
+            8 * 1024,
+            "the job's own cap is the tighter one"
+        );
+        own.set_rate(4 * 1024 * 1024);
+        assert_eq!(
+            pace.rate(),
+            1024 * 1024,
+            "raising the job's cap leaves the aggregate binding"
+        );
+        // 0 on one side means "no cap from me", not "no cap at all".
+        aggregate.set_rate(0);
+        assert_eq!(pace.rate(), 4 * 1024 * 1024);
+        own.set_rate(0);
+        assert!(!pace.is_limited());
     }
 
     /// A capped pace reads in slices short enough that one pause stays brief.

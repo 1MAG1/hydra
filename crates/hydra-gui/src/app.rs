@@ -1080,7 +1080,11 @@ impl App {
             .clamp(1, 32)
     }
 
-    fn effective_limit(&self, d: &DownloadItem) -> Option<u64> {
+    /// The cap this download is actually running under: its own if it set one,
+    /// otherwise the global Speed Limiter's while that is switched on. This is
+    /// the figure the engine was handed, so it is also the one the views may
+    /// present as the transfer's ceiling.
+    pub(crate) fn effective_limit(&self, d: &DownloadItem) -> Option<u64> {
         d.speed_limit.or(if self.cfg.settings.speed_limiter_on {
             self.cfg.settings.global_speed_limit
         } else {

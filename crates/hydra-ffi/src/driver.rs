@@ -686,28 +686,23 @@ fn split_connections(total: usize, sources: usize) -> Vec<usize> {
         .collect()
 }
 
-/// The rate limiter this job's transfer should answer to.
+/// The rate limiters this job's transfer answers to.
 ///
-/// When only the engine-wide cap is set, every job shares one limiter and the
-/// cap is a true aggregate. When a job sets its own, it gets its own limiter at
-/// the smaller of the two, and the engine-wide figure then acts as a per-job
-/// ceiling rather than an aggregate — a limitation, and a documented one, in
-/// preference to silently applying neither.
+/// Both are attached, and both are read live on every read:
+///
+/// * the engine's limiter is shared by every job, so an engine-wide cap is a
+///   true aggregate however many jobs are running;
+/// * the job's own limiter binds this job alone.
+///
+/// Whichever is lower at that instant is what the transfer moves at. Neither is
+/// resolved once at start: `hydra_engine_set_max_bytes_per_second` and
+/// `hydra_job_set_max_bytes_per_second` both take effect on a transfer that is
+/// already running, in either direction, including on a job that began with no
+/// cap at all. Picking one limiter here — as this used to, returning
+/// `Pace::unlimited()` whenever neither cap was set at start — froze that
+/// decision for the life of the transfer and made both setters inert.
 fn pace_for(engine: &Arc<Engine>, job: &Arc<Job>) -> Pace {
-    let global = engine.cfg.max_bytes_per_second;
-    if job.cfg.max_bytes_per_second == 0 {
-        if global == 0 {
-            return Pace::unlimited();
-        }
-        return Pace::shared(engine.limiter.clone());
-    }
-    let effective = if global == 0 {
-        job.cfg.max_bytes_per_second
-    } else {
-        job.cfg.max_bytes_per_second.min(global)
-    };
-    job.limiter.set_rate(effective);
-    Pace::shared(job.limiter.clone())
+    Pace::pair(engine.limiter.clone(), job.limiter.clone())
 }
 
 // ------------------------------------------------------------- the observer

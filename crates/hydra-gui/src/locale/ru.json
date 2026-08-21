@@ -1,6 +1,7 @@
 {
   "\"Launch Hydra on startup\" registers a login item; macOS lists it under General > Login Items where you can verify or disable it.": "\"Запускать Hydra при старте системы\" добавляет объект автозагрузки; в macOS это отображается в меню Основные > Объекты входа, где его можно проверить или отключить.",
   "(HH:MM)": "(ЧЧ:ММ)",
+  "(Limited)": "(Limited)",
   "(default chime)": "(звук по умолчанию)",
   "(separate names by spaces)": "(разделяйте имена пробелами)",
   "(separate with commas or spaces)": "(разделяйте запятыми или пробелами)",
