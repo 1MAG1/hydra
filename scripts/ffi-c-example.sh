@@ -303,10 +303,16 @@ if [ "$toolchain" = "msvc" ]; then
             for dir in ${lib_dirs_win[@]+"${lib_dirs_win[@]}"}; do
                 printf -- '/LIBPATH:"%s"\n' "$dir"
             done
-            # Explicitly name static CRT libraries so /LIBPATH resolves them
+            # Ignore default library search in LIB environment, resolving CRT
+            # and SDK libraries explicitly through /LIBPATH instead.
+            printf -- '/NODEFAULTLIB\n'
             printf 'libcmt.lib\nlibvcruntime.lib\nlibucrt.lib\noldnames.lib\n'
-            # shellcheck disable=SC2086
-            printf '%s\n' $native_libs
+            for arg in $native_libs; do
+                case "$arg" in
+                    /*|-*) ;; # Skip linker flags like /defaultlib:libcmt
+                    *) printf '%s\n' "$arg" ;;
+                esac
+            done
         } > "$rsp"
         # Printed because every Windows failure here has come down to what the
         # linker was handed, which no error message from it ever says.
