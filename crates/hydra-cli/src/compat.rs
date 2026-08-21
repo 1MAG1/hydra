@@ -51,7 +51,6 @@
 //! (`--no-dns-cache`, `--tcp-nodelay`) are accepted and dropped, and they are
 //! listed explicitly rather than matched by a catch-all.
 
-#[cfg(test)]
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -135,6 +134,9 @@ pub fn canonicalize(p: Personality, args: &[String]) -> Result<(Vec<String>, Vec
     let mut notes: Vec<String> = Vec::new();
     let mut it = args.iter().peekable();
     let mut seen_dashdash = false;
+    // Canonical boolean flags already emitted, so a repeat can be dropped. See
+    // [`push_canonical`].
+    let mut emitted_bools: HashSet<String> = HashSet::new();
 
     while let Some(raw) = it.next() {
         if seen_dashdash {
@@ -181,7 +183,7 @@ pub fn canonicalize(p: Personality, args: &[String]) -> Result<(Vec<String>, Vec
                 }
             };
             match map_long(p, name, &mut take_value) {
-                Map::Emit(v) => out.extend(v),
+                Map::Emit(v) => push_canonical(&mut out, &mut emitted_bools, v),
                 Map::Inert(why) => notes.push(format!("--{name}: accepted, no effect ({why})")),
                 Map::Reject(msg) => return Err(msg),
             }
@@ -244,7 +246,7 @@ pub fn canonicalize(p: Personality, args: &[String]) -> Result<(Vec<String>, Vec
                     }
                 };
                 match map_short(p, ch, &mut take_value) {
-                    Map::Emit(v) => out.extend(v),
+                    Map::Emit(v) => push_canonical(&mut out, &mut emitted_bools, v),
                     Map::Inert(why) => notes.push(format!("-{ch}: accepted, no effect ({why})")),
                     Map::Reject(msg) => return Err(msg),
                 }
@@ -259,6 +261,30 @@ pub fn canonicalize(p: Personality, args: &[String]) -> Result<(Vec<String>, Vec
         out.push(raw.clone());
     }
     Ok((out, notes))
+}
+
+/// Append canonical tokens, dropping a boolean flag already emitted.
+///
+/// wget and curl both accept a repeated flag — `curl -s -s`, `wget -q -q` — and
+/// so does anything that wraps them by prepending its own flags to a command the
+/// user already wrote. clap rejects a repeated `SetTrue` argument outright
+/// ("the argument '--quiet' cannot be used multiple times", exit 2), so without
+/// this a faithful dialect would fail on input the real tool runs. Under a
+/// dialect the source tool's behaviour wins, which here means the second `-s` is
+/// redundant rather than an error.
+///
+/// Only a lone `--flag` is deduplicated. A flag with a value is left alone
+/// because repeating it is meaningful (`--header` accumulates) or because the
+/// parser's own last-wins rule should decide, and `--verbose` is exempt because
+/// it counts occurrences: `-vv` is a level, not a repeat.
+fn push_canonical(out: &mut Vec<String>, seen: &mut HashSet<String>, tokens: Vec<String>) {
+    if tokens.len() == 1 {
+        let tok = &tokens[0];
+        if tok.starts_with("--") && tok != "--verbose" && !seen.insert(tok.clone()) {
+            return;
+        }
+    }
+    out.extend(tokens);
 }
 
 /// `--canonical <value>`: emit the canonical long flag and the value taken
@@ -585,6 +611,42 @@ mod tests {
         assert_eq!(detect("hydra-wget", &[]), Personality::Wget);
         assert_eq!(detect("/opt/bin/curl", &[]), Personality::Curl);
         assert_eq!(detect("hydra-curl.exe", &[]), Personality::Curl);
+    }
+
+    /// A repeated boolean flag is what the real tools do, so it cannot be an
+    /// error here. This came from a wrapper that prepends `-s` to a command the
+    /// user already wrote `-sS` in: clap rejected the second `--quiet` and the
+    /// download never started, which reads as "the curl dialect is broken".
+    #[test]
+    fn a_repeated_boolean_flag_is_accepted_not_rejected() {
+        let (out, _) = canonicalize(Personality::Curl, &s(&["-s", "-sS", "http://x/f"])).unwrap();
+        assert_eq!(
+            out.iter().filter(|t| *t == "--quiet").count(),
+            1,
+            "three -s occurrences must collapse to one --quiet: {out:?}"
+        );
+        assert!(out.contains(&"--show-error".to_string()));
+        assert!(out.contains(&"http://x/f".to_string()));
+
+        let (w, _) = canonicalize(Personality::Wget, &s(&["-q", "-q", "-c", "-c"])).unwrap();
+        assert_eq!(w.iter().filter(|t| *t == "--quiet").count(), 1);
+        assert_eq!(w.iter().filter(|t| *t == "--continue").count(), 1);
+    }
+
+    /// `--verbose` counts occurrences, so collapsing it would silently downgrade
+    /// `-vv` to `-v`. Flags that carry a value accumulate and must not collapse
+    /// either.
+    #[test]
+    fn counted_and_valued_flags_are_not_collapsed() {
+        let (out, _) = canonicalize(Personality::Curl, &s(&["-v", "-v", "http://x/f"])).unwrap();
+        assert_eq!(out.iter().filter(|t| *t == "--verbose").count(), 2);
+
+        let (h, _) = canonicalize(
+            Personality::Curl,
+            &s(&["-H", "A: 1", "-H", "B: 2", "http://x/f"]),
+        )
+        .unwrap();
+        assert_eq!(h.iter().filter(|t| *t == "--header").count(), 2);
     }
 
     #[test]

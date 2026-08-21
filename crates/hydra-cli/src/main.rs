@@ -33,6 +33,7 @@
 
 mod cli;
 mod compat;
+mod compat_link;
 mod completions;
 mod download;
 mod progress;
@@ -420,6 +421,76 @@ async fn async_main() -> std::process::ExitCode {
         Some(cli::Command::Completions { shell }) => {
             print!("{}", completions::render(*shell));
             return std::process::ExitCode::SUCCESS;
+        }
+        Some(cli::Command::CompatLink {
+            dir,
+            names,
+            force,
+            dry_run,
+        }) => {
+            let names: Vec<String> = if names.is_empty() {
+                compat_link::DEFAULT_NAMES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            } else {
+                names.clone()
+            };
+            let (exe, plans) = match compat_link::plan(dir.as_deref(), &names) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("hydra: {e}");
+                    return std::process::ExitCode::from(2);
+                }
+            };
+            let mut failed = false;
+            for p in &plans {
+                let verb = match &p.action {
+                    compat_link::Action::AlreadyLinked => {
+                        println!("{} -> {} (already linked)", p.path.display(), exe.display());
+                        None
+                    }
+                    compat_link::Action::Occupied(what) if !*force => {
+                        eprintln!(
+                            "hydra: {} already exists ({what}); --force replaces it, \
+                             --dir puts the links elsewhere, or use --name hydra-{} \
+                             to keep the real tool's name free",
+                            p.path.display(),
+                            p.name
+                        );
+                        failed = true;
+                        None
+                    }
+                    compat_link::Action::Occupied(_) => Some("replaced"),
+                    compat_link::Action::Create => Some("linked"),
+                };
+                let Some(verb) = verb else { continue };
+                if *dry_run {
+                    println!(
+                        "would have {verb} {} -> {}",
+                        p.path.display(),
+                        exe.display()
+                    );
+                } else if let Err(e) = compat_link::apply(p, &exe, *force) {
+                    eprintln!("hydra: {e}");
+                    failed = true;
+                    continue;
+                } else {
+                    println!("{verb} {} -> {}", p.path.display(), exe.display());
+                }
+            }
+            // Placing the link is the easy half; being the name the shell
+            // actually resolves is the half that silently fails.
+            for p in &plans {
+                if let Some(note) = compat_link::shadow_note(p) {
+                    eprintln!("hydra: {note}");
+                }
+            }
+            return if failed {
+                std::process::ExitCode::FAILURE
+            } else {
+                std::process::ExitCode::SUCCESS
+            };
         }
         Some(cli::Command::InstallCompletions {
             shell,
