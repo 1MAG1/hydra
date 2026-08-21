@@ -672,9 +672,10 @@ pub unsafe extern "C" fn hydra_engine_get_policy(
 
 /// Change the engine-wide rate ceiling, in bytes per second. 0 = unlimited.
 ///
-/// Applies immediately, including to transfers already running, but only to
-/// jobs that did not set a ceiling of their own — see the note on
-/// `max_bytes_per_second` in the header.
+/// Applies immediately, including to transfers already running — to every job,
+/// whether or not it has a ceiling of its own, since the engine-wide limiter is
+/// an aggregate over all of them. See the note on `max_bytes_per_second` in the
+/// header.
 ///
 /// Thread-safe. Non-blocking. Does not allocate.
 ///
@@ -1345,7 +1346,9 @@ pub unsafe extern "C" fn hydra_job_set_output_path(
 
 /// Change a job's rate ceiling, in bytes per second. 0 = unlimited.
 ///
-/// Applies immediately, including to a transfer already running.
+/// Applies immediately, including to a transfer already running that started
+/// with no ceiling of its own. The engine-wide cap still applies on top: the
+/// job moves at the lower of the two.
 ///
 /// Thread-safe. Non-blocking. Does not allocate.
 ///
@@ -1368,13 +1371,11 @@ pub unsafe extern "C" fn hydra_job_set_max_bytes_per_second(
             Ok(j) => j,
             Err(e) => return e,
         };
-        let global = eng.cfg.max_bytes_per_second;
-        let effective = match (bytes_per_second, global) {
-            (0, _) => 0,
-            (j, 0) => j,
-            (j, g) => j.min(g),
-        };
-        job.limiter.set_rate(effective);
+        // Stored raw, NOT as `min(job, engine)`: the engine's limiter is
+        // attached to the transfer alongside this one, so the smaller of the
+        // two already binds. Folding the engine figure in here would freeze it
+        // — a later engine-wide change could then never lift this job's cap.
+        job.limiter.set_rate(bytes_per_second);
         E::HYDRA_OK
     })
 }

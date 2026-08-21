@@ -365,11 +365,10 @@ pub(crate) struct Engine {
 
 impl Engine {
     pub(crate) fn new(cfg: EngineCfg, rt: tokio::runtime::Handle) -> Arc<Self> {
-        // Constructed limited (rate 1) rather than unlimited so that
-        // `Pace::shared` keeps the limiter and a later `set_rate` works in both
-        // directions; 0 means unlimited to the limiter itself.
-        let limiter = Arc::new(RateLimiter::new(1));
-        limiter.set_rate(cfg.max_bytes_per_second);
+        // 0 means unlimited. Every job's transfer holds this limiter whatever
+        // its rate, and reads that rate live, so the engine-wide cap can be
+        // raised, lowered or switched on while transfers are running.
+        let limiter = Arc::new(RateLimiter::new(cfg.max_bytes_per_second));
         Arc::new(Self {
             events: Arc::new(EventQueue::new(cfg.event_queue_capacity)),
             gate: Arc::new(Gate::new(cfg.max_jobs)),
@@ -420,8 +419,7 @@ impl Engine {
         // Keep the allocator ahead of any restored id, so a job created after a
         // restore cannot collide with one that came out of the state file.
         self.next_id.fetch_max(id + 1, Ordering::Relaxed);
-        let limiter = Arc::new(RateLimiter::new(1));
-        limiter.set_rate(cfg.max_bytes_per_second);
+        let limiter = Arc::new(RateLimiter::new(cfg.max_bytes_per_second));
         let job = Arc::new(Job {
             id,
             seq: self.next_seq.fetch_add(1, Ordering::Relaxed),
