@@ -1,6 +1,7 @@
 {
   "\"Launch Hydra on startup\" registers a login item; macOS lists it under General > Login Items where you can verify or disable it.": "« Lancer Hydra au démarrage » enregistre un élément d'ouverture ; macOS le répertorie sous Général > Ouverture où vous pouvez le vérifier ou le désactiver.",
   "(HH:MM)": "(HH:MM)",
+  "(Limited)": "(Limited)",
   "(default chime)": "(carillon par défaut)",
   "(separate names by spaces)": "(séparer les noms par des espaces)",
   "(separate with commas or spaces)": "(séparer par des virgules ou des espaces)",

@@ -1,6 +1,7 @@
 {
   "\"Launch Hydra on startup\" registers a login item; macOS lists it under General > Login Items where you can verify or disable it.": "“开机时启动 Hydra”会注册一个登录项；macOS 会在“通用 > 登录项”中列出它，你可以在那里查看或停用。",
   "(HH:MM)": "（时:分）",
+  "(Limited)": "(Limited)",
   "(default chime)": "（默认提示音）",
   "(separate names by spaces)": "（名称之间用空格分隔）",
   "(separate with commas or spaces)": "（用逗号或空格分隔）",
