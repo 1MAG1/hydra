@@ -136,6 +136,7 @@ The scripts detect your OS and architecture (amd64/arm64), fetch the matching ar
 
 A GUI install is a real desktop app, not a loose binary:
 
+- **Windows** — a start-menu shortcut (`-Desktop` adds a desktop one) and an **Apps & features** entry, so Hydra is listed and uninstallable from Settings like any other app.
 - **macOS** — `Hydra Download Manager.app` is installed into `/Applications` (override with `--app-dir DIR`, e.g. `~/Applications`), with its icon and name in Launchpad, Spotlight, the Dock and the app switcher. `hydra`, `hydra-gui` and `hydra-host` in `<prefix>/bin` are symlinks into the app, so the CLI stays on `PATH` and one update refreshes both.
 - **Linux** — the logo lands in the hicolor icon theme and a `hydra.desktop` entry in your applications directory (plus the prefix's, for a system-wide install), so the app shows up in the launcher, the dock and the switcher with its own icon.
 

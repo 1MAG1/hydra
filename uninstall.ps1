@@ -10,10 +10,13 @@
 #   irm https://raw.githubusercontent.com/ja7ad/hydra/main/uninstall.ps1 | iex
 #
 # Removes everything install.ps1 created: %LOCALAPPDATA%\Programs\Hydra
-# (binaries, extensions, scripts), the start-menu shortcut, the user-PATH
-# entry, the native-messaging registry keys and manifests, and the
-# login-item Run entry. Config and state in %APPDATA%\hydra are kept
-# unless -Purge is given.
+# (binaries, extensions, scripts), the start-menu and desktop shortcuts, the
+# "Apps & features" entry, the user-PATH entry, the native-messaging registry
+# keys and manifests, and the login-item Run entry. Config and state in
+# %APPDATA%\hydra are kept unless -Purge is given.
+#
+# A copy installed by the .exe installer is NOT touched: that one owns its own
+# uninstaller, and this script says so rather than half-removing it.
 
 param(
   [switch]$Purge,
@@ -34,8 +37,18 @@ function Remove-Path([string]$Path) {
   }
 }
 
-# Stop running instances so files are not locked.
-Stop-Process -Name hydra, hydra-gui, hydra-host -Force -ErrorAction SilentlyContinue
+# Stop running instances so files are not locked. hydra-updater is the
+# self-update finisher: it can be mid-swap in the very directory being removed.
+$Running = @(Get-Process -Name hydra, hydra-gui, hydra-host, hydra-updater -ErrorAction SilentlyContinue)
+foreach ($p in $Running) { $null = $p.CloseMainWindow() }
+if ($Running.Count -gt 0) { Start-Sleep -Milliseconds 1200 }
+$Running | Where-Object { -not $_.HasExited } | Stop-Process -Force -ErrorAction SilentlyContinue
+
+# The .exe installer's own registration. Leaving it alone is deliberate — it
+# has an uninstall.exe that knows what it wrote.
+if (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Hydra") {
+  Write-Host "note: a copy installed by the Hydra setup installer is also registered; remove it from Settings > Apps." -ForegroundColor Yellow
+}
 
 # Login item + legacy Startup-folder entry (written by the in-app toggle).
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
@@ -64,9 +77,24 @@ foreach ($k in $NmhKeys) {
 }
 Remove-Path (Join-Path $env:LOCALAPPDATA "Hydra")   # manifest files
 
-# Start-menu shortcut and the install directory itself.
+# Shortcuts, the Apps & features entry, and the install directory itself.
 Remove-Path (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Hydra Download Manager.lnk")
-Remove-Path $InstallDir
+Remove-Path (Join-Path ([Environment]::GetFolderPath("Desktop")) "Hydra Download Manager.lnk")
+$UninstKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HydraDownloadManager"
+if (Test-Path $UninstKey) {
+  Remove-Item $UninstKey -Recurse -Force
+  Write-Host "removed $UninstKey"
+  $Removed = $true
+}
+# Apps & features launches this script from inside $InstallDir. A PowerShell
+# script is read into memory rather than held open, so removing it along with
+# the rest works — but if something else in there is still locked, name the
+# directory instead of dying on a raw exception.
+try {
+  Remove-Path $InstallDir
+} catch {
+  Write-Warning "could not fully remove $InstallDir ($($_.Exception.Message)); close any running Hydra and delete it by hand."
+}
 
 # Drop the install dir from the user PATH.
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")

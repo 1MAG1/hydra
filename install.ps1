@@ -11,13 +11,18 @@
 # Or straight from the repo:
 #   irm https://raw.githubusercontent.com/ja7ad/hydra/main/install.ps1 | iex
 #
-# Default install is the GUI bundle: hydra.exe, hydra-gui.exe, hydra-host.exe
-# plus the browser extensions and native-host installer, into
+# Default install is the GUI bundle: hydra.exe, hydra-gui.exe, hydra-host.exe,
+# hydra-updater.exe plus the browser extensions and native-host installer, into
 # %LOCALAPPDATA%\Programs\Hydra. -Cli installs only hydra.exe.
+#
+# A GUI install also gets a start-menu shortcut (-Desktop adds one on the
+# desktop) and an "Apps & features" entry, so Hydra is listed and uninstallable
+# the way Windows expects — the same things the .exe installer registers.
 
 param(
   [switch]$Cli,
   [switch]$Beta,
+  [switch]$Desktop,
   [string]$Version = "",
   [string]$InstallDir = ""
 )
@@ -97,6 +102,19 @@ try {
   $Src = Join-Path $Tmp $Name
 
   New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+
+  # A running Hydra keeps its .exe files locked and Copy-Item would fail
+  # halfway through — this script is the upgrade path as much as the first
+  # install. Ask the GUI to close before forcing anything, so it gets to
+  # persist its state.
+  $Running = @(Get-Process -Name hydra-gui, hydra-host, hydra-updater -ErrorAction SilentlyContinue)
+  if ($Running.Count -gt 0) {
+    Write-Host "stopping the running Hydra..."
+    foreach ($p in $Running) { $null = $p.CloseMainWindow() }
+    Start-Sleep -Milliseconds 1200
+    $Running | Where-Object { -not $_.HasExited } | Stop-Process -Force -ErrorAction SilentlyContinue
+  }
+
   Copy-Item (Join-Path $Src "hydra.exe") $InstallDir -Force
   Write-Host "installed $InstallDir\hydra.exe"
 
@@ -105,6 +123,14 @@ try {
     Copy-Item (Join-Path $Src "hydra-host.exe") $InstallDir -Force
     Write-Host "installed $InstallDir\hydra-gui.exe"
     Write-Host "installed $InstallDir\hydra-host.exe"
+    # The self-update finisher. The GUI runs it from a temp copy, but keeping
+    # one here means the in-app update refreshes it like any other file:
+    # hya_updater::apply only replaces names that already exist.
+    $UpdaterExe = Join-Path $Src "hydra-updater.exe"
+    if (Test-Path $UpdaterExe) {
+      Copy-Item $UpdaterExe $InstallDir -Force
+      Write-Host "installed $InstallDir\hydra-updater.exe"
+    }
 
     # Extensions + native-host installer keep the bundle layout (the script
     # resolves the bundle root as the parent of its own directory).
@@ -119,20 +145,89 @@ try {
     & (Join-Path $InstallDir "scripts\install-native-host.ps1") `
         -NoBuild -HostBin (Join-Path $InstallDir "hydra-host.exe")
 
-    # Start-menu shortcut for the GUI.
-    $StartMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+    # Shortcuts. The GUI exe embeds hydra.ico and a VERSIONINFO block
+    # (crates/hydra-gui/build.rs), so the icon and the product name come along
+    # for free — IconLocation just makes the source explicit.
+    $GuiExe = Join-Path $InstallDir "hydra-gui.exe"
     $Shell = New-Object -ComObject WScript.Shell
-    $Lnk = $Shell.CreateShortcut((Join-Path $StartMenu "Hydra Download Manager.lnk"))
-    $Lnk.TargetPath = Join-Path $InstallDir "hydra-gui.exe"
-    $Lnk.WorkingDirectory = $InstallDir
-    $Lnk.Save()
+    function New-HydraShortcut([string]$LnkPath) {
+      $Lnk = $Shell.CreateShortcut($LnkPath)
+      $Lnk.TargetPath = $GuiExe
+      $Lnk.WorkingDirectory = $InstallDir
+      $Lnk.Description = "Multi-connection download accelerator"
+      $Lnk.IconLocation = "$GuiExe,0"
+      $Lnk.Save()
+    }
+    $StartMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+    New-HydraShortcut (Join-Path $StartMenu "Hydra Download Manager.lnk")
     Write-Host "installed start-menu shortcut"
+    if ($Desktop) {
+      New-HydraShortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "Hydra Download Manager.lnk")
+      Write-Host "installed desktop shortcut"
+    }
+
+    # "Apps & features" entry, so Hydra is listed and uninstallable from
+    # Settings like any other app. Its own key, NOT the .exe installer's
+    # (...\Uninstall\Hydra): that is a different install in a different
+    # directory with its own uninstaller, and overwriting its UninstallString
+    # would orphan it.
+    $UninstallScript = Join-Path $InstallDir "scripts\uninstall.ps1"
+    if (-not (Test-Path $UninstallScript)) {
+      # Archives before this change do not carry it; fetch the copy that
+      # matches this release rather than whatever main happens to hold.
+      try {
+        Invoke-WebRequest -UseBasicParsing `
+          -Uri "https://raw.githubusercontent.com/$Repo/$Version/uninstall.ps1" `
+          -OutFile $UninstallScript
+      } catch {
+        $UninstallScript = $null
+      }
+    }
+    $UninstallCmd = if ($UninstallScript) {
+      "powershell -NoProfile -ExecutionPolicy Bypass -File `"$UninstallScript`" -InstallDir `"$InstallDir`""
+    } else {
+      # No local copy: fetch at removal time. `irm | iex` cannot take
+      # parameters, so this uses the scriptblock form — otherwise a custom
+      # -InstallDir would be uninstalled from the default location instead.
+      "powershell -NoProfile -ExecutionPolicy Bypass -Command `"& ([scriptblock]::Create((irm https://raw.githubusercontent.com/$Repo/main/uninstall.ps1))) -InstallDir '$InstallDir'`""
+    }
+    $UninstKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HydraDownloadManager"
+    New-Item -Path $UninstKey -Force | Out-Null
+    $SizeKb = [int](((Get-ChildItem $InstallDir -Recurse -File -ErrorAction SilentlyContinue |
+      Measure-Object -Property Length -Sum).Sum) / 1KB)
+    $Props = [ordered]@{
+      DisplayName     = "Hydra Download Manager"
+      DisplayVersion  = $Ver
+      Publisher       = "Javad Rajabzadeh"
+      URLInfoAbout    = "https://github.com/$Repo"
+      DisplayIcon     = "$GuiExe,0"
+      InstallLocation = $InstallDir
+      UninstallString = $UninstallCmd
+      NoModify        = 1
+      NoRepair        = 1
+      EstimatedSize   = $SizeKb
+    }
+    foreach ($k in $Props.Keys) {
+      $type = if ($Props[$k] -is [int]) { "DWord" } else { "String" }
+      New-ItemProperty -Path $UninstKey -Name $k -Value $Props[$k] -PropertyType $type -Force | Out-Null
+    }
+    Write-Host "registered Hydra in Apps & features"
+
+    # A copy installed by the .exe installer is a separate install with its own
+    # uninstaller; say so rather than letting two entries confuse later.
+    if (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Hydra") {
+      Write-Warning "Hydra is also installed by the .exe installer; uninstall that copy from Apps & features to avoid running two installs."
+    }
   }
 
   # Put the install dir on the user PATH so `hydra` works in new shells.
   $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
   if (($UserPath -split ";") -notcontains $InstallDir) {
-    [Environment]::SetEnvironmentVariable("Path", "$UserPath;$InstallDir", "User")
+    # A user with no PATH of their own must not get a leading ";".
+    $NewPath = if ($UserPath) { "$UserPath;$InstallDir" } else { $InstallDir }
+    # .NET broadcasts WM_SETTINGCHANGE for a User-scope write, so newly
+    # started programs pick this up without a sign-out.
+    [Environment]::SetEnvironmentVariable("Path", $NewPath, "User")
     Write-Host "added $InstallDir to your user PATH (open a new terminal to pick it up)"
   }
 
