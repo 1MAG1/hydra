@@ -77,6 +77,20 @@ pub fn view(app: &App) -> El<'_> {
             }
             col.into()
         }
+        // A root-owned install (a tarball unpacked with sudo) is still
+        // Hydra's to replace — the finisher just has to ask first, and
+        // saying so before the download beats an unexplained password panel
+        // after the app has quit.
+        UpdatePhase::Idle if info.needs_auth => column![
+            download_line(&info.asset_name, info.size),
+            text(tr(
+                "Hydra is installed for all users; finishing the update will ask for your administrator password."
+            ))
+            .size(theme::FONT_SIZE - 1.0)
+            .color(theme::dim_text(&iced::Theme::Light)),
+        ]
+        .spacing(4)
+        .into(),
         UpdatePhase::Idle => download_line(&info.asset_name, info.size).into(),
         UpdatePhase::Downloading { got, total } => {
             let frac = match total {

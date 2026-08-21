@@ -9,9 +9,22 @@
 #   ... | bash -s -- --version vx.x.x # pin a release instead of latest
 #   ... | bash -s -- --beta           # newest -rc pre-release when ahead of latest
 #   ... | bash -s -- --prefix ~/.local
+#   ... | bash -s -- --app-dir ~/Applications # macOS: install the app just
+#                                             # for me (default /Applications)
 #
-# Default install is the GUI bundle: hydra, hydra-gui, hydra-host into
-# <prefix>/bin, browser extensions + native-host installer into
+# Default install is the GUI bundle, and it lands the way each desktop
+# expects an application to:
+#
+#   macOS   "Hydra Download Manager.app" in /Applications (the default;
+#           --app-dir moves it), so the app has its icon and its name in
+#           Launchpad, Spotlight, the Dock and the app switcher.
+#           <prefix>/bin/{hydra,hydra-gui,hydra-host} become symlinks into
+#           the bundle, so the CLI stays on PATH and one self update
+#           refreshes the app and the CLI together.
+#   Linux   binaries in <prefix>/bin plus a hicolor icon and a .desktop entry,
+#           so the app has its icon and name in the launcher and the dock.
+#
+# Both also get the browser extensions + native-host installer in
 # <prefix>/share/hydra. On Linux this uses the release tarball (no deb/rpm
 # needed). --cli installs only the hydra binary.
 #
@@ -25,7 +38,15 @@ REPO="ja7ad/hydra"
 MODE="gui"
 VERSION=""
 PREFIX=""
+APP_DIR=""
 BETA=0
+
+# The macOS bundle, and the executable inside it. The product name is what
+# every macOS surface shows — Launchpad, the Dock, the app switcher, Login
+# Items — which is the whole reason the GUI is not installed as a bare
+# `hydra-gui` binary there.
+APP_NAME="Hydra Download Manager"
+BUNDLE_ID="io.github.ja7ad.hydra"
 
 usage() {
   cat >&2 <<EOF
@@ -36,6 +57,8 @@ Usage: install.sh [--cli] [--version vX.Y.Z] [--beta] [--prefix DIR]
   --beta           install the newest -rc pre-release when it is ahead of the
                    latest stable release (otherwise the stable release)
   --prefix DIR     install root (default: /usr/local, falling back to ~/.local)
+  --app-dir DIR    macOS only: where "$APP_NAME.app" is installed
+                   (default: /Applications, falling back to ~/Applications)
 EOF
   exit 2
 }
@@ -47,6 +70,7 @@ while [ $# -gt 0 ]; do
     --version) VERSION="$2"; shift ;;
     --beta) BETA=1 ;;
     --prefix) PREFIX="$2"; shift ;;
+    --app-dir) APP_DIR="$2"; shift ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage ;;
   esac
@@ -86,6 +110,134 @@ ver_gt() { # ver_gt A B — true when A's numeric core is ahead of B's
     }
     exit 1
   }'
+}
+
+# Desktop files, icons and browser manifests belong to the human running the
+# install, not to root: `curl ... | sudo bash` would otherwise scatter them
+# through /root, where no session ever looks.
+if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != root ] && [ "$(id -u)" = 0 ]; then
+  AS_USER="$SUDO_USER"
+  USER_HOME=$(eval echo "~$SUDO_USER")
+else
+  AS_USER=""
+  USER_HOME="$HOME"
+fi
+
+own_user() { # own_user PATH... — hand back what root created in a user's home
+  [ -n "$AS_USER" ] || return 0
+  chown -R "$AS_USER" "$@" 2>/dev/null || true
+}
+
+run_as_user() { # run_as_user CMD... — as the human, when running under sudo
+  if [ -n "$AS_USER" ]; then
+    sudo -u "$AS_USER" -H "$@"
+  else
+    "$@"
+  fi
+}
+
+build_macos_app() { # build_macos_app SRC APP — assemble and install the .app
+  local src="$1" app="$2" staged="$TMP/bundle/$APP_NAME.app"
+  mkdir -p "$staged/Contents/MacOS" "$staged/Contents/Resources"
+
+  # The GUI takes the product name: that file name is what Activity Monitor,
+  # the force-quit panel and Login Items show, and it is the name Hydra's own
+  # updater maps the archive's `hydra-gui` onto.
+  install -m 755 "$src/hydra-gui" "$staged/Contents/MacOS/$APP_NAME"
+  # The CLI, the native-messaging host and the update finisher travel inside
+  # the bundle, so the app is one self-contained directory and a self update
+  # refreshes every part of it at once.
+  install -m 755 "$src/hydra" "$staged/Contents/MacOS/hydra"
+  install -m 755 "$src/hydra-host" "$staged/Contents/MacOS/hydra-host"
+  if [ -f "$src/hydra-updater" ]; then
+    install -m 755 "$src/hydra-updater" "$staged/Contents/MacOS/hydra-updater"
+  fi
+
+  # Icon. .icns is the only format the Dock, Launchpad, Finder and the app
+  # switcher read; sips and iconutil are part of macOS, so no toolchain is
+  # needed to build one from the logo the archive ships.
+  if [ -f "$src/logo.png" ] && command -v iconutil >/dev/null 2>&1; then
+    local iconset="$TMP/hydra.iconset" size
+    mkdir -p "$iconset"
+    for size in 16 32 64 128 256 512; do
+      sips -z "$size" "$size" "$src/logo.png" \
+        --out "$iconset/icon_${size}x${size}.png" >/dev/null 2>&1 || true
+      sips -z "$((size * 2))" "$((size * 2))" "$src/logo.png" \
+        --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null 2>&1 || true
+    done
+    iconutil -c icns "$iconset" -o "$staged/Contents/Resources/hydra.icns" 2>/dev/null ||
+      echo "warning: could not build the app icon from logo.png" >&2
+  fi
+
+  # CLI man pages ride inside the bundle too, so the app stays complete if it
+  # is later moved or copied to another Mac:
+  #   man "$app/Contents/Resources/man/man1/hydra.1"
+  if [ -d "$src/man" ]; then
+    mkdir -p "$staged/Contents/Resources/man/man1"
+    install -m 644 "$src"/man/*.1 "$staged/Contents/Resources/man/man1/"
+  fi
+
+  # CFBundleVersion and CFBundleShortVersionString take period-separated
+  # integers only, so a pre-release suffix (0.4.0-rc1) is dropped here; the
+  # release tag itself keeps it.
+  cat > "$staged/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>${APP_NAME}</string>
+    <key>CFBundleDisplayName</key><string>${APP_NAME}</string>
+    <key>CFBundleExecutable</key><string>${APP_NAME}</string>
+    <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
+    <key>CFBundleVersion</key><string>${VER%%-*}</string>
+    <key>CFBundleShortVersionString</key><string>${VER%%-*}</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleIconFile</key><string>hydra</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+</dict>
+</plist>
+PLIST
+
+  # Ad-hoc signature: unsigned binaries get silently denied by TCC instead of
+  # prompting for Downloads-folder access.
+  codesign --force --deep -s - "$staged" >/dev/null 2>&1 ||
+    echo "warning: could not sign the app; macOS may deny it Downloads access" >&2
+
+  # A running copy keeps the old binaries mapped, and hydra-host would hand
+  # the next browser capture to it; quit it before the replacement lands.
+  if pgrep -f "$app/Contents/MacOS/" >/dev/null 2>&1; then
+    echo "quitting the running $APP_NAME..."
+    run_as_user osascript -e "quit app \"$APP_NAME\"" >/dev/null 2>&1 || true
+    sleep 2
+    pkill -f "$app/Contents/MacOS/" 2>/dev/null || true
+  fi
+
+  $APP_SUDO mkdir -p "$APP_DIR"
+  $APP_SUDO rm -rf "$app"
+  # ditto preserves the bundle layout and the signature a plain cp -R can break.
+  $APP_SUDO ditto "$staged" "$app"
+  # An app dragged out of a .dmg belongs to whoever installed it, and that
+  # ownership is exactly what lets Hydra update itself later without asking
+  # for a password. Installing with sudo would otherwise leave it to root.
+  if [ -n "$APP_SUDO" ]; then
+    $APP_SUDO chown -R "${AS_USER:-$(id -un)}" "$app" 2>/dev/null || true
+  fi
+
+  # Tell Launch Services about the app now, instead of whenever macOS next
+  # rescans /Applications: this is what puts it in Launchpad, Spotlight and
+  # the "Open With" menu immediately.
+  local lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  if [ -x "$lsregister" ]; then
+    "$lsregister" -f "$app" >/dev/null 2>&1 || true
+  fi
+  echo "installed $app"
+}
+
+link_bin() { # link_bin NAME TARGET — <prefix>/bin/NAME -> TARGET
+  $SUDO ln -sfn "$2" "$BIN_DIR/$1"
+  echo "linked $BIN_DIR/$1 -> $2"
 }
 
 if [ -z "$VERSION" ]; then
@@ -138,7 +290,28 @@ fi
 BIN_DIR="$PREFIX/bin"
 SHARE_DIR="$PREFIX/share/hydra"
 
+# macOS: where the .app goes. /Applications is group-writable by admins on a
+# normal Mac, so this usually needs no sudo at all; ~/Applications is a
+# first-class fallback that Launchpad and Spotlight index just the same.
+APP=""
+APP_SUDO=""
+if [ "$OS" = macos ] && [ "$MODE" = gui ]; then
+  if [ -z "$APP_DIR" ]; then
+    if [ -w /Applications ]; then
+      APP_DIR="/Applications"
+    elif command -v sudo >/dev/null 2>&1; then
+      APP_DIR="/Applications"; APP_SUDO="sudo"
+    else
+      APP_DIR="$USER_HOME/Applications"
+    fi
+  elif [ -e "$APP_DIR" ] && [ ! -w "$APP_DIR" ] && command -v sudo >/dev/null 2>&1; then
+    APP_SUDO="sudo"
+  fi
+  APP="$APP_DIR/$APP_NAME.app"
+fi
+
 echo "hydra ${VERSION} (${MODE}) -> ${PREFIX}  [${OS}/${ARCH}]"
+if [ -n "$APP" ]; then echo "app bundle -> ${APP}"; fi
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -161,8 +334,14 @@ tar -xzf "$TMP/${NAME}.tar.gz" -C "$TMP"
 SRC="$TMP/$NAME"
 
 $SUDO mkdir -p "$BIN_DIR"
-$SUDO install -m 755 "$SRC/hydra" "$BIN_DIR/hydra"
-echo "installed $BIN_DIR/hydra"
+if [ -n "$APP" ]; then
+  # macOS GUI install: every binary lives in the bundle and <prefix>/bin gets
+  # symlinks to them (below), so a self update refreshes the CLI on PATH too.
+  :
+else
+  $SUDO install -m 755 "$SRC/hydra" "$BIN_DIR/hydra"
+  echo "installed $BIN_DIR/hydra"
+fi
 
 # Man pages (releases >= 0.2.2 ship them in the tarball as man/*.1).
 if [ -d "$SRC/man" ]; then
@@ -175,10 +354,28 @@ if [ -d "$SRC/man" ]; then
 fi
 
 if [ "$MODE" = gui ]; then
-  $SUDO install -m 755 "$SRC/hydra-gui" "$BIN_DIR/hydra-gui"
-  $SUDO install -m 755 "$SRC/hydra-host" "$BIN_DIR/hydra-host"
-  echo "installed $BIN_DIR/hydra-gui"
-  echo "installed $BIN_DIR/hydra-host"
+  # The native-messaging host the browser manifests point at. On macOS that
+  # is the copy inside the bundle: it carries the app's identity, which is
+  # what TCC granted Downloads access to, and it survives a self update.
+  HOST_BIN="$BIN_DIR/hydra-host"
+  if [ -n "$APP" ]; then
+    build_macos_app "$SRC" "$APP"
+    HOST_BIN="$APP/Contents/MacOS/hydra-host"
+    link_bin hydra "$APP/Contents/MacOS/hydra"
+    link_bin hydra-gui "$APP/Contents/MacOS/$APP_NAME"
+    link_bin hydra-host "$APP/Contents/MacOS/hydra-host"
+  else
+    $SUDO install -m 755 "$SRC/hydra-gui" "$BIN_DIR/hydra-gui"
+    $SUDO install -m 755 "$SRC/hydra-host" "$BIN_DIR/hydra-host"
+    echo "installed $BIN_DIR/hydra-gui"
+    echo "installed $BIN_DIR/hydra-host"
+    # The self-update finisher: the GUI runs it from a temp copy, but keeping
+    # one next to the app means `apply` refreshes it like any other binary.
+    if [ -f "$SRC/hydra-updater" ]; then
+      $SUDO install -m 755 "$SRC/hydra-updater" "$BIN_DIR/hydra-updater"
+      echo "installed $BIN_DIR/hydra-updater"
+    fi
+  fi
 
   # Extensions + native-host installer keep the bundle layout (the script
   # resolves the bundle root as the parent of its own directory).
@@ -188,51 +385,101 @@ if [ "$MODE" = gui ]; then
   echo "installed $SHARE_DIR (browser extensions + native-host installer)"
 
   if [ "$OS" = linux ]; then
-    # Logo into the per-user hicolor theme, so Icon=hydra below resolves.
-    # Without it the launcher, the dock and the switcher all draw the
-    # generic fallback icon.
+    # Desktop integration goes into the user's data dir, and into the
+    # prefix's when that is a system one: XDG resolves both and deduplicates
+    # by file name, so the app appears once whether it was installed for one
+    # user or for everyone.
+    DATA_DIRS=("$USER_HOME/.local/share")
+    case "$PREFIX" in
+      "$USER_HOME"*) ;;
+      *) if [ -d "$PREFIX" ] && { [ -w "$PREFIX" ] || [ -n "$SUDO" ]; }; then
+           DATA_DIRS+=("$PREFIX/share")
+         fi ;;
+    esac
+
+    # write_data MODE SRC DEST — install into one of those data dirs: with
+    # sudo for a system one, handed back to the user for their own home.
+    write_data() {
+      local mode="$1" src="$2" dest="$3" sudo=""
+      case "$dest" in "$USER_HOME"*) ;; *) sudo="$SUDO" ;; esac
+      $sudo mkdir -p "$(dirname "$dest")"
+      $sudo install -m "$mode" "$src" "$dest"
+      case "$dest" in "$USER_HOME"*) own_user "$(dirname "$dest")" ;; esac
+      echo "installed $dest"
+    }
+
+    # scale_icon SIZE OUT — the logo at SIZE, if this machine can resize it.
+    scale_icon() {
+      if command -v magick >/dev/null 2>&1; then
+        magick "$SRC/logo.png" -resize "${1}x${1}" "$2" 2>/dev/null
+      elif command -v convert >/dev/null 2>&1; then
+        convert "$SRC/logo.png" -resize "${1}x${1}" "$2" 2>/dev/null
+      elif python3 -c 'import PIL' 2>/dev/null; then
+        python3 -c 'import sys
+from PIL import Image
+Image.open(sys.argv[1]).convert("RGBA").resize(
+    (int(sys.argv[2]),) * 2, Image.LANCZOS).save(sys.argv[3])' \
+          "$SRC/logo.png" "$1" "$2" 2>/dev/null
+      else
+        return 1
+      fi
+    }
+
+    # The logo into the hicolor theme, so Icon=hydra resolves. Without it the
+    # launcher, the dock and the switcher all draw the generic fallback icon.
+    # The archive ships one 256px logo; the smaller sizes are rendered when a
+    # scaler is around, because a 16px panel scaling 256px down itself looks
+    # like it.
     if [ -f "$SRC/logo.png" ]; then
-      ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
-      mkdir -p "$ICON_DIR"
-      install -m 644 "$SRC/logo.png" "$ICON_DIR/hydra.png"
-      echo "installed $ICON_DIR/hydra.png"
+      for data in "${DATA_DIRS[@]}"; do
+        write_data 644 "$SRC/logo.png" "$data/icons/hicolor/256x256/apps/hydra.png"
+        for size in 16 24 32 48 64 128; do
+          if scale_icon "$size" "$TMP/icon-${size}.png"; then
+            write_data 644 "$TMP/icon-${size}.png" \
+              "$data/icons/hicolor/${size}x${size}/apps/hydra.png"
+          fi
+        done
+      done
     fi
 
-    # Desktop launcher (user-level; the tarball ships no packaging metadata).
-    # The basename must stay "hydra": hydra-gui sets that as its window app id
-    # (Wayland app_id / X11 WM_CLASS), which is how the shell matches a running
-    # window back to this entry to pick up Icon=. StartupWMClass repeats it for
-    # desktops that only consult that key.
-    APPS_DIR="$HOME/.local/share/applications"
-    mkdir -p "$APPS_DIR"
-    cat > "$APPS_DIR/hydra.desktop" <<EOF
+    # Desktop launcher (the tarball ships no packaging metadata, so this is
+    # written here rather than shipped). The basename must stay "hydra":
+    # hydra-gui sets that as its window app id (Wayland app_id / X11
+    # WM_CLASS), which is how the shell matches a running window back to this
+    # entry to pick up Icon=. StartupWMClass repeats it for desktops that
+    # only consult that key.
+    cat > "$TMP/hydra.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Hydra Download Manager
 GenericName=Download Manager
 Comment=Multi-connection download accelerator
 Exec=$BIN_DIR/hydra-gui
+TryExec=$BIN_DIR/hydra-gui
 Icon=hydra
 Terminal=false
 Categories=Network;FileTransfer;
+Keywords=download;downloader;accelerator;http;
+StartupNotify=true
 StartupWMClass=hydra
 EOF
-    echo "installed $APPS_DIR/hydra.desktop"
-
-    command -v update-desktop-database >/dev/null 2>&1 &&
-      update-desktop-database -q "$APPS_DIR" || true
-    command -v gtk-update-icon-cache >/dev/null 2>&1 &&
-      gtk-update-icon-cache -qt "$HOME/.local/share/icons/hicolor" || true
+    for data in "${DATA_DIRS[@]}"; do
+      write_data 644 "$TMP/hydra.desktop" "$data/applications/hydra.desktop"
+      command -v update-desktop-database >/dev/null 2>&1 &&
+        update-desktop-database -q "$data/applications" 2>/dev/null || true
+      command -v gtk-update-icon-cache >/dev/null 2>&1 &&
+        gtk-update-icon-cache -qt "$data/icons/hicolor" 2>/dev/null || true
+    done
   fi
 
   # Register the native-messaging host for the current user. Manifests land
   # in \$HOME, so this deliberately runs without sudo.
   if command -v python3 >/dev/null 2>&1; then
-    bash "$SHARE_DIR/scripts/install-native-host.sh" --no-build --host-bin "$BIN_DIR/hydra-host" \
-      || echo "warning: native-messaging host registration failed; rerun: $SHARE_DIR/scripts/install-native-host.sh --no-build --host-bin $BIN_DIR/hydra-host" >&2
+    run_as_user bash "$SHARE_DIR/scripts/install-native-host.sh" --no-build --host-bin "$HOST_BIN" \
+      || echo "warning: native-messaging host registration failed; rerun: $SHARE_DIR/scripts/install-native-host.sh --no-build --host-bin $HOST_BIN" >&2
   else
     echo "note: python3 not found; to enable browser integration run:" >&2
-    echo "  $SHARE_DIR/scripts/install-native-host.sh --no-build --host-bin $BIN_DIR/hydra-host" >&2
+    echo "  $SHARE_DIR/scripts/install-native-host.sh --no-build --host-bin $HOST_BIN" >&2
   fi
 fi
 

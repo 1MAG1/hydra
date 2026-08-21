@@ -290,6 +290,7 @@
   "These settings are unavailable when \"Show download complete dialog\" is turned on": "Эти настройки недоступны, когда включено \"Показывать окно завершения скачивания\"",
   "This address is already in the download list. What do you want to do?": "Этот адрес уже есть в списке закачек. Что вы хотите сделать?",
   "This copy of Hydra cannot update itself in place. Download the new installer and install it the way you installed this one.": "This copy of Hydra cannot update itself in place. Download the new installer and install it the way you installed this one.",
+  "Hydra is installed for all users; finishing the update will ask for your administrator password.": "Hydra is installed for all users; finishing the update will ask for your administrator password.",
   "Thursday": "Четверг",
   "Time left": "Осталось времени",
   "Too many redirects": "Слишком много перенаправлений",

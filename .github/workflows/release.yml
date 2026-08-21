@@ -181,6 +181,10 @@ jobs:
           cp -R extensions/chrome extensions/firefox extensions/safari "stage/${GUI_NAME}/extensions/"
           if [ "${{ matrix.os }}" = windows ]; then
             cp scripts/install-native-host.ps1 "stage/${GUI_NAME}/scripts/"
+            # install.ps1 registers an "Apps & features" entry whose
+            # UninstallString points at this copy, so the uninstaller works
+            # offline instead of being fetched from the repo at removal time.
+            cp uninstall.ps1 "stage/${GUI_NAME}/scripts/"
           else
             cp scripts/install-native-host.sh "stage/${GUI_NAME}/scripts/"
           fi

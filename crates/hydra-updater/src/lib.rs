@@ -288,38 +288,122 @@ fn windows_arch() -> &'static str {
     }
 }
 
-/// True when `dir` sits inside a macOS application bundle.
+/// The macOS application bundle `dir` sits inside, if any: the nearest
+/// enclosing `*.app` directory.
 ///
-/// A bundle is replaced whole or not at all: its executable is named
-/// `Contents/MacOS/Hydra Download Manager` while the release archive ships
-/// `hydra-gui`, so a file-by-file swap silently misses the GUI itself and
-/// relaunches the old version; `Info.plist`'s version string and the ad-hoc
-/// code signature covering it would go stale even if the names matched.
-pub fn in_app_bundle(dir: &Path) -> bool {
-    dir.components().any(|c| {
-        Path::new(&c)
+/// A bundle is not a flat install directory. Its GUI executable is named
+/// after the product (`Contents/MacOS/Hydra Download Manager`) while the
+/// release archive ships `hydra-gui`, and `Contents/Info.plist` carries the
+/// version macOS shows — so an update has to be told about the layout
+/// ([`apply_with`]) instead of copying names on top of names.
+pub fn app_bundle_root(dir: &Path) -> Option<PathBuf> {
+    let mut root = PathBuf::new();
+    let mut found = None;
+    for c in dir.components() {
+        root.push(c);
+        if Path::new(&c)
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("app"))
-    })
+        {
+            found = Some(root.clone());
+        }
+    }
+    found
 }
 
-/// Whether the in-place swap can and should run for an install in `dir`.
-///
-/// Two ways to fail: the directory is not ours to rewrite (root-owned
-/// `/usr/bin` from a deb or rpm, `/Applications` from a `.pkg`), or it is a
-/// macOS bundle, which only a whole-bundle install can update correctly.
-pub fn can_update_in_place(dir: &Path) -> bool {
-    !in_app_bundle(dir) && dir_is_writable(dir)
+/// True when `dir` sits inside a macOS application bundle.
+pub fn in_app_bundle(dir: &Path) -> bool {
+    app_bundle_root(dir).is_some()
 }
 
-/// Whether this process can replace files in `dir`.
+/// The directory holding a bundle's executables.
+pub fn bundle_bin_dir(bundle: &Path) -> PathBuf {
+    bundle.join("Contents").join("MacOS")
+}
+
+/// How an install can take an update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateMethod {
+    /// Hydra owns these files and the finisher can replace them directly.
+    InPlace,
+    /// Root owns the files but no package manager does — a tarball unpacked
+    /// into `/usr/local/bin` with sudo, or an app copied to `/Applications`
+    /// by another admin. The finisher re-runs itself through an
+    /// authorisation prompt ([`elevation`]).
+    Elevated,
+    /// A package manager owns this install; only it may rewrite these files,
+    /// so the update is offered as its own `.deb`/`.rpm`/`.pkg`/setup.
+    Package,
+}
+
+impl UpdateMethod {
+    /// Whether Hydra can install this update itself, with or without an
+    /// authorisation prompt.
+    pub fn is_self_update(self) -> bool {
+        !matches!(self, UpdateMethod::Package)
+    }
+}
+
+/// How the install in `dir` (the directory holding the running executable)
+/// can be updated.
 ///
-/// The in-place update rewrites the install directory, which a packaged
-/// install (`/usr/bin` from a deb or rpm, `/Applications` for another user)
-/// does not allow. Probing beats guessing from the path: a tarball install
-/// under `~/.local/bin` and a system one under `/usr/bin` differ only in who
-/// owns them. Creating a file is the only honest test — Unix write
-/// permission on a directory is not implied by anything readable.
+/// Ownership decides, and it is probed rather than guessed: a tarball under
+/// `~/.local/bin` and a deb's `/usr/bin` differ only in who owns them. Only
+/// a package-manager install is refused outright — rewriting `/usr/bin`
+/// behind dpkg's back leaves its database describing files that are no
+/// longer there.
+pub fn update_method(dir: &Path) -> UpdateMethod {
+    if package_managed(dir) {
+        return UpdateMethod::Package;
+    }
+    if update_target_is_writable(dir) {
+        return UpdateMethod::InPlace;
+    }
+    match elevation() {
+        Some(_) => UpdateMethod::Elevated,
+        None => UpdateMethod::Package,
+    }
+}
+
+/// Whether a package manager owns the install in `dir`.
+///
+/// Linux: the deb and rpm both install into `/usr/bin` (scripts/package-linux.sh),
+/// while `/usr/local` is by convention exactly the part of the filesystem no
+/// package manager touches. macOS: the `.pkg` records a receipt per package
+/// identifier and lands in `/Applications`; a dragged `.dmg` leaves no
+/// receipt, which is what separates the two installs that otherwise look
+/// identical. Windows: the setup installer owns whatever it wrote, and there
+/// is no unprivileged way to rewrite `Program Files`.
+fn package_managed(dir: &Path) -> bool {
+    if cfg!(target_os = "linux") {
+        dir.starts_with("/usr") && !dir.starts_with("/usr/local")
+    } else if cfg!(target_os = "macos") {
+        dir.starts_with("/Applications")
+            && Path::new("/var/db/receipts/io.github.ja7ad.hydra.plist").exists()
+    } else {
+        // Windows: no elevation path here (a UAC re-launch of the finisher
+        // would prompt with the app already gone), so an install this
+        // process cannot write is the installer's to replace.
+        !update_target_is_writable(dir)
+    }
+}
+
+/// Whether this process can rewrite everything an update touches for an
+/// install in `dir`: the executables, and for a macOS bundle also
+/// `Contents/`, which holds `Info.plist` and the code signature.
+pub fn update_target_is_writable(dir: &Path) -> bool {
+    match app_bundle_root(dir) {
+        Some(bundle) => {
+            dir_is_writable(&bundle_bin_dir(&bundle)) && dir_is_writable(&bundle.join("Contents"))
+        }
+        None => dir_is_writable(dir),
+    }
+}
+
+/// Whether this process can create files in `dir`.
+///
+/// Creating a file is the only honest test — Unix write permission on a
+/// directory is not implied by anything readable.
 pub fn dir_is_writable(dir: &Path) -> bool {
     let probe = dir.join(format!(".hydra-write-test-{}", std::process::id()));
     match std::fs::File::create(&probe) {
@@ -329,6 +413,86 @@ pub fn dir_is_writable(dir: &Path) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// How this machine can ask the user to authorise a privileged file swap,
+/// or `None` when it cannot.
+///
+/// macOS has `osascript`'s `with administrator privileges`, which shows the
+/// system authorisation panel. Linux has `pkexec`, whose polkit agent is
+/// part of every desktop session. Neither `sudo` nor `doas` qualifies: the
+/// finisher runs detached with no terminal to type a password into.
+pub fn elevation() -> Option<Elevation> {
+    if cfg!(target_os = "macos") {
+        Path::new("/usr/bin/osascript")
+            .exists()
+            .then_some(Elevation::Osascript)
+    } else if cfg!(target_os = "linux") {
+        which("pkexec").map(Elevation::Pkexec)
+    } else {
+        None
+    }
+}
+
+/// A way to run one command as root after the user authorises it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Elevation {
+    /// macOS: `osascript -e 'do shell script "…" with administrator privileges'`.
+    Osascript,
+    /// Linux: `pkexec …`, at the resolved path.
+    Pkexec(PathBuf),
+}
+
+/// First `PATH` entry holding an executable named `name`.
+fn which(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
+}
+
+/// Run `argv` as root behind the platform's authorisation prompt, waiting
+/// for it to finish.
+///
+/// The prompt is the point: the finisher runs after the app has exited, so
+/// there is no window to host a password field and no terminal to type into.
+/// macOS draws its own authorisation panel, and `pkexec` hands the request to
+/// the desktop's polkit agent.
+pub fn run_elevated(elevation: &Elevation, argv: &[&std::ffi::OsStr]) -> io::Result<()> {
+    let status = match elevation {
+        Elevation::Pkexec(pkexec) => std::process::Command::new(pkexec).args(argv).status()?,
+        Elevation::Osascript => {
+            let script = format!(
+                "do shell script {} with administrator privileges",
+                applescript_string(&shell_command(argv))
+            );
+            std::process::Command::new("/usr/bin/osascript")
+                .arg("-e")
+                .arg(script)
+                .status()?
+        }
+    };
+    if status.success() {
+        Ok(())
+    } else {
+        // A cancelled macOS prompt exits 1 the same way a failed swap does;
+        // the elevated run logs which of the two it was.
+        Err(io::Error::other(format!(
+            "elevated update finisher exited with {status}"
+        )))
+    }
+}
+
+/// `argv` as one `/bin/sh` command line, every word single-quoted.
+fn shell_command(argv: &[&std::ffi::OsStr]) -> String {
+    argv.iter()
+        .map(|a| format!("'{}'", a.to_string_lossy().replace('\'', r"'\''")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `s` as an AppleScript string literal.
+fn applescript_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', r"\\").replace('"', "\\\""))
 }
 
 /// The version without its pre-release or build suffix (`0.3.2-rc` →
@@ -556,16 +720,38 @@ pub fn extract(archive: &Path, dest: &Path) -> io::Result<PathBuf> {
 pub struct ApplyReport {
     pub replaced: Vec<String>,
     pub skipped: Vec<String>,
+    /// macOS: notes about the bundle steps that follow the file swap
+    /// (`Info.plist` version, re-signing).
+    pub notes: Vec<String>,
 }
 
-/// Copy the new bundle's files over the installed ones.
+/// Knobs for [`apply_with`].
+#[derive(Clone, Debug, Default)]
+pub struct ApplyOptions {
+    /// Version the new files carry. Only a macOS bundle needs it: its
+    /// `Info.plist` is what the Finder, the Dock and "About This Mac >
+    /// Software" read, and it would otherwise keep describing the version
+    /// the bundle was built as.
+    pub version: Option<String>,
+}
+
+/// [`apply_with`] with default options.
+pub fn apply(src_root: &Path, install_dir: &Path) -> io::Result<ApplyReport> {
+    apply_with(src_root, install_dir, &ApplyOptions::default())
+}
+
+/// Copy the new release's files over the installed ones.
 ///
-/// Only files that ALREADY EXIST in `install_dir` are replaced: a plain
-/// unpacked-archive install gets every binary refreshed, while a macOS
-/// `.app` (whose `Contents/MacOS/` holds just the executables) or a partial
+/// Only files that ALREADY EXIST at the destination are replaced: a plain
+/// unpacked-archive install gets every binary refreshed, while a partial
 /// install never gains stray files it did not have. Everything else in the
-/// bundle (extensions/, scripts/, licences) is left alone and reported in
-/// `skipped`.
+/// release bundle (extensions/, scripts/, licences) is left alone and
+/// reported in `skipped`.
+///
+/// A macOS `.app` install is written through [`bundle_dest`], which maps the
+/// archive's `hydra-gui` onto the bundle's product-named executable; the
+/// bundle then has its `Info.plist` version rewritten and is re-signed, so
+/// what macOS reports about the app matches what is inside it.
 ///
 /// Each replacement retries with backoff for up to ~20 s per file: on
 /// Windows the old process's executable stays locked until it has fully
@@ -573,8 +759,14 @@ pub struct ApplyReport {
 /// polling required. Locked-but-replaceable executables are handled with the
 /// classic rename dance: the running file may not be overwritten, but it may
 /// be renamed away, and a fresh copy takes its name.
-pub fn apply(src_root: &Path, install_dir: &Path) -> io::Result<ApplyReport> {
+pub fn apply_with(
+    src_root: &Path,
+    install_dir: &Path,
+    opts: &ApplyOptions,
+) -> io::Result<ApplyReport> {
     let mut report = ApplyReport::default();
+    let bundle = app_bundle_root(install_dir);
+    let exec_name = bundle.as_deref().map(bundle_exec_name);
     for entry in std::fs::read_dir(src_root)? {
         let entry = entry?;
         let path = entry.path();
@@ -585,15 +777,136 @@ pub fn apply(src_root: &Path, install_dir: &Path) -> io::Result<ApplyReport> {
             continue;
         }
         let name = entry.file_name();
-        let dest = install_dir.join(&name);
-        if !dest.exists() {
+        let dest = match (&bundle, &exec_name) {
+            (Some(b), Some(exec)) => bundle_dest(b, exec, &name.to_string_lossy()),
+            _ => Some(install_dir.join(&name)),
+        };
+        let Some(dest) = dest.filter(|d| d.exists()) else {
             report.skipped.push(name.to_string_lossy().into_owned());
             continue;
-        }
+        };
         replace_file(&path, &dest)?;
         report.replaced.push(name.to_string_lossy().into_owned());
     }
+    if let Some(bundle) = &bundle {
+        finish_bundle(bundle, opts.version.as_deref(), &mut report);
+    }
     Ok(report)
+}
+
+/// Where a release file lands inside a macOS application bundle, or `None`
+/// when the bundle has no place for it.
+///
+/// The GUI is the one rename: the archive ships `hydra-gui`, the bundle runs
+/// it as its `CFBundleExecutable`. The CLI, the native-messaging host and
+/// the finisher keep their names in `Contents/MacOS/`; everything else
+/// (`logo.png`, licences, the extension tree) belongs to the archive layout,
+/// not the bundle, and is skipped.
+pub fn bundle_dest(bundle: &Path, exec_name: &str, file: &str) -> Option<PathBuf> {
+    let bin = bundle_bin_dir(bundle);
+    match file {
+        "hydra-gui" => Some(bin.join(exec_name)),
+        "hydra" | "hydra-host" | "hydra-updater" => Some(bin.join(file)),
+        _ => None,
+    }
+}
+
+/// A bundle's `CFBundleExecutable`, falling back to the product name the
+/// packaging scripts use.
+pub fn bundle_exec_name(bundle: &Path) -> String {
+    std::fs::read_to_string(bundle.join("Contents").join("Info.plist"))
+        .ok()
+        .and_then(|xml| plist_string(&xml, "CFBundleExecutable").map(|s| s.to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Hydra Download Manager".to_string())
+}
+
+/// Bundle bookkeeping after the executables are swapped: the version macOS
+/// reads, then the signature that covers it.
+fn finish_bundle(bundle: &Path, version: Option<&str>, report: &mut ApplyReport) {
+    if let Some(version) = version {
+        match set_bundle_version(bundle, version) {
+            Ok(true) => report.notes.push(format!("Info.plist -> {version}")),
+            Ok(false) => report
+                .notes
+                .push("Info.plist has no version keys; left alone".into()),
+            Err(e) => report.notes.push(format!("Info.plist update failed: {e}")),
+        }
+    }
+    // The ad-hoc signature seals Info.plist and the resource tree, both of
+    // which just changed underneath it. macOS refuses to launch an app whose
+    // seal is broken, so re-signing is not cosmetic. Best effort: an install
+    // that was never signed has nothing to invalidate.
+    match resign_bundle(bundle) {
+        Ok(true) => report.notes.push("re-signed (ad-hoc)".into()),
+        Ok(false) => {}
+        Err(e) => report.notes.push(format!("codesign failed: {e}")),
+    }
+}
+
+/// Rewrite `CFBundleVersion` and `CFBundleShortVersionString` in a bundle's
+/// `Info.plist`. Returns whether anything was written.
+///
+/// Both keys take period-separated integers only, so a pre-release suffix
+/// (`0.4.0-rc1`) is trimmed to its numeric core the same way the packaging
+/// scripts trim it.
+pub fn set_bundle_version(bundle: &Path, version: &str) -> io::Result<bool> {
+    let plist = bundle.join("Contents").join("Info.plist");
+    let xml = std::fs::read_to_string(&plist)?;
+    let core = version_core(version);
+    let mut out = xml.clone();
+    let mut changed = false;
+    for key in ["CFBundleVersion", "CFBundleShortVersionString"] {
+        if let Some(range) = plist_string_range(&out, key) {
+            out.replace_range(range, core);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+    // Write beside the target and rename: a half-written Info.plist is an
+    // unlaunchable app.
+    let tmp = plist.with_extension("plist.new");
+    std::fs::write(&tmp, out.as_bytes())?;
+    std::fs::rename(&tmp, &plist)?;
+    Ok(true)
+}
+
+/// Ad-hoc re-sign a bundle. `Ok(false)` when the platform has no codesign.
+fn resign_bundle(bundle: &Path) -> io::Result<bool> {
+    if !cfg!(target_os = "macos") || !Path::new("/usr/bin/codesign").exists() {
+        return Ok(false);
+    }
+    let out = std::process::Command::new("/usr/bin/codesign")
+        .args(["--force", "--deep", "--sign", "-"])
+        .arg(bundle)
+        .output()?;
+    if out.status.success() {
+        return Ok(true);
+    }
+    Err(io::Error::other(
+        String::from_utf8_lossy(&out.stderr).trim().to_string(),
+    ))
+}
+
+/// The text of the `<string>` value following `<key>NAME</key>` in an XML
+/// plist, as a range into `xml`.
+///
+/// A hand-rolled scan rather than a plist parser: this reads and writes two
+/// version keys in a file the packaging scripts generate, and a dependency
+/// that can decode binary plists and every value type buys nothing here.
+fn plist_string_range(xml: &str, key: &str) -> Option<std::ops::Range<usize>> {
+    let key_tag = format!("<key>{key}</key>");
+    let after = xml.find(&key_tag)? + key_tag.len();
+    let open = xml[after..].find("<string>")? + after + "<string>".len();
+    let close = xml[open..].find("</string>")? + open;
+    Some(open..close)
+}
+
+/// The `<string>` value following `<key>NAME</key>` in an XML plist.
+fn plist_string<'a>(xml: &'a str, key: &str) -> Option<&'a str> {
+    plist_string_range(xml, key).map(|r| &xml[r])
 }
 
 /// Replace `dest` with `src`, retrying while `dest` is still locked by the
@@ -849,15 +1162,139 @@ mod tests {
     }
 
     #[test]
-    fn app_bundles_are_never_updated_file_by_file() {
+    fn app_bundles_are_recognised_and_mapped() {
         // The bundle's GUI is `Contents/MacOS/Hydra Download Manager`, not
-        // the archive's `hydra-gui`, so a per-file swap replaces the CLI and
-        // relaunches the same old app.
+        // the archive's `hydra-gui`: without the rename a per-file swap
+        // replaces the CLI and relaunches the same old app.
         let app = Path::new("/Applications/Hydra Download Manager.app/Contents/MacOS");
         assert!(in_app_bundle(app));
-        assert!(!can_update_in_place(app));
+        let bundle = app_bundle_root(app).unwrap();
+        assert_eq!(
+            bundle,
+            Path::new("/Applications/Hydra Download Manager.app")
+        );
+        assert_eq!(bundle_bin_dir(&bundle), app);
+        let exec = "Hydra Download Manager";
+        assert_eq!(
+            bundle_dest(&bundle, exec, "hydra-gui"),
+            Some(app.join(exec))
+        );
+        for name in ["hydra", "hydra-host", "hydra-updater"] {
+            assert_eq!(bundle_dest(&bundle, exec, name), Some(app.join(name)));
+        }
+        // Archive-layout files have no place in a bundle.
+        for name in ["logo.png", "LICENSE", "README.md"] {
+            assert_eq!(bundle_dest(&bundle, exec, name), None);
+        }
         assert!(!in_app_bundle(Path::new("/usr/local/bin")));
         assert!(!in_app_bundle(Path::new("/home/j/apps/hydra")));
+        assert_eq!(app_bundle_root(Path::new("/usr/local/bin")), None);
+    }
+
+    /// A minimal bundle, as the packaging scripts lay one out.
+    fn fake_bundle(dir: &Path, exec: &str, version: &str) -> PathBuf {
+        let bundle = dir.join("Hydra Download Manager.app");
+        let bin = bundle_bin_dir(&bundle);
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join(exec), b"old gui").unwrap();
+        std::fs::write(bin.join("hydra"), b"old cli").unwrap();
+        std::fs::write(
+            bundle.join("Contents").join("Info.plist"),
+            format!(
+                "<plist version=\"1.0\">\n<dict>\n    \
+                 <key>CFBundleExecutable</key><string>{exec}</string>\n    \
+                 <key>CFBundleVersion</key><string>{version}</string>\n    \
+                 <key>CFBundleShortVersionString</key>\n    <string>{version}</string>\n\
+                 </dict>\n</plist>\n"
+            ),
+        )
+        .unwrap();
+        bundle
+    }
+
+    #[test]
+    fn bundle_update_renames_the_gui_and_restamps_the_plist() {
+        let tmp = std::env::temp_dir().join(format!("hydra-bundle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let src = tmp.join("hydra-0.4.0-macos-arm64");
+        std::fs::create_dir_all(&src).unwrap();
+        for (name, body) in [
+            ("hydra-gui", "new gui"),
+            ("hydra", "new cli"),
+            // Not in the bundle: skipped, never added.
+            ("hydra-host", "new host"),
+            ("logo.png", "png"),
+        ] {
+            std::fs::write(src.join(name), body).unwrap();
+        }
+        let exec = "Hydra Download Manager";
+        let bundle = fake_bundle(&tmp, exec, "0.3.9");
+        let bin = bundle_bin_dir(&bundle);
+
+        let report = apply_with(
+            &src,
+            &bin,
+            &ApplyOptions {
+                version: Some("0.4.0-rc1".into()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(bin.join(exec)).unwrap(), "new gui");
+        assert_eq!(
+            std::fs::read_to_string(bin.join("hydra")).unwrap(),
+            "new cli"
+        );
+        assert!(!bin.join("hydra-host").exists());
+        assert!(report.replaced.contains(&"hydra-gui".to_string()));
+        assert!(report.skipped.contains(&"logo.png".to_string()));
+
+        // Both version keys are restamped, and the pre-release suffix is
+        // dropped: CFBundleVersion takes integers only.
+        let plist = std::fs::read_to_string(bundle.join("Contents/Info.plist")).unwrap();
+        assert_eq!(plist_string(&plist, "CFBundleVersion"), Some("0.4.0"));
+        assert_eq!(
+            plist_string(&plist, "CFBundleShortVersionString"),
+            Some("0.4.0")
+        );
+        assert_eq!(plist_string(&plist, "CFBundleExecutable"), Some(exec));
+        assert_eq!(bundle_exec_name(&bundle), exec);
+        // No `.plist.new` left behind by the atomic write.
+        assert!(!bundle.join("Contents/Info.plist.new").exists());
+
+        // A plain (non-bundle) install still copies name over name.
+        let plain = tmp.join("bin");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("hydra-gui"), b"old").unwrap();
+        apply(&src, &plain).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(plain.join("hydra-gui")).unwrap(),
+            "new gui"
+        );
+        assert!(!plain.join("hydra").exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_directory_we_own_updates_itself() {
+        // Ownership is what decides, and a temp dir is ours: no prompt, no
+        // installer detour.
+        let dir = std::env::temp_dir().join(format!("hydra-method-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(update_method(&dir), UpdateMethod::InPlace);
+        assert!(update_method(&dir).is_self_update());
+        assert!(update_target_is_writable(&dir));
+        // A path that does not exist is writable by nobody; without an
+        // elevation helper that is the installer's job.
+        let missing = dir.join("nope");
+        assert!(!update_target_is_writable(&missing));
+        assert_eq!(
+            update_method(&missing).is_self_update(),
+            elevation().is_some()
+        );
+        assert!(!UpdateMethod::Package.is_self_update());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -869,6 +1306,38 @@ mod tests {
         // The probe leaves nothing behind.
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn elevated_commands_survive_quoting() {
+        // Install paths hold spaces ("Hydra Download Manager.app"), and on
+        // macOS the whole command crosses two levels of quoting: an
+        // AppleScript string literal holding a shell command line. One
+        // missed quote there runs the wrong argv as root.
+        let os = std::ffi::OsStr::new;
+        let argv = [
+            os("/tmp/hydra-updater"),
+            os("--install-dir"),
+            os("/Applications/Hydra Download Manager.app/Contents/MacOS"),
+        ];
+        let cmd = shell_command(&argv);
+        assert_eq!(
+            cmd,
+            "'/tmp/hydra-updater' '--install-dir' \
+             '/Applications/Hydra Download Manager.app/Contents/MacOS'"
+                .replace("\n             ", " ")
+        );
+        assert_eq!(applescript_string(&cmd), format!("\"{cmd}\""));
+
+        // A quote inside a path closes and reopens the shell quoting instead
+        // of ending the argument; backslashes and quotes are then escaped
+        // again on their way into AppleScript.
+        let odd = [os(r#"/tmp/it's a "dir"\x"#)];
+        assert_eq!(shell_command(&odd), r#"'/tmp/it'\''s a "dir"\x'"#);
+        assert_eq!(
+            applescript_string(&shell_command(&odd)),
+            r#""'/tmp/it'\\''s a \"dir\"\\x'""#
+        );
     }
 
     #[test]
