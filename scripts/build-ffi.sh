@@ -128,24 +128,65 @@ cp include/hydra.h "$stage/include/"
 # static build for a reason that has nothing to do with it.
 echo "==> building libhydra.a for $target ($profile)"
 link_log="$stage/native-static-libs.txt"
+
+build_static_lib() {
+    set +e
+    static_out="$("$CARGO" rustc --locked -p hya-ffi --target "$target" --profile "$profile" \
+        --crate-type staticlib -- --print native-static-libs 2>&1)"
+    static_rc=$?
+    set -e
+    if [ $static_rc -ne 0 ]; then
+        echo "$static_out" >&2
+        echo "error: static build failed for $target" >&2
+        return $static_rc
+    fi
+    # `.*` rather than `^note: ` because the note is a rustc diagnostic: how
+    # cargo decorates it is not part of any promise.
+    printf '%s\n' "$static_out" | sed -n 's/.*native-static-libs: *//p' | tail -1
+}
+
+native_libs="$(build_static_lib)" || exit $?
+
+if [ -z "$native_libs" ]; then
+    # rustc prints the note while it links, so a build cargo considers fresh -
+    # a warm CI cache, a second run in the same tree - can answer with nothing
+    # at all. Make the unit stale and ask again; only this crate recompiles.
+    touch "$root/crates/hydra-ffi/src/lib.rs"
+    native_libs="$(build_static_lib)" || exit $?
+fi
+
+guessed=0
+if [ -z "$native_libs" ]; then
+    # Last resort, and the reason it is worth shipping one: an empty list in
+    # this file means a consumer's link dies on `exp` and `pow` from f64's
+    # methods, in an error that says nothing about libhydra. A guess that is
+    # usually right beats that.
+    guessed=1
+    case "$target" in
+        *-apple-*)      native_libs="-liconv -lSystem -lc -lm" ;;
+        *-linux-*)      native_libs="-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc" ;;
+        *-windows-msvc) native_libs="bcrypt.lib advapi32.lib kernel32.lib ntdll.lib userenv.lib ws2_32.lib dbghelp.lib" ;;
+        *-windows-gnu)  native_libs="-lkernel32 -ladvapi32 -lbcrypt -lntdll -luserenv -lws2_32 -ldbghelp" ;;
+        *)              native_libs="-lm -lpthread -ldl" ;;
+    esac
+    echo "    warning: rustc reported no native-static-libs; recording the" \
+         "$target defaults" >&2
+fi
+
 {
     echo "# System libraries required to link libhydra.a into a program."
     echo "# Target: $target"
-    echo "# Reported by rustc at build time, not guessed per platform."
+    if [ "$guessed" = 1 ]; then
+        echo "# rustc reported none at build time; these are the defaults for"
+        echo "# this target. Verify with:"
+        echo "#   cargo rustc -p hya-ffi --target $target --crate-type staticlib \\"
+        echo "#       -- --print native-static-libs"
+    else
+        echo "# Reported by rustc at build time, not guessed per platform."
+    fi
     echo
+    echo "$native_libs"
 } > "$link_log"
-
-set +e
-static_out="$("$CARGO" rustc --locked -p hya-ffi --target "$target" --profile "$profile" \
-    --crate-type staticlib -- --print native-static-libs 2>&1)"
-static_rc=$?
-set -e
-if [ $static_rc -ne 0 ]; then
-    echo "$static_out" >&2
-    echo "error: static build failed for $target" >&2
-    exit $static_rc
-fi
-printf '%s\n' "$static_out" | sed -n 's/^note: native-static-libs: *//p' | tail -1 >> "$link_log"
 
 if [ "$shared" = 1 ]; then
     echo "==> building the shared library for $target"

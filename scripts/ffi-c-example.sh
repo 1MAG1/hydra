@@ -12,6 +12,11 @@
 #
 #   scripts/ffi-c-example.sh              build and run the smoke test
 #   scripts/ffi-c-example.sh --profile release   optimised build
+#
+# Runs against a Unix cc/c++ and against MSVC's cl, so the Windows leg of CI
+# uses this script too rather than a second copy of it written in PowerShell.
+# cl must be on PATH - a Visual Studio developer shell, or a CI step that sets
+# one up.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,7 +27,14 @@ if [ "${1:-}" = "--profile" ] && [ "${2:-}" = "release" ]; then
     cargo_profile=(--profile release)
 fi
 
-CC="${CC:-cc}"
+# The compiler for the archive is whatever built the archive, so ask rustc
+# rather than uname: a msys/mingw bash on Windows still drives an MSVC toolchain.
+host="$(rustc -vV | sed -n 's/^host: //p')"
+case "$host" in
+    *-pc-windows-msvc) toolchain="msvc" ;;
+    *)                 toolchain="unix" ;;
+esac
+
 out="$root/target/ffi-c"
 mkdir -p "$out"
 
@@ -31,55 +43,154 @@ echo "==> building the static library"
 # staticlib needs are discovered, rather than guessed per platform. Guessing is
 # what makes an FFI package fail to link on somebody else's machine.
 link_log="$out/native-static-libs.txt"
-cargo rustc "${cargo_profile[@]}" -p hya-ffi --crate-type staticlib \
-    -- --print native-static-libs 2>&1 | tee "$link_log" >/dev/null || {
-        cat "$link_log" >&2
+build_static_lib() {
+    cargo rustc "${cargo_profile[@]}" -p hya-ffi --crate-type staticlib \
+        -- --print native-static-libs >"$link_log" 2>&1 || {
+            cat "$link_log" >&2
+            exit 1
+        }
+}
+# `.*` rather than `^note: ` because the note is a rustc diagnostic: how cargo
+# decorates it is not part of any promise.
+read_native_libs() {
+    sed -n 's/.*native-static-libs: *//p' "$link_log" | tail -1
+}
+
+build_static_lib
+native_libs="$(read_native_libs)"
+
+if [ -z "$native_libs" ]; then
+    # rustc prints the note while it links, so a build that cargo considers
+    # fresh can answer with nothing at all. Make the unit stale and ask again -
+    # only this crate recompiles, its dependencies stay cached.
+    touch "$root/crates/hydra-ffi/src/lib.rs"
+    build_static_lib
+    native_libs="$(read_native_libs)"
+fi
+
+if [ -z "$native_libs" ]; then
+    # Last resort, and the reason it is worth having: without -lm the link dies
+    # on `exp` and `pow` from f64's methods, several hundred lines into an error
+    # that says nothing about this script. A guess that is usually right beats a
+    # failure nobody can read.
+    case "$host" in
+        *-apple-*)      native_libs="-liconv -lSystem -lc -lm" ;;
+        *-linux-*)      native_libs="-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc" ;;
+        *-windows-msvc) native_libs="bcrypt.lib advapi32.lib kernel32.lib
+                                     ntdll.lib userenv.lib ws2_32.lib
+                                     dbghelp.lib" ;;
+        *)              native_libs="-lm -lpthread -ldl" ;;
+    esac
+    echo "    warning: rustc reported no native-static-libs;" \
+         "using the $host defaults" >&2
+fi
+
+if [ "$toolchain" = "msvc" ]; then
+    lib="$root/target/$profile/hydra.lib"
+else
+    lib="$root/target/$profile/libhydra.a"
+fi
+[ -f "$lib" ] || { echo "error: $lib was not produced" >&2; exit 1; }
+
+echo "    $lib"
+echo "    system libraries: $native_libs"
+
+if [ "$toolchain" = "msvc" ]; then
+    # msys/mingw bash rewrites arguments that look like POSIX paths, which turns
+    # `/defaultlib:libcmt` into a directory list and every MSVC flag into
+    # nonsense. Switch the rewriting off and convert the paths this script owns
+    # by hand; MSVC flags are spelled with `-` so they are never candidates.
+    export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+    winpath() {
+        if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
+    }
+
+    CC="${CC:-cl}"
+    command -v "$CC" >/dev/null 2>&1 || {
+        echo "error: $CC is not on PATH - run this from a Visual Studio" \
+             "developer shell" >&2
         exit 1
     }
 
-lib="$root/target/$profile/libhydra.a"
-[ -f "$lib" ] || { echo "error: $lib was not produced" >&2; exit 1; }
+    # -MT, not the default -MD: .cargo/config.toml builds the Windows targets
+    # with +crt-static, so rustc asks for libcmt and a C object compiled against
+    # the DLL runtime would drag in a second, conflicting CRT.
+    cflags=(-nologo -W3 -WX -MT -D_CRT_SECURE_NO_WARNINGS
+            "-I$(winpath "$root/include")")
 
-native_libs="$(sed -n 's/^note: native-static-libs: *//p' "$link_log" | tail -1)"
-echo "    $lib"
-echo "    system libraries: ${native_libs:-none reported}"
+    for prog in abi_smoke download; do
+        echo "==> compiling $prog.c"
+        # shellcheck disable=SC2086
+        "$CC" "${cflags[@]}" "-Fe:$(winpath "$out/$prog.exe")" \
+            "-Fo:$(winpath "$out/$prog.obj")" \
+            "$(winpath "$root/examples/ffi-c/$prog.c")" \
+            -link "$(winpath "$lib")" $native_libs
+    done
 
-# Strict C: the header is a published artifact and must compile cleanly for
-# somebody whose build is stricter than ours.
-cflags=(-std=c11 -Wall -Wextra -Wpedantic -Werror -I "$root/include")
-
-for prog in abi_smoke download; do
-    echo "==> compiling $prog.c"
-    # shellcheck disable=SC2086
-    "$CC" "${cflags[@]}" -o "$out/$prog" "$root/examples/ffi-c/$prog.c" \
-        "$lib" $native_libs
-done
-
-# The header is a published artifact, so it has to survive every dialect a
-# consumer might compile it in - not just the one this project happens to use.
-# Compiled only, not linked: these assert about types.
-echo "==> checking the header across C dialects"
-for std in c11 c17; do
-    "$CC" "-std=$std" -Wall -Wextra -Wpedantic -Werror -I "$root/include" \
-        -c "$root/examples/ffi-c/header_c.c" -o "$out/header_$std.o"
-    echo "    $std ok"
-done
-
-if command -v "${CXX:-c++}" >/dev/null 2>&1; then
-    echo "==> checking the header across C++ dialects"
-    for std in c++11 c++17; do
-        "${CXX:-c++}" "-std=$std" -Wall -Wextra -Wpedantic -Werror \
-            -I "$root/include" -c "$root/examples/ffi-c/header_cxx.cpp" \
-            -o "$out/header_$std.o"
+    # The header is a published artifact, so it has to survive every dialect a
+    # consumer might compile it in - not just the one this project happens to
+    # use. Compiled only, not linked: these assert about types.
+    echo "==> checking the header across C dialects"
+    for std in c11 c17; do
+        "$CC" "${cflags[@]}" "-std:$std" -c \
+            "$(winpath "$root/examples/ffi-c/header_c.c")" \
+            "-Fo:$(winpath "$out/header_$std.obj")"
         echo "    $std ok"
     done
+
+    # MSVC has no -std:c++11; C++14 is its floor.
+    echo "==> checking the header across C++ dialects"
+    for std in c++14 c++17; do
+        "${CXX:-$CC}" "${cflags[@]}" "-std:$std" -EHsc -c \
+            "$(winpath "$root/examples/ffi-c/header_cxx.cpp")" \
+            "-Fo:$(winpath "$out/header_$std.obj")"
+        echo "    $std ok"
+    done
+
+    smoke="$out/abi_smoke.exe"
+    client="$out/download.exe"
 else
-    echo "==> skipping the C++ header check (no C++ compiler)"
+    CC="${CC:-cc}"
+    # Strict C: the header is a published artifact and must compile cleanly for
+    # somebody whose build is stricter than ours.
+    cflags=(-std=c11 -Wall -Wextra -Wpedantic -Werror -I "$root/include")
+
+    for prog in abi_smoke download; do
+        echo "==> compiling $prog.c"
+        # shellcheck disable=SC2086
+        "$CC" "${cflags[@]}" -o "$out/$prog" "$root/examples/ffi-c/$prog.c" \
+            "$lib" $native_libs
+    done
+
+    # The header is a published artifact, so it has to survive every dialect a
+    # consumer might compile it in - not just the one this project happens to
+    # use. Compiled only, not linked: these assert about types.
+    echo "==> checking the header across C dialects"
+    for std in c11 c17; do
+        "$CC" "-std=$std" -Wall -Wextra -Wpedantic -Werror -I "$root/include" \
+            -c "$root/examples/ffi-c/header_c.c" -o "$out/header_$std.o"
+        echo "    $std ok"
+    done
+
+    if command -v "${CXX:-c++}" >/dev/null 2>&1; then
+        echo "==> checking the header across C++ dialects"
+        for std in c++11 c++17; do
+            "${CXX:-c++}" "-std=$std" -Wall -Wextra -Wpedantic -Werror \
+                -I "$root/include" -c "$root/examples/ffi-c/header_cxx.cpp" \
+                -o "$out/header_$std.o"
+            echo "    $std ok"
+        done
+    else
+        echo "==> skipping the C++ header check (no C++ compiler)"
+    fi
+
+    smoke="$out/abi_smoke"
+    client="$out/download"
 fi
 
 echo "==> running the ABI smoke test"
-"$out/abi_smoke"
+"$smoke"
 
 echo
-echo "built $out/download - try:"
-echo "    $out/download https://example.com/file.iso ./file.iso"
+echo "built $client - try:"
+echo "    $client https://example.com/file.iso ./file.iso"

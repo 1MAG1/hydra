@@ -360,6 +360,15 @@ jobs:
         shell: bash
         run: scripts/build-ffi.sh --target ${{ matrix.target }} --out dist
 
+      # The Windows runners ship MSVC but do not put cl.exe on PATH, and the
+      # conformance test below needs a C compiler. arm64 for the Windows-on-ARM
+      # runner, x64 for the other one.
+      - name: Set up the MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ startsWith(matrix.target, 'aarch64') && 'arm64' || 'x64' }}
+
       # The check no Rust test can perform: that a C compiler accepts the
       # header, that both sides agree on struct layout, and that every symbol
       # the header promises is really in the archive. Native targets only —

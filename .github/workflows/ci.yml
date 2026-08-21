@@ -115,27 +115,23 @@ jobs:
       - name: Run the FFI test suite
         run: cargo test -p hya-ffi --all-targets
 
+      # The Windows runners ship MSVC but do not put cl.exe on PATH, so a C
+      # compiler has to be arranged for before anything can be compiled.
+      - name: Set up the MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
       # The checks Rust tests structurally cannot perform: that a C compiler and
       # a C++ compiler both accept the header, that all three sides agree on
       # struct layout, that a second #include is harmless, and that every symbol
       # the header promises is really in the archive.
-      - name: Build and run the C ABI smoke test (Unix)
-        if: runner.os != 'Windows'
+      #
+      # One script on all three platforms - it drives cl where cl is the
+      # toolchain. A second copy of it in PowerShell here would be a copy that
+      # nobody can run locally and that drifts from the real one.
+      - name: Build and run the C ABI smoke test
+        shell: bash
         run: scripts/ffi-c-example.sh
-
-      - name: Build and run the C ABI smoke test (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          cargo rustc -p hya-ffi --crate-type staticlib -- --print native-static-libs 2>&1 |
-            Tee-Object -FilePath native-libs.txt
-          $libs = (Select-String -Path native-libs.txt -Pattern 'native-static-libs: (.*)').Matches.Groups[1].Value
-          cl /nologo /W3 /WX /I include examples\ffi-c\abi_smoke.c `
-             target\debug\hydra.lib $libs.Split(' ') /Fe:abi_smoke.exe
-          .\abi_smoke.exe
-          # The header on its own, as C and as C++, each including it twice.
-          cl /nologo /W3 /WX /I include /c examples\ffi-c\header_c.c /Fo:header_c.obj
-          cl /nologo /W3 /WX /EHsc /I include /c examples\ffi-c\header_cxx.cpp /Fo:header_cxx.obj
 
   coverage:
     name: Code Coverage
