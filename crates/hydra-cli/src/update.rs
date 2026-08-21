@@ -24,8 +24,7 @@ pub async fn run(json: bool) -> ExitCode {
     };
     let latest = rel.version().to_string();
     let newer = hya_updater::is_newer(&latest, current);
-    let asset_name = hya_updater::cli_asset_name(&latest);
-    let asset = rel.asset(&asset_name);
+    let asset = rel.cli_asset();
 
     if json {
         let out = serde_json::json!({

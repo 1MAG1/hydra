@@ -59,11 +59,12 @@ pub async fn check(beta: bool) -> Result<Option<UpdateInfo>, String> {
     if !hya_updater::is_newer(rel.version(), env!("CARGO_PKG_VERSION")) {
         return Ok(None);
     }
-    let asset_name = hya_updater::gui_asset_name(rel.version());
-    let Some(asset) = rel.asset(&asset_name) else {
+    let Some(asset) = rel.gui_asset() else {
         crate::log::warn(&format!(
-            "update {} available but has no asset {asset_name}",
-            rel.version()
+            "update {} available but has no {}-{} bundle",
+            rel.version(),
+            hya_updater::os_tag(),
+            hya_updater::arch_tag()
         ));
         return Ok(None);
     };

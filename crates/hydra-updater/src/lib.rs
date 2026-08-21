@@ -85,6 +85,32 @@ impl Release {
     pub fn asset(&self, name: &str) -> Option<&ReleaseAsset> {
         self.assets.iter().find(|a| a.name == name)
     }
+
+    /// The GUI bundle for this machine, `None` when the release ships none.
+    pub fn gui_asset(&self) -> Option<&ReleaseAsset> {
+        self.asset_for(gui_asset_name)
+    }
+
+    /// The standalone CLI archive for this machine.
+    pub fn cli_asset(&self) -> Option<&ReleaseAsset> {
+        self.asset_for(cli_asset_name)
+    }
+
+    /// Asset lookup across both spellings of the release version: the tag's
+    /// first, then the tag without its pre-release suffix. The pipeline
+    /// names assets from the workspace manifest version, which may stay on
+    /// the plain version while a candidate is cut from a `v0.3.2-rc` tag
+    /// (.github/workflows/release.yml accepts either spelling) — that
+    /// release ships `hydra-0.3.2-…` assets, which the tag version alone
+    /// never matches.
+    fn asset_for(&self, name_of: fn(&str) -> String) -> Option<&ReleaseAsset> {
+        let v = self.version();
+        if let Some(a) = self.asset(&name_of(v)) {
+            return Some(a);
+        }
+        let core = version_core(v);
+        (core != v).then(|| self.asset(&name_of(core))).flatten()
+    }
 }
 
 /// `latest` is strictly newer than `current`, comparing dotted numeric parts
@@ -153,6 +179,14 @@ pub fn archive_ext() -> &'static str {
     } else {
         "tar.gz"
     }
+}
+
+/// The version without its pre-release or build suffix (`0.3.2-rc` →
+/// `0.3.2`), the spelling the release pipeline names assets with whenever
+/// the workspace manifest stays on the plain version.
+pub fn version_core(version: &str) -> &str {
+    let v = version.trim().trim_start_matches('v');
+    v.split(['-', '+']).next().unwrap_or(v)
 }
 
 /// Release asset holding the GUI bundle for this machine:
@@ -502,6 +536,53 @@ mod tests {
             assert!(n.contains(os_tag()) && n.contains(arch_tag()));
             assert!(n.ends_with(archive_ext()));
         }
+    }
+
+    #[test]
+    fn rc_tag_finds_assets_named_from_the_manifest_version() {
+        // The real pipeline: tag `v0.3.2-rc`, manifest still `0.3.2`, so
+        // every asset is spelled without the suffix. Missing it here is
+        // what made the beta channel report "you are on the latest
+        // version" while an rc was published.
+        let mut r = rel("v0.3.2-rc", true);
+        for name in [gui_asset_name("0.3.2"), cli_asset_name("0.3.2")] {
+            r.assets.push(ReleaseAsset {
+                name,
+                browser_download_url: String::new(),
+                size: 0,
+            });
+        }
+        assert_eq!(
+            r.gui_asset().map(|a| a.name.as_str()),
+            Some(gui_asset_name("0.3.2").as_str())
+        );
+        assert_eq!(
+            r.cli_asset().map(|a| a.name.as_str()),
+            Some(cli_asset_name("0.3.2").as_str())
+        );
+
+        // A manifest that does carry the suffix keeps working, and a
+        // release without an asset for this machine still resolves to None.
+        let mut suffixed = rel("v0.3.2-rc", true);
+        suffixed.assets.push(ReleaseAsset {
+            name: gui_asset_name("0.3.2-rc"),
+            browser_download_url: String::new(),
+            size: 0,
+        });
+        assert_eq!(
+            suffixed.gui_asset().map(|a| a.name.as_str()),
+            Some(gui_asset_name("0.3.2-rc").as_str())
+        );
+        assert!(suffixed.cli_asset().is_none());
+        assert!(rel("v0.3.2", false).gui_asset().is_none());
+    }
+
+    #[test]
+    fn version_core_strips_suffixes() {
+        assert_eq!(version_core("v0.3.2-rc"), "0.3.2");
+        assert_eq!(version_core("0.3.2-rc.2"), "0.3.2");
+        assert_eq!(version_core("0.3.2+build7"), "0.3.2");
+        assert_eq!(version_core("0.3.2"), "0.3.2");
     }
 
     #[test]

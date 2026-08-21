@@ -62,9 +62,14 @@ if (-not $Version) {
 }
 $Ver = $Version.TrimStart("v")
 
-if ($Cli) { $Name = "hydra-cli-$Ver-windows-$Arch" }
-else      { $Name = "hydra-$Ver-windows-$Arch" }
-$Url = "https://github.com/$Repo/releases/download/$Version/$Name.zip"
+# Assets are named from the workspace manifest version, which may stay on the
+# plain release version while the tag carries a pre-release suffix: the
+# v0.3.2-rc release ships hydra-0.3.2-* files. Try the tag spelling first, then
+# the tag without its suffix.
+$Core = $Ver -replace '-.*$', ''
+$AssetPrefix = if ($Cli) { "hydra-cli" } else { "hydra" }
+$Candidates = if ($Core -ne $Ver) { @($Ver, $Core) } else { @($Ver) }
+$DlBase = "https://github.com/$Repo/releases/download/$Version"
 
 $Mode = if ($Cli) { "cli" } else { "gui" }
 Write-Host "hydra $Version ($Mode) -> $InstallDir  [windows/$Arch]"
@@ -72,9 +77,22 @@ Write-Host "hydra $Version ($Mode) -> $InstallDir  [windows/$Arch]"
 $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("hydra-install-" + [Guid]::NewGuid())
 New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
 try {
-  $Zip = Join-Path $Tmp "$Name.zip"
-  Write-Host "downloading $Url"
-  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Zip
+  $Name = $null
+  $Zip = $null
+  foreach ($Cand in $Candidates) {
+    $Try = "$AssetPrefix-$Cand-windows-$Arch"
+    $Dest = Join-Path $Tmp "$Try.zip"
+    Write-Host "downloading $DlBase/$Try.zip"
+    try {
+      Invoke-WebRequest -UseBasicParsing -Uri "$DlBase/$Try.zip" -OutFile $Dest
+      $Name = $Try; $Zip = $Dest; break
+    } catch {
+      Remove-Item $Dest -Force -ErrorAction SilentlyContinue
+      # Missing the first spelling is expected on a pre-release tag; only the
+      # last candidate's failure is fatal.
+      if ($Cand -eq $Candidates[-1]) { throw }
+    }
+  }
   Expand-Archive -Path $Zip -DestinationPath $Tmp
   $Src = Join-Path $Tmp $Name
 

@@ -105,13 +105,22 @@ if [ -z "$VERSION" ]; then
   fi
 fi
 VER="${VERSION#v}"
-
+# Assets are named from the workspace manifest version, which may stay on the
+# plain release version while the tag carries a pre-release suffix: the
+# v0.3.2-rc release ships hydra-0.3.2-* files. Try the tag spelling first, then
+# the tag without its suffix.
+CORE="${VER%%-*}"
 if [ "$MODE" = cli ]; then
-  NAME="hydra-cli-${VER}-${OS}-${ARCH}"
+  ASSET_PREFIX="hydra-cli"
 else
-  NAME="hydra-${VER}-${OS}-${ARCH}"
+  ASSET_PREFIX="hydra"
 fi
-URL="https://github.com/${REPO}/releases/download/${VERSION}/${NAME}.tar.gz"
+if [ "$CORE" != "$VER" ]; then
+  CANDIDATES="$VER $CORE"
+else
+  CANDIDATES="$VER"
+fi
+DL_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 
 # Prefix: /usr/local when writable (or sudo is available), else ~/.local.
 SUDO=""
@@ -134,8 +143,20 @@ echo "hydra ${VERSION} (${MODE}) -> ${PREFIX}  [${OS}/${ARCH}]"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-echo "downloading ${URL}"
-fetch "$URL" "$TMP/${NAME}.tar.gz"
+NAME=""
+for CAND in $CANDIDATES; do
+  TRY="${ASSET_PREFIX}-${CAND}-${OS}-${ARCH}"
+  echo "downloading ${DL_BASE}/${TRY}.tar.gz"
+  # Missing the first spelling is expected on a pre-release tag, so only the
+  # last candidate's failure is worth reporting.
+  if [ "$CAND" = "$CORE" ]; then
+    if fetch "${DL_BASE}/${TRY}.tar.gz" "$TMP/${TRY}.tar.gz"; then NAME="$TRY"; break; fi
+  elif fetch "${DL_BASE}/${TRY}.tar.gz" "$TMP/${TRY}.tar.gz" 2>/dev/null; then
+    NAME="$TRY"; break
+  fi
+  rm -f "$TMP/${TRY}.tar.gz"
+done
+[ -n "$NAME" ] || { echo "error: no ${MODE} archive for ${OS}/${ARCH} in release ${VERSION}" >&2; exit 1; }
 tar -xzf "$TMP/${NAME}.tar.gz" -C "$TMP"
 SRC="$TMP/$NAME"
 

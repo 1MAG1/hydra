@@ -152,7 +152,11 @@ fn main() {
     };
     let stable_assets = make_assets(version, cfg.archive_path.as_ref());
     let rc_assets: Vec<(String, Vec<u8>)> = match &cfg.rc_version {
-        Some(rc) => make_assets(rc, None),
+        // The pre-release's assets are named from the workspace manifest
+        // version, which the release pipeline leaves without the tag's
+        // `-rc` suffix (a `v0.3.2-rc` tag ships `hydra-0.3.2-…` files), so
+        // the mock rehearses the updater's fallback to that spelling.
+        Some(rc) => make_assets(hya_updater::version_core(rc), None),
         None => Vec::new(),
     };
 
