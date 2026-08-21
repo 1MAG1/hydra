@@ -23,7 +23,7 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 # and PKG file names still carry the full version.
 NUM_VERSION="${VERSION%%-*}"
 
-cargo build --release -p hya-gui -p hya-host -p hya-cli
+cargo build --release -p hya-gui -p hya-host -p hya-cli -p hya-updater
 
 # With CARGO_BUILD_TARGET set (CI cross-arch builds), cargo emits into
 # target/<triple>/release instead of target/release.
@@ -37,6 +37,9 @@ cp "$BIN/hydra-gui" "$APP/Contents/MacOS/Hydra Download Manager"
 # Contents/MacOS/hydra-host, and the CLI can be symlinked onto PATH.
 cp "$BIN/hydra-host" "$APP/Contents/MacOS/hydra-host"
 cp "$BIN/hydra" "$APP/Contents/MacOS/hydra"
+# The self-update finisher. It also has to BE in the bundle for the swap to
+# refresh it: hya_updater::apply only replaces files that already exist.
+cp "$BIN/hydra-updater" "$APP/Contents/MacOS/hydra-updater"
 
 # App icon from docs/logo.png
 ICONSET=$(mktemp -d)/hydra.iconset
@@ -67,6 +70,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>${NUM_VERSION}</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>hydra</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
 </dict>

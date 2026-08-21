@@ -290,6 +290,7 @@
   "These settings are unavailable when \"Show download complete dialog\" is turned on": "开启“显示下载完成对话框”时，这些设置不可用",
   "This address is already in the download list. What do you want to do?": "此地址已在下载列表中。你想怎么做？",
   "This copy of Hydra cannot update itself in place. Download the new installer and install it the way you installed this one.": "This copy of Hydra cannot update itself in place. Download the new installer and install it the way you installed this one.",
+  "Hydra is installed for all users; finishing the update will ask for your administrator password.": "Hydra is installed for all users; finishing the update will ask for your administrator password.",
   "Thursday": "星期四",
   "Time left": "剩余时间",
   "Too many redirects": "重定向次数过多",

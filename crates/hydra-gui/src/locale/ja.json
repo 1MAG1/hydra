@@ -290,6 +290,7 @@
   "These settings are unavailable when \"Show download complete dialog\" is turned on": "「ダウンロード完了ダイアログを表示」がオンの場合はこれらの設定は利用できません",
   "This address is already in the download list. What do you want to do?": "このアドレスは既にダウンロードリストにあります。どうしますか？",
   "This copy of Hydra cannot update itself in place. Download the new installer and install it the way you installed this one.": "This copy of Hydra cannot update itself in place. Download the new installer and install it the way you installed this one.",
+  "Hydra is installed for all users; finishing the update will ask for your administrator password.": "Hydra is installed for all users; finishing the update will ask for your administrator password.",
   "Thursday": "木曜日",
   "Time left": "残り時間",
   "Too many redirects": "リダイレクトが多すぎます",

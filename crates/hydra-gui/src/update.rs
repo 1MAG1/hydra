@@ -28,10 +28,14 @@ pub struct UpdateInfo {
     pub size: u64,
     /// `SHA256SUMS.txt` asset, when the release publishes one.
     pub sums_url: Option<String>,
-    /// Whether Hydra can replace its own files. False for a packaged
-    /// install (`/usr/bin` from a deb or rpm): the dialog then offers the
-    /// distro package instead of an in-place update.
+    /// Whether Hydra can install this update itself. False for a packaged
+    /// install (`/usr/bin` from a deb or rpm, a `.pkg` in `/Applications`):
+    /// the dialog then offers the installer instead.
     pub in_place: bool,
+    /// Whether finishing the update will ask for an administrator password
+    /// — a root-owned install (a tarball unpacked into `/usr/local` with
+    /// sudo) that Hydra may still replace, once the user authorises it.
+    pub needs_auth: bool,
     /// The `.deb`/`.rpm` for this machine, when the install is packaged and
     /// the release ships one: (file name, download URL, size).
     pub package: Option<(String, String, u64)>,
@@ -75,26 +79,39 @@ pub async fn check(beta: bool) -> Result<Option<UpdateInfo>, String> {
         ));
         return Ok(None);
     };
-    // Can the finisher actually rewrite this install? A deb or rpm owns
-    // /usr/bin as root and a `.pkg` owns /Applications, so the swap is
-    // refused; a macOS bundle is worse, because the swap half-succeeds —
-    // the archive's `hydra-gui` is not the bundle's `Hydra Download
-    // Manager`, so only the CLI gets replaced and the same old app comes
-    // back. Better to say so now than to download 11 MB first.
+    // Can the finisher actually rewrite this install? Everything Hydra put
+    // there itself — an unpacked archive, a macOS `.app`, a per-user
+    // Windows install — it can replace; a root-owned copy takes an
+    // authorisation prompt; only a package manager's files (`/usr/bin` from
+    // a deb or rpm, a `.pkg` receipt in `/Applications`) are off limits,
+    // because dpkg's database has to keep describing what is on disk.
+    // Better to say so now than to download 11 MB first.
     let install_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(PathBuf::from));
-    let in_place = install_dir
+    let method = install_dir
         .as_deref()
-        .is_some_and(hya_updater::can_update_in_place);
+        .map(hya_updater::update_method)
+        .unwrap_or(hya_updater::UpdateMethod::Package);
+    let in_place = method.is_self_update();
+    let where_ = install_dir
+        .as_deref()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| "the install directory".into());
     if !in_place {
         crate::log::info(&format!(
-            "update {} available but {} cannot be updated in place; offering the installer instead",
+            "update {} available but {where_} is owned by a package manager; \
+             offering the installer instead",
+            rel.version()
+        ));
+    } else {
+        crate::log::info(&format!(
+            "update {} available; {where_} updates {}",
             rel.version(),
-            install_dir
-                .as_deref()
-                .map(|d| d.display().to_string())
-                .unwrap_or_else(|| "the install directory".into())
+            match method {
+                hya_updater::UpdateMethod::Elevated => "in place, after authorisation",
+                _ => "in place",
+            }
         ));
     }
     let package = (!in_place)
@@ -112,6 +129,7 @@ pub async fn check(beta: bool) -> Result<Option<UpdateInfo>, String> {
             .asset("SHA256SUMS.txt")
             .map(|a| a.browser_download_url.clone()),
         in_place,
+        needs_auth: matches!(method, hya_updater::UpdateMethod::Elevated),
         package,
     }))
 }
@@ -217,6 +235,11 @@ async fn drive(
         .arg(&bundle)
         .arg("--install-dir")
         .arg(&install_dir)
+        // What the new files are: a macOS `.app` carries its version in
+        // Info.plist, which nothing in the archive itself can tell the
+        // finisher.
+        .arg("--app-version")
+        .arg(&info.version)
         .arg("--relaunch")
         .arg(&exe);
     #[cfg(target_os = "windows")]

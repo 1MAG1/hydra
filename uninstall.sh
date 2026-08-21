@@ -8,11 +8,12 @@
 #   ... | bash -s -- --purge          # also delete config/state (~/.config/hydra)
 #   ... | bash -s -- --prefix ~/.local
 #
-# Removes everything install.sh created: hydra, hydra-gui, hydra-host from
-# <prefix>/bin, <prefix>/share/hydra, the desktop launcher, the autostart
-# login item, and the native-messaging manifests. Also removes the macOS
-# "Hydra Download Manager.app" if a DMG install is found. Config and state
-# in ~/.config/hydra are kept unless --purge is given.
+# Removes everything install.sh created: hydra, hydra-gui, hydra-host and
+# hydra-updater from <prefix>/bin (binaries or symlinks into the app bundle),
+# <prefix>/share/hydra, the desktop launcher and icons, the autostart login
+# item, and the native-messaging manifests. Also removes the macOS
+# "Hydra Download Manager.app" from /Applications and ~/Applications. Config
+# and state in ~/.config/hydra are kept unless --purge is given.
 
 set -euo pipefail
 
@@ -89,7 +90,16 @@ for prefix in "${PREFIXES[@]}"; do
   rm_path "$prefix/bin/hydra"
   rm_path "$prefix/bin/hydra-gui"
   rm_path "$prefix/bin/hydra-host"
+  rm_path "$prefix/bin/hydra-updater"
   rm_path "$prefix/share/hydra"
+  # System-wide desktop integration, when install.sh had write access to the
+  # prefix (the per-user copies are handled further down).
+  if [ "$OS" = linux ]; then
+    rm_path "$prefix/share/applications/hydra.desktop"
+    for size in 16 24 32 48 64 128 256 512; do
+      rm_path "$prefix/share/icons/hicolor/${size}x${size}/apps/hydra.png"
+    done
+  fi
   for m in "${MAN_PAGES[@]}"; do
     rm_path "$prefix/share/man/man1/$m"
     rm_path "$prefix/share/man/man1/$m.gz"
@@ -98,6 +108,8 @@ done
 
 if [ "$OS" = macos ]; then
   rm_path "/Applications/Hydra Download Manager.app"
+  # install.sh --app-dir, and its fallback when /Applications is not writable.
+  rm_path "$HOME/Applications/Hydra Download Manager.app"
   # .pkg installs: bundled extensions + the installer receipt.
   rm_path "/Library/Application Support/Hydra"
   if pkgutil --pkg-info io.github.ja7ad.hydra >/dev/null 2>&1; then
@@ -112,7 +124,10 @@ if [ "$OS" = macos ]; then
 else
   rm_path "$HOME/.local/share/applications/hydra.desktop"
   rm_path "$HOME/.config/autostart/hydra.desktop"
-  rm_path "$HOME/.local/share/icons/hicolor/256x256/apps/hydra.png"
+  # install.sh renders the logo at every hicolor size it can.
+  for size in 16 24 32 48 64 128 256 512; do
+    rm_path "$HOME/.local/share/icons/hicolor/${size}x${size}/apps/hydra.png"
+  done
 fi
 
 # Native-messaging manifests (per-user; mirrors install-native-host.sh).

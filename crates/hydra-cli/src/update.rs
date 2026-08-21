@@ -47,8 +47,8 @@ pub async fn run(json: bool, beta: bool) -> ExitCode {
                 "url": a.browser_download_url,
                 "size": a.size,
             })),
-            // The deb/rpm for this machine, when it is a packaged system.
-            "package": rel.package_asset().map(|a| serde_json::json!({
+            // The deb/rpm for this machine, when a package manager owns it.
+            "package": package_managed().then(|| rel.package_asset()).flatten().map(|a| serde_json::json!({
                 "name": a.name,
                 "url": a.browser_download_url,
                 "size": a.size,
@@ -87,10 +87,12 @@ pub async fn run(json: bool, beta: bool) -> ExitCode {
     if !rel.html_url.is_empty() {
         println!("Release page: {}", rel.html_url);
     }
-    // On a packaged system the archive is not what the user wants: the deb
-    // or rpm is, and its package manager owns /usr/bin either way.
-    if let Some(pkg) = rel.package_asset() {
-        println!("Package: {}", pkg.browser_download_url);
+    // When a package manager owns this copy, the archive is not what the
+    // user wants: the deb or rpm is, and only it may rewrite /usr/bin.
+    if package_managed() {
+        if let Some(pkg) = rel.package_asset() {
+            println!("Package: {}", pkg.browser_download_url);
+        }
     }
     match asset {
         Some(a) => println!(
@@ -106,4 +108,14 @@ pub async fn run(json: bool, beta: bool) -> ExitCode {
         ),
     }
     ExitCode::SUCCESS
+}
+
+/// Whether a package manager owns this binary — a deb or rpm in `/usr/bin`,
+/// a `.pkg` in `/Applications`. A tarball or Homebrew install is not one,
+/// even though `dpkg` exists on the same machine.
+fn package_managed() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .is_some_and(|dir| !hya_updater::update_method(&dir).is_self_update())
 }

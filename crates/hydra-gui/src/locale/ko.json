@@ -290,6 +290,7 @@
   "These settings are unavailable when \"Show download complete dialog\" is turned on": "\"다운로드 완료 대화상자 표시\"가 켜져 있으면 이 설정을 사용할 수 없습니다",
   "This address is already in the download list. What do you want to do?": "이 주소는 이미 다운로드 목록에 있습니다. 어떻게 하시겠습니까?",
   "This copy of Hydra cannot update itself in place. Download the new installer and install it the way you installed this one.": "This copy of Hydra cannot update itself in place. Download the new installer and install it the way you installed this one.",
+  "Hydra is installed for all users; finishing the update will ask for your administrator password.": "Hydra is installed for all users; finishing the update will ask for your administrator password.",
   "Thursday": "목요일",
   "Time left": "남은 시간",
   "Too many redirects": "리디렉션이 너무 많습니다",
