@@ -10,6 +10,11 @@
 # What the packages install:
 #   /usr/bin/hydra, /usr/bin/hydra-gui, /usr/bin/hydra-host
 #   /usr/share/applications/hydra.desktop            desktop/menu entry
+#       The basename must stay "hydra": that is the app id hydra-gui sets on
+#       its windows (Wayland app_id / X11 WM_CLASS, see hydra-gui/src/app.rs),
+#       and it is how the shell matches a running window to this entry for the
+#       dock, the switcher and the process list. StartupWMClass repeats it for
+#       desktops that only consult that key.
 #   /usr/share/icons/hicolor/<N>x<N>/apps/hydra.png  logo, from docs/logo.png
 #   /etc/xdg/autostart/hydra.desktop                 start minimized at login;
 #       the in-app "Launch Hydra on startup" toggle writes the same basename
@@ -139,7 +144,7 @@ Exec=hydra-gui
 Icon=hydra
 Terminal=false
 Categories=Network;FileTransfer;
-StartupWMClass=hydra-gui
+StartupWMClass=hydra
 EOF
 
   # Start minimized (to tray) at login. Same basename as the per-user entry

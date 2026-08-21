@@ -112,6 +112,7 @@ if [ "$OS" = macos ]; then
 else
   rm_path "$HOME/.local/share/applications/hydra.desktop"
   rm_path "$HOME/.config/autostart/hydra.desktop"
+  rm_path "$HOME/.local/share/icons/hicolor/256x256/apps/hydra.png"
 fi
 
 # Native-messaging manifests (per-user; mirrors install-native-host.sh).

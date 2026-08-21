@@ -167,19 +167,41 @@ if [ "$MODE" = gui ]; then
   echo "installed $SHARE_DIR (browser extensions + native-host installer)"
 
   if [ "$OS" = linux ]; then
+    # Logo into the per-user hicolor theme, so Icon=hydra below resolves.
+    # Without it the launcher, the dock and the switcher all draw the
+    # generic fallback icon.
+    if [ -f "$SRC/logo.png" ]; then
+      ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
+      mkdir -p "$ICON_DIR"
+      install -m 644 "$SRC/logo.png" "$ICON_DIR/hydra.png"
+      echo "installed $ICON_DIR/hydra.png"
+    fi
+
     # Desktop launcher (user-level; the tarball ships no packaging metadata).
+    # The basename must stay "hydra": hydra-gui sets that as its window app id
+    # (Wayland app_id / X11 WM_CLASS), which is how the shell matches a running
+    # window back to this entry to pick up Icon=. StartupWMClass repeats it for
+    # desktops that only consult that key.
     APPS_DIR="$HOME/.local/share/applications"
     mkdir -p "$APPS_DIR"
     cat > "$APPS_DIR/hydra.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Hydra Download Manager
+GenericName=Download Manager
+Comment=Multi-connection download accelerator
 Exec=$BIN_DIR/hydra-gui
+Icon=hydra
 Terminal=false
 Categories=Network;FileTransfer;
-StartupWMClass=hydra-gui
+StartupWMClass=hydra
 EOF
     echo "installed $APPS_DIR/hydra.desktop"
+
+    command -v update-desktop-database >/dev/null 2>&1 &&
+      update-desktop-database -q "$APPS_DIR" || true
+    command -v gtk-update-icon-cache >/dev/null 2>&1 &&
+      gtk-update-icon-cache -qt "$HOME/.local/share/icons/hicolor" || true
   fi
 
   # Register the native-messaging host for the current user. Manifests land
