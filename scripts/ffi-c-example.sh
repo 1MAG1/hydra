@@ -168,10 +168,25 @@ if [ "$toolchain" = "msvc" ]; then
         return 1
     }
 
+    # The same lookup, answering with a path this shell can read rather than
+    # one the linker can.
+    find_in_lib_posix() {
+        local name="$1" dir
+        for dir in ${lib_dirs_posix[@]+"${lib_dirs_posix[@]}"}; do
+            if [ -f "$dir/$name" ]; then
+                printf '%s' "$dir/$name"
+                return 0
+            fi
+        done
+        return 1
+    }
+
     # What a failed link could not tell us: where the linker came from, which
-    # directories it was given, and whether the static CRT is in any of them.
+    # directories it was given, whether the static CRT is in any of them, what
+    # that file looks like from here, and - the one answer no guess replaces -
+    # which paths the linker itself searched.
     report_link_failure() {
-        local dir
+        local dir crt rsp="${1:-}"
         echo "--- link failed; the state it ran in ---" >&2
         echo "  cl:   $(command -v "$CC")" >&2
         echo "  link: $LINK_EXE" >&2
@@ -186,6 +201,24 @@ if [ "$toolchain" = "msvc" ]; then
             fi
         done
         [ -n "${LIB:-}" ] || echo "    LIB is not set at all" >&2
+
+        if crt="$(find_in_lib_posix libcmt.lib)"; then
+            echo "  libcmt.lib as this shell sees it:" >&2
+            ls -l "$crt" >&2 || true
+            # An MS archive begins with `!<arch>`. Anything else means the file
+            # is a placeholder rather than a library, which would explain a
+            # linker that cannot open what bash can see.
+            echo "  its first bytes:" >&2
+            head -c 16 "$crt" | od -c | head -2 >&2 || true
+        fi
+
+        if [ -n "$rsp" ]; then
+            echo "  what the linker searched, from the linker (-verbose:lib):" >&2
+            cp "$rsp" "$rsp.verbose"
+            printf -- '/VERBOSE:LIB\n' >> "$rsp.verbose"
+            "$LINK_EXE" "@$(winpath "$rsp.verbose")" 2>&1 |
+                head -40 | sed 's/^/    /' >&2 || true
+        fi
     }
 
     normalise_lib_env
@@ -228,7 +261,7 @@ if [ "$toolchain" = "msvc" ]; then
     # -MT, not the default -MD: .cargo/config.toml builds the Windows targets
     # with +crt-static, so rustc asks for libcmt and a C object compiled against
     # the DLL runtime would drag in a second, conflicting CRT.
-    cflags=(-nologo -W3 -WX -MT -D_CRT_SECURE_NO_WARNINGS)
+    cflags=(/nologo /W3 /WX /MT /D_CRT_SECURE_NO_WARNINGS)
     include_dir="$(winpath "$root/include")"
 
     # Every MSVC tool is driven through a response file, and that is the whole
@@ -240,7 +273,7 @@ if [ "$toolchain" = "msvc" ]; then
     # the file is the tool's own to parse.
     cl_rsp_head() {
         printf -- '%s\n' "${cflags[@]}"
-        printf -- '-I"%s"\n' "$include_dir"
+        printf -- '/I"%s"\n' "$include_dir"
     }
 
     for prog in abi_smoke download; do
@@ -250,8 +283,8 @@ if [ "$toolchain" = "msvc" ]; then
             cl_rsp_head
             # -std:c11 explicitly: cl's default dialect for .c has no
             # _Static_assert, and the header asserts its whole layout with it.
-            printf -- '-std:c11\n-c\n'
-            printf -- '-Fo:"%s"\n' "$(winpath "$out/$prog.obj")"
+            printf -- '/std:c11\n/c\n'
+            printf -- '/Fo:"%s"\n' "$(winpath "$out/$prog.obj")"
             printf '"%s"\n' "$(winpath "$root/examples/ffi-c/$prog.c")"
         } > "$rsp"
         "$CC" "@$(winpath "$rsp")"
@@ -259,12 +292,12 @@ if [ "$toolchain" = "msvc" ]; then
         echo "==> linking $prog.exe"
         rsp="$out/$prog.link.rsp"
         {
-            printf -- '-nologo\n'
-            printf -- '-out:"%s"\n' "$(winpath "$out/$prog.exe")"
+            printf -- '/nologo\n'
+            printf -- '/OUT:"%s"\n' "$(winpath "$out/$prog.exe")"
             printf '"%s"\n' "$(winpath "$out/$prog.obj")"
             printf '"%s"\n' "$(winpath "$archive")"
             for dir in ${lib_dirs_win[@]+"${lib_dirs_win[@]}"}; do
-                printf -- '-LIBPATH:"%s"\n' "$dir"
+                printf -- '/LIBPATH:"%s"\n' "$dir"
             done
             for name in ${crt_libs[@]+"${crt_libs[@]}"}; do
                 printf '"%s"\n' "$name"
@@ -275,7 +308,7 @@ if [ "$toolchain" = "msvc" ]; then
         # Printed because every Windows failure here has come down to what the
         # linker was handed, which no error message from it ever says.
         sed 's/^/      /' "$rsp"
-        "$LINK_EXE" "@$(winpath "$rsp")" || { report_link_failure; exit 1; }
+        "$LINK_EXE" "@$(winpath "$rsp")" || { report_link_failure "$rsp"; exit 1; }
     done
 
     # The header is a published artifact, so it has to survive every dialect a
@@ -290,9 +323,9 @@ if [ "$toolchain" = "msvc" ]; then
         rsp="$out/header_$std.rsp"
         {
             cl_rsp_head
-            [ "$std" = default ] || printf -- '-std:%s\n' "$std"
-            printf -- '-c\n'
-            printf -- '-Fo:"%s"\n' "$(winpath "$out/header_$std.obj")"
+            [ "$std" = default ] || printf -- '/std:%s\n' "$std"
+            printf -- '/c\n'
+            printf -- '/Fo:"%s"\n' "$(winpath "$out/header_$std.obj")"
             printf '"%s"\n' "$(winpath "$root/examples/ffi-c/header_c.c")"
         } > "$rsp"
         "$CC" "@$(winpath "$rsp")"
@@ -305,8 +338,8 @@ if [ "$toolchain" = "msvc" ]; then
         rsp="$out/header_$std.rsp"
         {
             cl_rsp_head
-            printf -- '-std:%s\n-EHsc\n-c\n' "$std"
-            printf -- '-Fo:"%s"\n' "$(winpath "$out/header_$std.obj")"
+            printf -- '/std:%s\n/EHsc\n/c\n' "$std"
+            printf -- '/Fo:"%s"\n' "$(winpath "$out/header_$std.obj")"
             printf '"%s"\n' "$(winpath "$root/examples/ffi-c/header_cxx.cpp")"
         } > "$rsp"
         "${CXX:-$CC}" "@$(winpath "$rsp")"
