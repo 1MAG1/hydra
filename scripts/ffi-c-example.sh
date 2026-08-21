@@ -114,6 +114,30 @@ if [ "$toolchain" = "msvc" ]; then
         exit 1
     }
 
+    # No usable LIB: ask the Visual Studio installation itself rather
+    # than giving up. This is what a developer shell does, and it is why this script
+    # runs from a plain terminal too.
+    import_msvc_env() {
+        local vswhere vsdir vcvars arch line
+        vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+        [ -x "$vswhere" ] || return 1
+        vsdir="$("$vswhere" -latest -products '*' -property installationPath | tr -d '\r')"
+        [ -n "$vsdir" ] || return 1
+        vcvars="$(cygpath -u "$vsdir" 2>/dev/null || printf '%s' "$vsdir")"
+        vcvars="$vcvars/VC/Auxiliary/Build/vcvarsall.bat"
+        [ -f "$vcvars" ] || return 1
+        case "$host" in
+            aarch64-*) arch="arm64" ;;
+            *)         arch="x64" ;;
+        esac
+        while IFS= read -r line; do
+            line="${line%$'\r'}"
+            case "$line" in
+                LIB=*|INCLUDE=*|LIBPATH=*) export "${line%%=*}=${line#*=}" ;;
+            esac
+        done < <(cmd /c "\"$(winpath "$vcvars")\" $arch >NUL && set" 2>/dev/null)
+    }
+
     # cl needs INCLUDE to compile and link.exe needs LIB to link, and it is LIB
     # that goes missing under msys bash: Windows compares environment names
     # case-insensitively while bash does not, so a pre-existing `Lib` survives
@@ -203,11 +227,8 @@ if [ "$toolchain" = "msvc" ]; then
         [ -n "${LIB:-}" ] || echo "    LIB is not set at all" >&2
 
         if crt="$(find_in_lib_posix libcmt.lib)"; then
-            echo "  libcmt.lib as this shell sees it:" >&2
+            echo "  libcmt.lib as this shell sees it: $crt" >&2
             ls -l "$crt" >&2 || true
-            # An MS archive begins with `!<arch>`. Anything else means the file
-            # is a placeholder rather than a library, which would explain a
-            # linker that cannot open what bash can see.
             echo "  its first bytes:" >&2
             head -c 16 "$crt" | od -c | head -2 >&2 || true
         fi
@@ -232,32 +253,8 @@ if [ "$toolchain" = "msvc" ]; then
         normalise_lib_env
         split_lib
     fi
-
-    # rustc built the archive with +crt-static, so these four are what the link
-    # needs from the CRT. Each is named by its full path, and each is then
-    # struck off the default-library list.
-    #
-    # That second half is the fix for this platform, and /VERBOSE:LIB is what
-    # showed why. The linker opens these libraries happily when they are named
-    # in full - it says so - and then fails on a *by-name* request for
-    # `libcmt.lib` coming from the /DEFAULTLIB:LIBCMT directive that every
-    # /MT object carries. The library it cannot find is one it already has
-    # open. /NODEFAULTLIB drops the request: the symbols come from the copy on
-    # the command line, which is the same file.
-    crt_libs=()
-    crt_nodefault=()
-    for name in libcmt libvcruntime libucrt oldnames; do
-        if found="$(find_in_lib "$name.lib")"; then
-            crt_libs+=("$found")
-            # Both spellings: the directive in the object says LIBCMT and the
-            # file is libcmt.lib, and an unmatched /NODEFAULTLIB costs nothing.
-            crt_nodefault+=("/NODEFAULTLIB:$name.lib" "/NODEFAULTLIB:$name")
-        fi
-    done
-    if [ ${#crt_libs[@]} -eq 0 ]; then
-        echo "    warning: none of the CRT libraries are in LIB;" \
-             "the link is likely to fail" >&2
-        report_link_failure
+    if ! find_in_lib libcmt.lib >/dev/null; then
+        echo "    warning: libcmt.lib not found in LIB; the link is likely to fail" >&2
     fi
 
     # And invoke the linker ourselves rather than through cl, so that the
@@ -275,11 +272,9 @@ if [ "$toolchain" = "msvc" ]; then
 
     # Every MSVC tool is driven through a response file, and that is the whole
     # Windows story of this script. An argument containing a space does not
-    # survive the msys-to-Windows boundary: `C:\Program Files\...\libcmt.lib`
-    # arrives at the linker in pieces, which is why it reported a file bash
-    # could see perfectly well as impossible to open. A response file reduces
-    # the command line to one token with no space in it, and the quoting inside
-    # the file is the tool's own to parse.
+    # survive the msys-to-Windows boundary. A response file reduces the command
+    # line to one token with no space in it, and the quoting inside the file is
+    # the tool's own to parse.
     cl_rsp_head() {
         printf -- '%s\n' "${cflags[@]}"
         printf -- '/I"%s"\n' "$include_dir"
@@ -308,10 +303,6 @@ if [ "$toolchain" = "msvc" ]; then
             for dir in ${lib_dirs_win[@]+"${lib_dirs_win[@]}"}; do
                 printf -- '/LIBPATH:"%s"\n' "$dir"
             done
-            for name in ${crt_libs[@]+"${crt_libs[@]}"}; do
-                printf '"%s"\n' "$name"
-            done
-            printf '%s\n' ${crt_nodefault[@]+"${crt_nodefault[@]}"}
             # shellcheck disable=SC2086
             printf '%s\n' $native_libs
         } > "$rsp"
