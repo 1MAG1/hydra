@@ -1979,7 +1979,7 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "hya-cli"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "hya-gui"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "blake3",
  "chrono",
@@ -2052,7 +2052,7 @@ dependencies = [
 
 [[package]]
 name = "hya-host"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde_json",
 ]
@@ -2078,7 +2078,7 @@ dependencies = [
 
 [[package]]
 name = "hya-updater"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "blake3",
  "clap",
