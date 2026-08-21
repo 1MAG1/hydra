@@ -129,79 +129,96 @@ if [ "$toolchain" = "msvc" ]; then
         done
     }
 
-    # The static CRT is the one library that must be there: rustc built the
-    # archive with +crt-static, so the link needs libcmt.lib. Looking for it is
-    # also the cheapest way to tell a usable LIB from a missing one.
-    crt_in_lib() {
-        local dir posix
-        local IFS=';'
-        # shellcheck disable=SC2086
-        for dir in ${LIB:-}; do
+    # LIB, split once: the Windows spelling is what the linker is given, the
+    # POSIX spelling is what this script looks things up with.
+    split_lib() {
+        local rest="${LIB:-}" dir
+        lib_dirs_win=()
+        lib_dirs_posix=()
+        while [ -n "$rest" ]; do
+            case "$rest" in
+                *\;*) dir="${rest%%;*}"; rest="${rest#*;}" ;;
+                *)    dir="$rest";       rest="" ;;
+            esac
+            # A trailing backslash immediately before the closing quote of a
+            # quoted argument escapes that quote, and the rest of the linker's
+            # command line then means something else entirely. Drop it - the
+            # directory is the same one either way.
+            while [ -n "$dir" ] && [ "${dir%\\}" != "$dir" ]; do
+                dir="${dir%\\}"
+            done
             [ -n "$dir" ] || continue
-            posix="$(cygpath -u "$dir" 2>/dev/null || printf '%s' "$dir")"
-            [ -f "$posix/libcmt.lib" ] && return 0
+            lib_dirs_win+=("$dir")
+            lib_dirs_posix+=("$(cygpath -u "$dir" 2>/dev/null || printf '%s' "$dir")")
+        done
+    }
+
+    # Where a library actually is, answered by this shell rather than by the
+    # linker's own search.
+    find_in_lib() {
+        local name="$1" dir
+        for dir in ${lib_dirs_posix[@]+"${lib_dirs_posix[@]}"}; do
+            if [ -f "$dir/$name" ]; then
+                winpath "$dir/$name"
+                return 0
+            fi
         done
         return 1
     }
 
-    # No usable LIB: ask the Visual Studio installation itself rather than
-    # giving up. This is what a developer shell does, and it is why this script
-    # runs from a plain terminal too.
-    import_msvc_env() {
-        local vswhere vsdir vcvars arch line
-        vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-        [ -x "$vswhere" ] || return 1
-        vsdir="$("$vswhere" -latest -products '*' -property installationPath | tr -d '\r')"
-        [ -n "$vsdir" ] || return 1
-        vcvars="$(cygpath -u "$vsdir" 2>/dev/null || printf '%s' "$vsdir")"
-        vcvars="$vcvars/VC/Auxiliary/Build/vcvarsall.bat"
-        [ -f "$vcvars" ] || return 1
-        case "$host" in
-            aarch64-*) arch="arm64" ;;
-            *)         arch="x64" ;;
-        esac
-        while IFS= read -r line; do
-            line="${line%$'\r'}"
-            case "$line" in
-                LIB=*|INCLUDE=*|LIBPATH=*) export "${line%%=*}=${line#*=}" ;;
-            esac
-        done < <(cmd /c "\"$(winpath "$vcvars")\" $arch >NUL && set" 2>/dev/null)
+    # What a failed link could not tell us: where the linker came from, which
+    # directories it was given, and whether the static CRT is in any of them.
+    report_link_failure() {
+        local dir
+        echo "--- link failed; the state it ran in ---" >&2
+        echo "  cl:   $(command -v "$CC")" >&2
+        echo "  link: $LINK_EXE" >&2
+        echo "  LIB directories, and whether each holds libcmt.lib:" >&2
+        for dir in ${lib_dirs_posix[@]+"${lib_dirs_posix[@]}"}; do
+            if [ -f "$dir/libcmt.lib" ]; then
+                echo "    yes  $dir" >&2
+            elif [ -d "$dir" ]; then
+                echo "    no   $dir" >&2
+            else
+                echo "    ??   $dir  (bash sees no such directory)" >&2
+            fi
+        done
+        [ -n "${LIB:-}" ] || echo "    LIB is not set at all" >&2
     }
 
     normalise_lib_env
-    if ! crt_in_lib; then
+    split_lib
+    if ! find_in_lib libcmt.lib >/dev/null; then
+        # No static CRT in LIB: ask the Visual Studio installation itself rather
+        # than giving up. This is what a developer shell does, and it is why
+        # this script runs from a plain terminal too.
         echo "==> LIB carries no static CRT; asking Visual Studio for one"
         import_msvc_env || true
         normalise_lib_env
-    fi
-    if ! crt_in_lib; then
-        # A warning rather than an error: this is a diagnosis of a link that
-        # has not been attempted yet, and being wrong about it must not stop a
-        # build that would have worked. If the link does fail, LNK1104 on its
-        # own says nothing, and what follows is the missing half of it.
-        echo "    warning: no libcmt.lib in LIB; the link is likely to fail" >&2
-        echo "    cl:  $(command -v "$CC")" >&2
-        if [ -n "${LIB:-}" ]; then
-            echo "    LIB:" >&2
-            printf '%s\n' "$LIB" | tr ';' '\n' | sed 's/^/      /' >&2
-        else
-            echo "    LIB: not set at all" >&2
-        fi
+        split_lib
     fi
 
-    # bash can read LIB and find libcmt.lib in it and link.exe still reports
-    # LNK1104 on that exact file, so the variable is not surviving the hop into
-    # the linker. Stop depending on it: every directory LIB names is handed over
-    # as an explicit -LIBPATH, which is an argument rather than an environment
-    # variable and cannot be reinterpreted on the way.
+    # rustc built the archive with +crt-static, so these four are what the link
+    # needs from the CRT. Naming them outright rather than letting the linker
+    # search for them: bash can see the files, and every Windows failure so far
+    # has been the linker not finding what bash could - through the environment
+    # and then through -LIBPATH alike. A file named in full cannot be searched
+    # for wrongly. -LIBPATH still goes along for everything else.
+    crt_libs=()
+    for name in libcmt libvcruntime libucrt oldnames; do
+        if found="$(find_in_lib "$name.lib")"; then
+            crt_libs+=("$found")
+        fi
+    done
+    if [ ${#crt_libs[@]} -eq 0 ]; then
+        echo "    warning: none of the CRT libraries are in LIB;" \
+             "the link is likely to fail" >&2
+        report_link_failure
+    fi
+
     libpaths=()
-    lib_dirs="${LIB:-}"
-    while [ -n "$lib_dirs" ]; do
-        case "$lib_dirs" in
-            *\;*) dir="${lib_dirs%%;*}"; lib_dirs="${lib_dirs#*;}" ;;
-            *)    dir="$lib_dirs";        lib_dirs="" ;;
-        esac
-        if [ -n "$dir" ]; then libpaths+=("-LIBPATH:$dir"); fi
+    for dir in ${lib_dirs_win[@]+"${lib_dirs_win[@]}"}; do
+        libpaths+=("-LIBPATH:$dir")
     done
 
     # And invoke the linker ourselves rather than through cl, so that the
@@ -225,10 +242,17 @@ if [ "$toolchain" = "msvc" ]; then
             "-Fo:$(winpath "$out/$prog.obj")" \
             "$(winpath "$root/examples/ffi-c/$prog.c")"
         echo "==> linking $prog.exe"
-        # shellcheck disable=SC2086
-        "$LINK_EXE" -nologo "-out:$(winpath "$out/$prog.exe")" \
-            "$(winpath "$out/$prog.obj")" "$(winpath "$archive")" \
-            ${libpaths[@]+"${libpaths[@]}"} $native_libs
+        # $native_libs is a list of library names and must word-split.
+        # shellcheck disable=SC2206
+        link_args=(-nologo "-out:$(winpath "$out/$prog.exe")"
+                   "$(winpath "$out/$prog.obj")" "$(winpath "$archive")"
+                   ${libpaths[@]+"${libpaths[@]}"}
+                   ${crt_libs[@]+"${crt_libs[@]}"} $native_libs)
+        # Printed in full because every Windows link failure so far has come
+        # down to what the linker was actually handed, which no error message
+        # from it ever says.
+        printf '    %s' "$LINK_EXE"; printf ' %s' "${link_args[@]}"; printf '\n'
+        "$LINK_EXE" "${link_args[@]}" || { report_link_failure; exit 1; }
     done
 
     # The header is a published artifact, so it has to survive every dialect a
