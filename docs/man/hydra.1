@@ -37,6 +37,9 @@ hydra \- multi-source file retriever with reassignable byte ranges
 .B hydra install\-completions
 .RI [ SHELL ]
 .RI [ options ]
+.br
+.B hydra compat\-link
+.RI [ options ]
 .
 .SH DESCRIPTION
 .B hydra
@@ -680,19 +683,60 @@ scripts work unchanged:
 .PP
 .RS 4
 .nf
-ln \-s hydra wget
+hydra compat\-link \-\-dry\-run
+hydra compat\-link
+.fi
+.RE
+.PP
+That places
+.BR wget " and " curl
+links beside the binary and reports, per name, whether typing it will actually
+reach hydra.
+It has to: the dialect comes from the name the binary is invoked as, so a link
+is only reached from a directory that is on
+.B $PATH
+.I before
+the directory holding the real
+.BR curl / wget .
+A hand-written
+.PP
+.RS 4
+.nf
 ln \-s hydra curl
 .fi
 .RE
+.PP
+does the same thing, but in the current directory, where it is reached as
+.B ./curl
+and nothing else \(em which is the usual reason it appears not to work.
+Use
+.B \-\-dir
+to place the links elsewhere,
+.B \-\-name
+to choose the names, and
+.B \-\-force
+to replace an existing file (never done otherwise: the point is not to clobber
+a system
+.BR curl ).
 .PP
 The names
 .BR hydra\-wget ", " hydra\-curl ", " hydra_wget ", and " hydra_curl
 are recognised too, as is a
 .B .exe
-suffix.
+suffix; those are the safe choice when the real tools must keep their names.
 Precedence is:
 .B \-\-compat
 on the command line, then the invoked name, then native.
+.PP
+Under a dialect, a repeated boolean flag is accepted rather than rejected \(em
+.B wget \-q \-q
+and
+.B curl \-s \-sS
+run, as they do under the real tools; the repeat is redundant, not an error.
+.B \-v
+still counts, so
+.B \-vv
+is a level.
 .PP
 Under a dialect, a flag hydra cannot honour is
 .B refused with a reason,
@@ -937,6 +981,16 @@ Install tab completion for the current shell:
 .RS 4
 .nf
 hydra install\-completions
+.fi
+.RE
+.PP
+Install the
+.BR wget / curl
+entry points and check whether the shell will reach them:
+.PP
+.RS 4
+.nf
+hydra compat\-link \-\-dry\-run
 .fi
 .RE
 .

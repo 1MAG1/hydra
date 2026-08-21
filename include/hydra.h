@@ -1127,7 +1127,8 @@ typedef struct {
    */
   uint64_t error_count;
   /**
-   * Total stalled ranges reclaimed.
+   * Total ranges reclaimed from connections that stopped delivering, over
+   * this engine's lifetime. Both causes; see `hydra_progress_t::stall_count`.
    */
   uint64_t stall_count;
   /**
@@ -1212,7 +1213,14 @@ typedef struct {
    */
   uint64_t retry_count;
   /**
-   * Number of stalled range reclaims.
+   * Ranges reclaimed from a connection that stopped delivering.
+   *
+   * Counts both causes, because to a range they are the same event: a
+   * connection graded stalled by the no-progress timeout, and a connection
+   * whose fetch returned an error (a socket the peer had closed, a truncated
+   * body, a refused request). A failure the transport retries internally on a
+   * fresh connection is NOT counted — nothing was reclaimed and the range
+   * never went back to the scheduler.
    */
   uint64_t stall_count;
 } hydra_progress_t;

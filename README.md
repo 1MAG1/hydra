@@ -242,6 +242,26 @@ hydra --compat=wget -c -O myfile.zip https://example.com/file.zip
 hydra --compat=curl -C - -o myfile.zip https://example.com/file.zip
 ```
 
+The dialect is also taken from the name the binary is invoked as, so existing
+scripts can run unchanged. `hydra compat-link` installs those entry points:
+
+```bash
+# Show where the wget/curl links would go, and whether they would be reached
+hydra compat-link --dry-run
+
+# Create them next to the hydra binary
+hydra compat-link
+
+# Keep the real curl/wget names free
+hydra compat-link --name hydra-wget --name hydra-curl
+```
+
+A link only takes effect from a directory that is on `$PATH` *before* the one
+holding the real `curl`/`wget` — otherwise the shell keeps resolving the name to
+the original tool. `compat-link` checks that and tells you which binary wins, so
+a link that cannot be reached does not look like a silent failure. Existing files
+are never replaced without `--force`.
+
 ### Interactive Queue Manager (TUI)
 
 ```bash

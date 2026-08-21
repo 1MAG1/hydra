@@ -480,7 +480,14 @@ pub struct hydra_progress_t {
     pub total_ranges: u32,
     /// Total range retry requests issued.
     pub retry_count: u64,
-    /// Number of stalled range reclaims.
+    /// Ranges reclaimed from a connection that stopped delivering.
+    ///
+    /// Counts both causes, because to a range they are the same event: a
+    /// connection graded stalled by the no-progress timeout, and a connection
+    /// whose fetch returned an error (a socket the peer had closed, a truncated
+    /// body, a refused request). A failure the transport retries internally on a
+    /// fresh connection is NOT counted — nothing was reclaimed and the range
+    /// never went back to the scheduler.
     pub stall_count: u64,
 }
 
@@ -615,7 +622,8 @@ pub struct hydra_metrics_t {
     pub retry_count: u64,
     /// Total errors encountered across all jobs.
     pub error_count: u64,
-    /// Total stalled ranges reclaimed.
+    /// Total ranges reclaimed from connections that stopped delivering, over
+    /// this engine's lifetime. Both causes; see `hydra_progress_t::stall_count`.
     pub stall_count: u64,
     /// Total jobs created over engine lifetime.
     pub jobs_created: u64,

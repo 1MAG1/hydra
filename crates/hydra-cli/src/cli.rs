@@ -290,9 +290,13 @@ pub enum UrlMode {
     COMPATIBILITY:\n  \
       wget and curl disagree on 15 of 19 common short flags (-O, -o, -c, -q, -H, -U,\n  \
       -t, -T, -r, -A, -L, -i, -N, -P, -x), so one namespace cannot serve both.\n  \
-      Pick a dialect with --compat=wget|curl, or symlink the binary:\n  \
-        ln -s hydra wget     # then wget's flags mean what wget means\n  \
-        ln -s hydra curl     # then curl's flags mean what curl means\n  \
+      Pick a dialect with --compat=wget|curl, or install named entry points:\n    \
+        hydra compat-link --dry-run    show where the wget/curl links would go\n    \
+        hydra compat-link              create them next to this binary\n  \
+      The dialect comes from the name the binary is invoked as, so a link works\n  \
+      only from a directory on $PATH that comes BEFORE the real curl/wget --\n  \
+      compat-link checks that and says so. `ln -s hydra curl` does the same\n  \
+      thing by hand, but only reaches hydra as ./curl unless that holds.\n  \
       Flags hydra cannot honour are REFUSED with a reason, never ignored."
 )]
 pub struct Cli {
@@ -857,6 +861,39 @@ pub enum Command {
         /// catches up, this reports stable again.
         #[arg(long)]
         beta: bool,
+    },
+
+    /// Install the `wget` / `curl` dialect entry points as links to this binary.
+    ///
+    /// The dialect is chosen from `argv[0]`, so a link named `wget` or `curl`
+    /// pointing here is the whole mechanism. Doing it by hand with `ln -s` is
+    /// where it goes wrong: the link lands in the current directory rather than
+    /// a `$PATH` one, or the real tool sits in a directory that comes earlier in
+    /// `$PATH` and keeps answering, or `ln` refuses because the name is taken.
+    /// This places the links and then reports, per name, whether typing it will
+    /// actually reach hydra.
+    ///
+    /// Existing files are never replaced without `--force` — the point is not to
+    /// clobber a system `curl`.
+    CompatLink {
+        /// Where to put the links. Defaults to the directory this binary is in.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+
+        /// Names to install. Repeatable; defaults to `wget` and `curl`.
+        ///
+        /// `hydra-wget` and `hydra-curl` are recognised too, and are the safe
+        /// choice when the real tools must keep their names.
+        #[arg(long = "name", value_name = "NAME")]
+        names: Vec<String>,
+
+        /// Replace an existing file of that name.
+        #[arg(long)]
+        force: bool,
+
+        /// Report what would be done, touching nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
     },
 
     /// Generate a completion script AND install it into the shell's standard

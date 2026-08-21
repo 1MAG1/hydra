@@ -189,6 +189,30 @@ pub async fn run_transfer_cancellable<C: Connector>(
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> io::Result<(f64, u64)> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Arrival>();
+    // Fetch outcomes, reported by every spawned task as it ends.
+    //
+    // Without this the transport SPAWNS a fetch and never looks at what happened
+    // to it: `let _ = fetch_range(...).await` discarded the result, so a refused
+    // connection, a closed socket, a truncated body, a 503 and a protocol
+    // violation were all indistinguishable from a connection that was merely
+    // slow. The only thing that eventually noticed was the scheduler's stall
+    // timeout, seconds later — see `Scheduler::on_conn_error` for what that costs
+    // and why the endgame is where it shows.
+    //
+    // The generation number is not decoration: a task can finish in the same
+    // instant its connection is superseded or cancelled, and its outcome would
+    // then be charged against the request that replaced it.
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<(usize, u64, io::Result<()>)>();
+    let mut gen_of: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+    let mut next_gen: u64 = 0;
+    // Consecutive fetch failures since the last byte of progress, and the last
+    // error seen. The streak drives per-connection backoff so a broken endpoint is
+    // not hammered; the error is reported if the transfer ultimately fails, since
+    // "every source stalled or unreachable" describes the symptom and never the
+    // cause.
+    let mut fail_streak: u32 = 0;
+    let mut hard_streak: u32 = 0;
+    let mut last_error: Option<io::Error> = None;
     let t0 = Instant::now();
 
     // conn index -> target index
@@ -230,6 +254,7 @@ pub async fn run_transfer_cancellable<C: Connector>(
     // transfer: a reuse rate that is claimed rather than counted is not a
     // measurement. `HYDRA_POOL_STATS=1` prints it after the transfer.
     let report_pool = std::env::var_os("HYDRA_POOL_STATS").is_some();
+    let trace_errors = std::env::var_os("HYDRA_TRACE_ERRORS").is_some();
 
     // ---- no-progress watchdog --------------------------------------------
     //
@@ -328,6 +353,93 @@ pub async fn run_transfer_cancellable<C: Connector>(
             sched.on_bytes_at(a.conn, a.off, a.bytes, a.at, a.dt);
         }
 
+        // 1a. act on fetch outcomes, at once rather than at the stall timeout.
+        while let Ok((conn, g, res)) = done_rx.try_recv() {
+            // Not the request this connection is running now: the task was
+            // superseded or cancelled and finished on its way out. Its outcome
+            // says nothing about the range now in flight.
+            if gen_of.get(&conn) != Some(&g) {
+                continue;
+            }
+            gen_of.remove(&conn);
+            inflight.remove(&conn);
+            bounds.remove(&conn);
+            let Err(e) = res else { continue };
+            let now = t0.elapsed().as_secs_f64();
+            if trace_errors {
+                eprintln!("[trace] t={now:.2} conn {conn}: {} — {e}", e.kind());
+            }
+            fail_streak = fail_streak.saturating_add(1);
+            let kind = e.kind();
+            // A server that ignores `Range`, mislabels a `Content-Range`, answers
+            // with a status this client cannot use, or redirects a transfer that
+            // is already under way will do the same to the next request; retrying
+            // is how a client hammers a broken endpoint instead of reporting it.
+            // A streak rather than the first one, because a single 5xx from one
+            // node of a CDN is worth another attempt.
+            //
+            // Reporting matters as much as stopping. An expired pre-signed URL —
+            // a GitHub release asset, an S3 link — starts answering 403 part-way
+            // through, and every request after that fails the same way. Spinning
+            // on it until the no-progress deadline tells the user only that
+            // nothing is arriving; failing on it tells them what the server said.
+            hard_streak = if matches!(
+                kind,
+                io::ErrorKind::InvalidData | io::ErrorKind::NotConnected
+            ) {
+                hard_streak + 1
+            } else {
+                0
+            };
+            // Per-connection backoff, doubling with the streak. Zero would be a
+            // hot retry loop against an endpoint that is refusing; the range is
+            // back in the unassigned set either way, so a healthy connection can
+            // pick it up on the next tick without waiting for this.
+            let cool = (0.05 * (1u64 << fail_streak.min(6)) as f64).min(2.0);
+            match kind {
+                // 429/503 with a Retry-After. That is the SOURCE speaking, not
+                // this one socket, so the whole source stands down — and its
+                // in-flight fetches are aborted, since their bytes would no
+                // longer be credited to any range and would have to be pulled
+                // again later.
+                io::ErrorKind::WouldBlock => {
+                    let secs = crate::http::retry_after_secs(&e)
+                        .unwrap_or(1.0)
+                        .clamp(0.05, 60.0);
+                    let src = sched.conn_source(conn);
+                    sched.suspend_source(src, now + secs);
+                    for j in 0..sched.n_conns() {
+                        if sched.conn_source(j) == src {
+                            if let Some(h) = inflight.remove(&j) {
+                                h.abort();
+                            }
+                            bounds.remove(&j);
+                            gen_of.remove(&j);
+                        }
+                    }
+                }
+                _ => sched.on_conn_error(conn, now, cool),
+            }
+            if hard_streak >= 3 {
+                for (_, h) in inflight.drain() {
+                    h.abort();
+                }
+                // A redirect travels as `NotConnected` with the location in its
+                // message, which is a protocol detail of the fetch path and not
+                // something to hand a user verbatim.
+                if kind == io::ErrorKind::NotConnected {
+                    let loc = e.to_string();
+                    let loc = loc.strip_prefix("redirect:").unwrap_or("").to_string();
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("server redirected mid-transfer to {loc}"),
+                    ));
+                }
+                return Err(e);
+            }
+            last_error = Some(e);
+        }
+
         // 1b. feed the ramp the AGGREGATE delivery, and let it decide.
         //
         // Aggregate rather than per-connection on purpose: on a saturated link each
@@ -385,6 +497,10 @@ pub async fn run_transfer_cancellable<C: Connector>(
                         h.abort();
                     }
                     bounds.remove(&conn);
+                    // Forget the generation, so an outcome already in flight from
+                    // the task being aborted is not charged against whatever this
+                    // connection is given next.
+                    gen_of.remove(&conn);
                 }
                 // A repair moved this connection's far end down. Publishing it is
                 // the entire mechanism: the victim's own loop stops at the new
@@ -411,10 +527,15 @@ pub async fn run_transfer_cancellable<C: Connector>(
                     let bound = crate::Watermark::fixed(range.hi);
                     bounds.insert(conn, bound.clone());
                     let pl = pool.clone();
+                    next_gen += 1;
+                    let g = next_gen;
+                    gen_of.insert(conn, g);
+                    let dtx = done_tx.clone();
                     let h = tokio::spawn(async move {
-                        let _ =
+                        let r =
                             fetch_range(cc, conn, t, range.lo, bound, sk, txc, t0, pc, Some(pl))
                                 .await;
+                        let _ = dtx.send((conn, g, r));
                     });
                     inflight.insert(conn, h);
                 }
@@ -449,6 +570,11 @@ pub async fn run_transfer_cancellable<C: Connector>(
         if held_now > last_held {
             last_held = held_now;
             last_progress_at = Instant::now();
+            // Bytes are moving, so whatever failed was transient and its backoff
+            // must not accumulate against the next unrelated failure.
+            fail_streak = 0;
+            hard_streak = 0;
+            last_error = None;
         } else if last_progress_at.elapsed().as_secs_f64() > no_progress_deadline + backoff_grace {
             // The deadline is extended by `backoff_grace`: the time the scheduler
             // has DELIBERATELY spent with every source suspended, capped.
@@ -470,11 +596,19 @@ pub async fn run_transfer_cancellable<C: Connector>(
             for (_, h) in inflight.drain() {
                 h.abort();
             }
+            // Report the last transport failure if there was one. "Every source
+            // stalled or unreachable" is the symptom; the cause is the error the
+            // fetches were actually returning, and a user cannot act on the first
+            // without the second.
+            let cause = match &last_error {
+                Some(e) => format!(" (last error: {e})"),
+                None => String::new(),
+            };
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
                     "no progress for {no_progress_deadline:.0}s: {} of {} bytes received, \
-                     every source stalled or unreachable",
+                     every source stalled or unreachable{cause}",
                     held_now, size
                 ),
             ));
@@ -497,8 +631,8 @@ pub async fn run_transfer_cancellable<C: Connector>(
     if report_pool {
         let (hits, misses) = pool.stats();
         eprintln!(
-            "pool: {hits} reused, {misses} fresh ({} requests, {} repairs)",
-            sched.stats.requests, sched.stats.repairs
+            "pool: {hits} reused, {misses} fresh ({} requests, {} repairs, {} reclaims)",
+            sched.stats.requests, sched.stats.repairs, sched.stats.reclaims
         );
     }
     Ok((t0.elapsed().as_secs_f64(), sched.stats.requests))
