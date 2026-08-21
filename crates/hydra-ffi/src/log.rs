@@ -15,6 +15,7 @@ struct Inner {
 
 // SAFETY: `user_data` is an opaque pointer managed by the host application.
 unsafe impl Send for Inner {}
+// SAFETY: `user_data` is an opaque pointer managed by the host application.
 unsafe impl Sync for Inner {}
 
 /// Thread-safe engine log sink.
