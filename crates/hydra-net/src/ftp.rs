@@ -42,6 +42,7 @@
 //! `Debug` format, or a progress display. [`Endpoint`]'s `Debug` is hand-written to redact
 //! them, and the raw exchange this module records replaces the `PASS` argument.
 
+use crate::polite::Pace;
 use crate::scheme::{Capabilities, Endpoint, Fetcher, SchemeProbe};
 use crate::{Connector, SparseSink};
 use std::future::Future;
@@ -56,6 +57,14 @@ pub struct FtpFetcher<C: Connector> {
     conn: Arc<C>,
     /// Control-channel round trips spent on preemption, for measurement.
     pub abort_rtts: AtomicU64,
+    /// The rate cap this fetcher shapes its data channel against.
+    ///
+    /// Held on the fetcher rather than passed to `fetch_range`, which is a trait
+    /// method shared with the HTTP scheme and takes no cap. The single-connection
+    /// FTP path is the one place in the engine that used to ignore the speed
+    /// limiter completely: an ftp:// download ran at line rate whatever the user
+    /// had asked for.
+    pace: Pace,
 }
 
 impl<C: Connector> FtpFetcher<C> {
@@ -63,7 +72,14 @@ impl<C: Connector> FtpFetcher<C> {
         Self {
             conn,
             abort_rtts: AtomicU64::new(0),
+            pace: Pace::unlimited(),
         }
+    }
+
+    /// Shape this fetcher's transfers against `pace`.
+    pub fn with_pace(mut self, pace: Pace) -> Self {
+        self.pace = pace;
+        self
     }
 }
 
@@ -359,13 +375,18 @@ impl<C: Connector> Fetcher for FtpFetcher<C> {
             let mut off = lo;
             let mut buf = vec![0u8; 64 * 1024];
             while off < hi {
-                let room = ((hi - off) as usize).min(buf.len());
+                // Read in cap-sized slices, then pay for what arrived before it
+                // is written — the same order the HTTP path uses, so a burst
+                // cannot land first and leave the cap shaping only the read
+                // after it.
+                let room = self.pace.read_size(((hi - off) as usize).min(buf.len()));
                 let n = match data.read(&mut buf[..room]).await {
                     Ok(0) => break,
                     Ok(n) => n,
                     Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
                     Err(e) => return Err(e),
                 };
+                self.pace.wait(n as u64).await;
                 sink.write_at(off, &buf[..n])?;
                 off += n as u64;
             }

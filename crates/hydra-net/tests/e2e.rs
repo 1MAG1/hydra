@@ -379,6 +379,74 @@ async fn the_observer_sees_the_final_byte_count() {
     let _ = std::fs::remove_file(&out);
 }
 
+/// A cap switched ON mid-transfer must shape the bytes that are still to come.
+///
+/// Regression test: `Pace::shared` collapsed a limiter that was unlimited at the
+/// moment the transfer started, so the pace held nothing and every later
+/// `set_rate` wrote to a bucket no read would ever consult again. In the GUI
+/// that is exactly the "Use Speed Limiter" checkbox on a download already
+/// running: the dialog showed 100 KB/sec next to a transfer still moving at
+/// 8.9 MB/sec. The engine-wide FFI setter had the same hole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cap_applied_mid_transfer_shapes_the_rest() {
+    use hya_net::polite::{Pace, RateLimiter};
+    const SIZE: u64 = 512 * 1024;
+    const CAP: u64 = 128 * 1024; // bytes/sec
+                                 // Flip the cap on a quarter of the way in, so most of the object is left.
+    const FLIP_AT: u64 = SIZE / 4;
+
+    let net = Arc::new(OriginSet::new());
+    let (port, _ctl) = net.spawn(SIZE, 16 * 1024 * 1024);
+    let out = std::env::temp_dir().join("hydra_e2e_live_limit.bin");
+    let outs = out.to_string_lossy().to_string();
+    let sched = Scheduler::new(SIZE, vec![src(16e6)], &[4]).with_stall_timeout(30.0);
+
+    // Unlimited at start: this is the state every un-capped download begins in.
+    let limiter = Arc::new(RateLimiter::unlimited());
+    let pace = Pace::shared(limiter.clone());
+    assert!(!pace.is_limited(), "the transfer starts with no cap");
+
+    let mut flipped: Option<(std::time::Instant, u64)> = None;
+    let lim = limiter.clone();
+    let mut observe = move |_: &Scheduler, done: u64| {
+        if flipped.is_none() && done >= FLIP_AT {
+            lim.set_rate(CAP);
+            flipped = Some((std::time::Instant::now(), done));
+        }
+    };
+
+    let t0 = std::time::Instant::now();
+    hya_net::run_transfer_paced(
+        net.clone(),
+        vec![tgt(port)],
+        &[4],
+        SIZE,
+        &outs,
+        sched,
+        20,
+        &mut observe,
+        pace,
+    )
+    .await
+    .expect("a transfer capped mid-flight must still complete");
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    verify(&outs, SIZE).expect("shaping must not corrupt: the file must be byte-exact");
+    // Everything after the flip is subject to the cap. Charge only the bytes that
+    // could still have been outstanding then — the ones already on disk are free,
+    // and in-flight reads already paid for are close enough to ignore.
+    let shaped = SIZE - FLIP_AT;
+    let floor = shaped as f64 / CAP as f64;
+    assert!(
+        elapsed >= floor * 0.7,
+        "{shaped} bytes remained under a {CAP} B/s cap, which needs about          {floor:.2}s, but the whole transfer took {elapsed:.2}s: the cap was          switched on and ignored"
+    );
+    eprintln!(
+        "live cap: {SIZE} B in {elapsed:.2}s, cap applied at {FLIP_AT} B (floor {floor:.2}s)"
+    );
+    let _ = std::fs::remove_file(&out);
+}
+
 /// `--limit-rate` must actually shape the transfer, not merely be constructed.
 ///
 /// Regression test: the CLI built a `RateLimiter`, dropped it a few lines later,
