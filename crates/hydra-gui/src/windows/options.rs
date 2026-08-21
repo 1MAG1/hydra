@@ -97,6 +97,14 @@ fn general(app: &App) -> El<'_> {
             tr("Registers Hydra as a login item so downloads and queues continue after a reboot."),
         ),
         hinted(
+            checkbox(s.start_in_tray).label(tr("Launch minimized to system tray"))
+                .on_toggle(|b| o(OptField::StartInTray(b)))
+                .size(15.0)
+                .text_size(theme::FONT_SIZE)
+                .style(theme::check),
+            tr("Autostart launches stay in the tray; open the window from the tray icon."),
+        ),
+        hinted(
             checkbox(s.check_updates_on_startup).label(tr("Check for updates on startup"))
                 .on_toggle(|b| o(OptField::CheckUpdates(b)))
                 .size(15.0)
@@ -111,14 +119,6 @@ fn general(app: &App) -> El<'_> {
                 .text_size(theme::FONT_SIZE)
                 .style(theme::check),
             tr("Update checks also offer release candidates (-rc tags) when one is ahead of the stable release; otherwise the stable release is used. Beta builds may be less stable."),
-        ),
-        hinted(
-            checkbox(s.start_in_tray).label(tr("Launch minimized to system tray"))
-                .on_toggle(|b| o(OptField::StartInTray(b)))
-                .size(15.0)
-                .text_size(theme::FONT_SIZE)
-                .style(theme::check),
-            tr("Autostart launches stay in the tray; open the window from the tray icon."),
         ),
     ];
     if let Some(el) = hide_taskbar {
