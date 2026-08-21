@@ -1,0 +1,1321 @@
+// Copyright (C) 2026 Javad Rajabzadeh
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! The ABI test suite.
+//!
+//! These tests call the exported symbols exactly as a C program does: through
+//! raw pointers, with `CString` arguments, checking `hydra_error_code_t`
+//! returns, and freeing everything hydra hands back. Nothing here reaches into
+//! the crate's internals, because a test that did would stop being evidence
+//! that the *interface* works.
+//!
+//! What they are for, in order of importance:
+//!
+//! * the memory contract — every allocation released through its own `*_free`;
+//! * the life cycle — create, start, pause, resume, cancel, complete;
+//! * hostile input — NULL, invalid UTF-8, unknown enum values, bad ids;
+//! * persistence — a job that survives an engine being destroyed.
+
+mod support;
+
+use hydra::*;
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
+use std::ptr;
+use std::time::{Duration, Instant};
+
+use support::{make_body, serve, Behaviour};
+
+// ------------------------------------------------------------------- helpers
+
+/// An engine with defaults, plus whatever `tweak` changes.
+struct Harness {
+    engine: *mut hydra_engine_t,
+    /// Kept alive because the configuration borrowed a pointer into it.
+    _state_path: Option<CString>,
+    dir: std::path::PathBuf,
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        unsafe { hydra_engine_destroy(self.engine) };
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!(
+        "hydra-ffi-test-{}-{}-{}",
+        name,
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::create_dir_all(&d).expect("scratch dir");
+    d
+}
+
+fn harness(name: &str, persist: bool, tweak: impl FnOnce(&mut hydra_engine_config_t)) -> Harness {
+    let dir = scratch(name);
+    let state = persist
+        .then(|| CString::new(dir.join("state.json").to_string_lossy().into_owned()).unwrap());
+    let mut cfg: hydra_engine_config_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        hydra_engine_config_init(
+            &mut cfg,
+            std::mem::size_of::<hydra_engine_config_t>() as u32,
+        )
+    };
+    assert_eq!(rc, hydra_error_code_t::HYDRA_OK);
+    if let Some(s) = &state {
+        cfg.state_path = s.as_ptr();
+    }
+    tweak(&mut cfg);
+    let engine = unsafe { hydra_engine_create(&cfg) };
+    assert!(
+        !engine.is_null(),
+        "engine creation failed: {}",
+        last_error()
+    );
+    Harness {
+        engine,
+        _state_path: state,
+        dir,
+    }
+}
+
+/// The message behind the calling thread's last failure.
+fn last_error() -> String {
+    let mut e: hydra_error_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe { hydra_last_error(&mut e) };
+    if rc != hydra_error_code_t::HYDRA_OK || e.message.data.is_null() {
+        return "(no detail)".into();
+    }
+    let s = unsafe { CStr::from_ptr(e.message.data) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { hydra_error_free(&mut e) };
+    s
+}
+
+/// Create a job from one URL and a destination, with `tweak` applied.
+fn make_job(
+    h: &Harness,
+    url: &str,
+    out: &std::path::Path,
+    tweak: impl FnOnce(&mut hydra_job_config_t),
+) -> hydra_job_id_t {
+    let url_c = CString::new(url).unwrap();
+    let urls: [*const c_char; 1] = [url_c.as_ptr()];
+    let out_c = CString::new(out.to_string_lossy().into_owned()).unwrap();
+
+    let mut cfg: hydra_job_config_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        hydra_job_config_init(&mut cfg, std::mem::size_of::<hydra_job_config_t>() as u32)
+    };
+    assert_eq!(rc, hydra_error_code_t::HYDRA_OK);
+    cfg.urls = urls.as_ptr();
+    cfg.url_count = 1;
+    cfg.output_path = out_c.as_ptr();
+    tweak(&mut cfg);
+
+    let mut id: hydra_job_id_t = 0;
+    let rc = unsafe { hydra_job_create(h.engine, &cfg, &mut id) };
+    assert_eq!(
+        rc,
+        hydra_error_code_t::HYDRA_OK,
+        "job creation failed: {}",
+        last_error()
+    );
+    assert_ne!(id, 0, "0 is never a valid job id");
+    id
+}
+
+/// Drain events until the job reaches a terminal state, or the deadline passes.
+///
+/// Returns the terminal event. Driving the tests off the queue rather than off
+/// polled state is deliberate: the queue is the interface an application
+/// actually uses, so a bug that only shows up there is one these tests should
+/// see.
+fn is_terminal_event(kind: hydra_event_type_t) -> bool {
+    matches!(
+        kind,
+        hydra_event_type_t::HYDRA_EVENT_COMPLETED
+            | hydra_event_type_t::HYDRA_EVENT_FAILED
+            | hydra_event_type_t::HYDRA_EVENT_CANCELLED
+    )
+}
+
+/// Drain until every job in `jobs` has produced a terminal event.
+///
+/// Collecting them all rather than one is not fussiness: the queue has a single
+/// consumer, so a loop that waits for job A and discards everything else throws
+/// away job B's completion, and the next loop then waits for an event that has
+/// already been delivered. That mistake cost an afternoon here, and it is
+/// exactly the mistake a real application would make, so the helper models the
+/// right shape.
+fn await_all_terminal(
+    h: &Harness,
+    jobs: &[hydra_job_id_t],
+    within: Duration,
+) -> std::collections::HashMap<hydra_job_id_t, hydra_event_t> {
+    let mut out = std::collections::HashMap::new();
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline && out.len() < jobs.len() {
+        let mut ev: hydra_event_t = unsafe { std::mem::zeroed() };
+        let left = deadline.saturating_duration_since(Instant::now());
+        let rc = unsafe { hydra_event_wait(h.engine, left.as_millis().min(500) as u32, &mut ev) };
+        if rc != hydra_error_code_t::HYDRA_OK {
+            continue;
+        }
+        if jobs.contains(&ev.job_id) && is_terminal_event(ev.kind) {
+            out.insert(ev.job_id, ev);
+        }
+    }
+    assert_eq!(
+        out.len(),
+        jobs.len(),
+        "only {:?} of {jobs:?} reached a terminal state within {within:?}",
+        out.keys().collect::<Vec<_>>()
+    );
+    out
+}
+
+fn await_terminal(h: &Harness, job: hydra_job_id_t, within: Duration) -> hydra_event_t {
+    await_all_terminal(h, &[job], within)
+        .remove(&job)
+        .expect("await_all_terminal asserts on absence")
+}
+
+/// Wait for a job to reach `want`, polling state rather than the queue.
+fn await_state(h: &Harness, job: hydra_job_id_t, want: hydra_job_state_t, within: Duration) {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        let mut st = hydra_job_state_t::HYDRA_JOB_CREATED;
+        let rc = unsafe { hydra_job_get_state(h.engine, job, &mut st) };
+        assert_eq!(rc, hydra_error_code_t::HYDRA_OK);
+        if st == want {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut st = hydra_job_state_t::HYDRA_JOB_CREATED;
+    unsafe { hydra_job_get_state(h.engine, job, &mut st) };
+    panic!("job {job} is in state {st:?}, expected {want:?}");
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).into()
+}
+
+// ------------------------------------------------------------------- the tests
+
+#[test]
+fn abi_version_and_strings_are_available_without_an_engine() {
+    assert_eq!(hydra_ffi_abi_version(), HYDRA_FFI_ABI_VERSION);
+    let v = unsafe { CStr::from_ptr(hydra_ffi_version_string()) }
+        .to_str()
+        .unwrap();
+    assert!(!v.is_empty(), "version string must not be empty");
+    // Static storage: no free, and callable any number of times.
+    for code in 0..25u32 {
+        let n = unsafe { CStr::from_ptr(hydra_error_name(code)) }
+            .to_str()
+            .unwrap();
+        assert!(n.starts_with("HYDRA_"), "{code} rendered as {n:?}");
+    }
+}
+
+#[test]
+fn config_init_stamps_size_and_version() {
+    let mut cfg: hydra_engine_config_t = unsafe { std::mem::zeroed() };
+    let n = std::mem::size_of::<hydra_engine_config_t>() as u32;
+    assert_eq!(
+        unsafe { hydra_engine_config_init(&mut cfg, n) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    assert_eq!(cfg.size, n);
+    assert_eq!(cfg.version, HYDRA_ENGINE_CONFIG_VERSION);
+    assert!(cfg.max_jobs > 0 && cfg.max_connections > 0);
+    assert_eq!(cfg.adaptive_concurrency, 1, "adaptive is the default");
+
+    let mut jcfg: hydra_job_config_t = unsafe { std::mem::zeroed() };
+    let n = std::mem::size_of::<hydra_job_config_t>() as u32;
+    assert_eq!(
+        unsafe { hydra_job_config_init(&mut jcfg, n) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    assert_eq!(jcfg.size, n);
+    assert_eq!(jcfg.resume, 1, "resume is the default");
+    assert_eq!(jcfg.auto_start, 0, "creating a job must not start it");
+}
+
+#[test]
+fn null_and_invalid_arguments_are_refused_rather_than_crashing() {
+    use hydra_error_code_t as E;
+    assert!(unsafe { hydra_engine_create(ptr::null()) }.is_null());
+    assert_eq!(
+        unsafe { hydra_engine_config_init(ptr::null_mut(), 8) },
+        E::HYDRA_ERR_INVALID_ARGUMENT
+    );
+    // A destroyed-or-foreign handle must be rejected, not dereferenced.
+    let mut junk = [0u8; 64];
+    let fake = junk.as_mut_ptr() as *mut hydra_engine_t;
+    assert_eq!(
+        unsafe { hydra_engine_shutdown(fake, 0) },
+        E::HYDRA_ERR_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        unsafe { hydra_job_start(ptr::null_mut(), 1) },
+        E::HYDRA_ERR_INVALID_ARGUMENT
+    );
+    // Freeing nothing is defined behaviour, so a binding can free
+    // unconditionally.
+    unsafe { hydra_string_free(hydra_string_t::null()) };
+    unsafe { hydra_error_free(ptr::null_mut()) };
+    unsafe { hydra_job_snapshot_free(ptr::null_mut()) };
+    unsafe { hydra_source_array_free(ptr::null_mut()) };
+    unsafe { hydra_job_id_array_free(ptr::null_mut()) };
+    unsafe { hydra_engine_destroy(ptr::null_mut()) };
+
+    let h = harness("nulls", false, |_| {});
+    assert_eq!(
+        unsafe { hydra_job_start(h.engine, 12345) },
+        E::HYDRA_ERR_NOT_FOUND
+    );
+    assert_eq!(
+        unsafe { hydra_job_create(h.engine, ptr::null(), ptr::null_mut()) },
+        E::HYDRA_ERR_INVALID_ARGUMENT
+    );
+    // An out-of-range enum is a refusal, never a silent fallback to a default.
+    let dir = scratch("nulls-out");
+    let id = make_job(&h, "http://127.0.0.1:1/x", &dir.join("f"), |_| {});
+    assert_eq!(
+        unsafe { hydra_job_cancel(h.engine, id, 99) },
+        E::HYDRA_ERR_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        unsafe { hydra_engine_set_log_callback(h.engine, None, ptr::null_mut(), 99) },
+        E::HYDRA_ERR_INVALID_ARGUMENT
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_bad_url_is_refused_at_creation_not_at_transfer_time() {
+    let h = harness("badurl", false, |_| {});
+    let dir = scratch("badurl-out");
+    let out = CString::new(dir.join("f").to_string_lossy().into_owned()).unwrap();
+    for bad in ["gopher://example.com/x", "not a url", ""] {
+        let u = CString::new(bad).unwrap();
+        let urls: [*const c_char; 1] = [u.as_ptr()];
+        let mut cfg: hydra_job_config_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            hydra_job_config_init(&mut cfg, std::mem::size_of::<hydra_job_config_t>() as u32)
+        };
+        cfg.urls = urls.as_ptr();
+        cfg.url_count = 1;
+        cfg.output_path = out.as_ptr();
+        let mut id = 0;
+        let rc = unsafe { hydra_job_create(h.engine, &cfg, &mut id) };
+        assert_eq!(
+            rc,
+            hydra_error_code_t::HYDRA_ERR_INVALID_URL,
+            "{bad:?} should not have been accepted"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_ranged_download_completes_and_the_bytes_are_right() {
+    let body = make_body(3 * 1024 * 1024 + 777);
+    let origin = serve(body.clone(), Behaviour::default());
+    let h = harness("ranged", false, |c| {
+        c.max_connections = 4;
+        // Fixed rather than adaptive, so the test exercises the multi-connection
+        // scheduler path rather than settling on one stream.
+        c.adaptive_concurrency = 0;
+        c.progress_interval_ms = 20;
+    });
+    let out = h.dir.join("object.bin");
+    let id = make_job(&h, &origin.url("/object.bin"), &out, |c| {
+        c.adaptive = 0;
+        c.max_connections = 4;
+    });
+
+    assert_eq!(
+        unsafe { hydra_job_start(h.engine, id) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let ev = await_terminal(&h, id, Duration::from_secs(60));
+    assert_eq!(
+        ev.kind,
+        hydra_event_type_t::HYDRA_EVENT_COMPLETED,
+        "terminal event was {:?} ({}): {}",
+        ev.kind,
+        unsafe { CStr::from_ptr(hydra_error_name(ev.error as u32)) }.to_string_lossy(),
+        last_error()
+    );
+    assert_eq!(ev.state, hydra_job_state_t::HYDRA_JOB_COMPLETED);
+    assert_eq!(ev.progress.bytes_downloaded, body.len() as u64);
+    assert_eq!(ev.progress.total_bytes, body.len() as u64);
+
+    let got = std::fs::read(&out).expect("output file");
+    assert_eq!(got.len(), body.len(), "wrong length");
+    assert_eq!(
+        sha256(&got),
+        sha256(&body),
+        "content differs from the origin"
+    );
+
+    // The snapshot is owned by the caller and must describe the finished job.
+    let mut snap: hydra_job_snapshot_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { hydra_job_get_snapshot(h.engine, id, &mut snap) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    assert_eq!(snap.state, hydra_job_state_t::HYDRA_JOB_COMPLETED);
+    let name = unsafe { CStr::from_ptr(snap.file_name.data) }.to_string_lossy();
+    assert_eq!(name, "object.bin");
+    assert!(snap.finished_at_ms >= snap.created_at_ms);
+    unsafe { hydra_job_snapshot_free(&mut snap) };
+    // Freeing twice must be harmless, because a binding's destructor may run
+    // after an explicit close.
+    unsafe { hydra_job_snapshot_free(&mut snap) };
+
+    let mut m: hydra_metrics_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { hydra_engine_get_metrics(h.engine, &mut m) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    assert_eq!(m.jobs_completed, 1);
+    assert!(m.bytes_written >= body.len() as u64);
+}
+
+#[test]
+fn a_server_without_ranges_falls_back_to_one_stream() {
+    let body = make_body(256 * 1024);
+    let origin = serve(
+        body.clone(),
+        Behaviour {
+            ranges: false,
+            validator: false,
+            ..Behaviour::default()
+        },
+    );
+    let h = harness("noranges", false, |c| c.max_connections = 8);
+    let out = h.dir.join("plain.bin");
+    let id = make_job(&h, &origin.url("/plain.bin"), &out, |_| {});
+    unsafe { hydra_job_start(h.engine, id) };
+    let ev = await_terminal(&h, id, Duration::from_secs(60));
+    assert_eq!(
+        ev.kind,
+        hydra_event_type_t::HYDRA_EVENT_COMPLETED,
+        "{}",
+        last_error()
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), body);
+}
+
+#[test]
+fn a_matching_checksum_passes_and_a_wrong_one_fails_as_checksum() {
+    let body = make_body(128 * 1024);
+    let origin = serve(body.clone(), Behaviour::default());
+    let h = harness("checksum", false, |_| {});
+
+    let want = sha256(&body);
+    let good = h.dir.join("good.bin");
+    let id = make_job(&h, &origin.url("/o"), &good, |c| {
+        c.checksum = hydra_checksum_t {
+            algorithm: hydra_checksum_algorithm_t::HYDRA_CHECKSUM_SHA256 as u32,
+            reserved: 0,
+            digest: want.as_ptr(),
+            digest_len: want.len(),
+        };
+    });
+    unsafe { hydra_job_start(h.engine, id) };
+    let ev = await_terminal(&h, id, Duration::from_secs(60));
+    assert_eq!(ev.kind, hydra_event_type_t::HYDRA_EVENT_COMPLETED);
+
+    let mut wrong = want;
+    wrong[0] ^= 0xff;
+    let bad = h.dir.join("bad.bin");
+    let id2 = make_job(&h, &origin.url("/o"), &bad, |c| {
+        c.checksum = hydra_checksum_t {
+            algorithm: hydra_checksum_algorithm_t::HYDRA_CHECKSUM_SHA256 as u32,
+            reserved: 0,
+            digest: wrong.as_ptr(),
+            digest_len: wrong.len(),
+        };
+    });
+    unsafe { hydra_job_start(h.engine, id2) };
+    let ev = await_terminal(&h, id2, Duration::from_secs(60));
+    assert_eq!(ev.kind, hydra_event_type_t::HYDRA_EVENT_FAILED);
+    assert_eq!(
+        ev.error,
+        hydra_error_code_t::HYDRA_ERR_CHECKSUM,
+        "a mismatch must be reported as a checksum failure, not as I/O"
+    );
+
+    // A digest whose length does not match the algorithm is a caller mistake
+    // and is refused at creation.
+    let short = [0u8; 4];
+    let url = CString::new(origin.url("/o")).unwrap();
+    let urls: [*const c_char; 1] = [url.as_ptr()];
+    let out = CString::new(h.dir.join("x").to_string_lossy().into_owned()).unwrap();
+    let mut cfg: hydra_job_config_t = unsafe { std::mem::zeroed() };
+    unsafe { hydra_job_config_init(&mut cfg, std::mem::size_of::<hydra_job_config_t>() as u32) };
+    cfg.urls = urls.as_ptr();
+    cfg.url_count = 1;
+    cfg.output_path = out.as_ptr();
+    cfg.checksum = hydra_checksum_t {
+        algorithm: hydra_checksum_algorithm_t::HYDRA_CHECKSUM_SHA256 as u32,
+        reserved: 0,
+        digest: short.as_ptr(),
+        digest_len: short.len(),
+    };
+    let mut id3 = 0;
+    assert_eq!(
+        unsafe { hydra_job_create(h.engine, &cfg, &mut id3) },
+        hydra_error_code_t::HYDRA_ERR_INVALID_ARGUMENT
+    );
+}
+
+#[test]
+fn pause_preserves_progress_and_resume_finishes_the_object() {
+    let body = make_body(2 * 1024 * 1024);
+    // Slow enough that a pause lands mid-transfer rather than racing the end.
+    let origin = serve(
+        body.clone(),
+        Behaviour {
+            delay_ms: 25,
+            chunk: 32 * 1024,
+            ..Behaviour::default()
+        },
+    );
+    let h = harness("pause", false, |c| {
+        c.max_connections = 2;
+        c.adaptive_concurrency = 0;
+        c.progress_interval_ms = 20;
+    });
+    let out = h.dir.join("slow.bin");
+    let id = make_job(&h, &origin.url("/slow.bin"), &out, |c| {
+        c.adaptive = 0;
+        c.max_connections = 2;
+    });
+    unsafe { hydra_job_start(h.engine, id) };
+
+    // Wait for real progress, then pause.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut moved = 0u64;
+    while Instant::now() < deadline {
+        let mut p: hydra_progress_t = unsafe { std::mem::zeroed() };
+        unsafe { hydra_job_get_progress(h.engine, id, &mut p) };
+        if p.bytes_downloaded > 64 * 1024 {
+            moved = p.bytes_downloaded;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(moved > 0, "transfer never started moving");
+
+    assert_eq!(
+        unsafe { hydra_job_pause(h.engine, id) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    await_state(
+        &h,
+        id,
+        hydra_job_state_t::HYDRA_JOB_PAUSED,
+        Duration::from_secs(20),
+    );
+
+    let mut p: hydra_progress_t = unsafe { std::mem::zeroed() };
+    unsafe { hydra_job_get_progress(h.engine, id, &mut p) };
+    let held = p.bytes_downloaded;
+    assert!(
+        held > 0,
+        "a pause must not discard what was already fetched"
+    );
+    assert!(
+        held < body.len() as u64,
+        "the test paused too late to prove anything"
+    );
+
+    // Pausing something that is not running is a state error, not a crash.
+    assert_eq!(
+        unsafe { hydra_job_pause(h.engine, id) },
+        hydra_error_code_t::HYDRA_ERR_INVALID_STATE
+    );
+
+    assert_eq!(
+        unsafe { hydra_job_resume(h.engine, id) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let ev = await_terminal(&h, id, Duration::from_secs(120));
+    assert_eq!(
+        ev.kind,
+        hydra_event_type_t::HYDRA_EVENT_COMPLETED,
+        "{}",
+        last_error()
+    );
+    let got = std::fs::read(&out).unwrap();
+    assert_eq!(
+        sha256(&got),
+        sha256(&body),
+        "a resumed transfer must reassemble the same object"
+    );
+}
+
+#[test]
+fn cancel_can_keep_or_remove_the_partial_file() {
+    let body = make_body(1024 * 1024);
+    let origin = serve(
+        body.clone(),
+        Behaviour {
+            delay_ms: 25,
+            chunk: 16 * 1024,
+            ..Behaviour::default()
+        },
+    );
+    let h = harness("cancel", false, |c| {
+        c.max_connections = 1;
+        c.adaptive_concurrency = 0;
+    });
+
+    let keep = h.dir.join("keep.bin");
+    let a = make_job(&h, &origin.url("/a"), &keep, |c| c.adaptive = 0);
+    unsafe { hydra_job_start(h.engine, a) };
+    await_state(
+        &h,
+        a,
+        hydra_job_state_t::HYDRA_JOB_DOWNLOADING,
+        Duration::from_secs(20),
+    );
+    assert_eq!(
+        unsafe {
+            hydra_job_cancel(
+                h.engine,
+                a,
+                hydra_cancel_mode_t::HYDRA_CANCEL_KEEP_PARTIAL as u32,
+            )
+        },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let ev = await_terminal(&h, a, Duration::from_secs(30));
+    assert_eq!(ev.kind, hydra_event_type_t::HYDRA_EVENT_CANCELLED);
+    assert!(keep.exists(), "KEEP_PARTIAL must leave the file behind");
+
+    let gone = h.dir.join("gone.bin");
+    let b = make_job(&h, &origin.url("/b"), &gone, |c| c.adaptive = 0);
+    unsafe { hydra_job_start(h.engine, b) };
+    await_state(
+        &h,
+        b,
+        hydra_job_state_t::HYDRA_JOB_DOWNLOADING,
+        Duration::from_secs(20),
+    );
+    assert_eq!(
+        unsafe {
+            hydra_job_cancel(
+                h.engine,
+                b,
+                hydra_cancel_mode_t::HYDRA_CANCEL_REMOVE_PARTIAL as u32,
+            )
+        },
+        hydra_error_code_t::HYDRA_OK
+    );
+    await_terminal(&h, b, Duration::from_secs(30));
+    assert!(!gone.exists(), "REMOVE_PARTIAL must delete the file");
+
+    // A terminal job cannot be cancelled again, and cannot be started again
+    // either — but it can be forgotten.
+    assert_eq!(
+        unsafe { hydra_job_cancel(h.engine, b, 0) },
+        hydra_error_code_t::HYDRA_ERR_INVALID_STATE
+    );
+    assert_eq!(
+        unsafe { hydra_job_remove(h.engine, b) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    assert_eq!(
+        unsafe { hydra_job_get_state(h.engine, b, &mut hydra_job_state_t::HYDRA_JOB_CREATED) },
+        hydra_error_code_t::HYDRA_ERR_NOT_FOUND
+    );
+}
+
+#[test]
+fn an_unreachable_origin_fails_with_a_transport_code() {
+    let h = harness("unreachable", false, |c| c.max_retries = 1);
+    let out = h.dir.join("never.bin");
+    // Port 1 on loopback: nothing listens, and the refusal is immediate.
+    let id = make_job(&h, "http://127.0.0.1:1/never", &out, |_| {});
+    unsafe { hydra_job_start(h.engine, id) };
+    let ev = await_terminal(&h, id, Duration::from_secs(60));
+    assert_eq!(ev.kind, hydra_event_type_t::HYDRA_EVENT_FAILED);
+    assert!(
+        ev.error == hydra_error_code_t::HYDRA_ERR_CONNECTION
+            || ev.error == hydra_error_code_t::HYDRA_ERR_NETWORK,
+        "unexpected code {}",
+        unsafe { CStr::from_ptr(hydra_error_name(ev.error as u32)) }.to_string_lossy()
+    );
+
+    let mut snap: hydra_job_snapshot_t = unsafe { std::mem::zeroed() };
+    unsafe { hydra_job_get_snapshot(h.engine, id, &mut snap) };
+    let msg = unsafe { CStr::from_ptr(snap.error_message.data) }.to_string_lossy();
+    assert!(!msg.is_empty(), "a failed job must carry a reason");
+    unsafe { hydra_job_snapshot_free(&mut snap) };
+}
+
+#[test]
+fn an_http_error_status_is_reported_with_the_status_attached() {
+    let origin = serve(
+        make_body(16),
+        Behaviour {
+            force_status: Some(404),
+            ..Behaviour::default()
+        },
+    );
+    let h = harness("status", false, |c| c.max_retries = 1);
+    let out = h.dir.join("missing.bin");
+    let id = make_job(&h, &origin.url("/missing"), &out, |_| {});
+    unsafe { hydra_job_start(h.engine, id) };
+    let ev = await_terminal(&h, id, Duration::from_secs(60));
+    assert_eq!(ev.kind, hydra_event_type_t::HYDRA_EVENT_FAILED);
+    assert_eq!(
+        ev.http_status, 404,
+        "the status belongs in the event, not only in the message"
+    );
+}
+
+#[test]
+fn state_survives_the_engine_that_created_it() {
+    let body = make_body(1024 * 1024);
+    let origin = serve(
+        body.clone(),
+        Behaviour {
+            delay_ms: 25,
+            chunk: 16 * 1024,
+            ..Behaviour::default()
+        },
+    );
+    let dir = scratch("persist");
+    let state = CString::new(dir.join("state.json").to_string_lossy().into_owned()).unwrap();
+    let out = dir.join("resumable.bin");
+    let url = origin.url("/resumable.bin");
+
+    // ---- first engine: start, get some bytes, shut down --------------------
+    let held = {
+        let mut cfg: hydra_engine_config_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            hydra_engine_config_init(
+                &mut cfg,
+                std::mem::size_of::<hydra_engine_config_t>() as u32,
+            )
+        };
+        cfg.state_path = state.as_ptr();
+        cfg.max_connections = 1;
+        cfg.adaptive_concurrency = 0;
+        let engine = unsafe { hydra_engine_create(&cfg) };
+        assert!(!engine.is_null());
+        let h = Harness {
+            engine,
+            _state_path: None,
+            // Owned by this test, not by the harness: the second engine needs it.
+            dir: std::env::temp_dir().join("hydra-ffi-unused"),
+        };
+        let id = make_job(&h, &url, &out, |c| c.adaptive = 0);
+        unsafe { hydra_job_start(h.engine, id) };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut moved = 0;
+        while Instant::now() < deadline {
+            let mut p: hydra_progress_t = unsafe { std::mem::zeroed() };
+            unsafe { hydra_job_get_progress(h.engine, id, &mut p) };
+            if p.bytes_downloaded > 64 * 1024 {
+                moved = p.bytes_downloaded;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(moved > 0, "nothing was fetched before the shutdown");
+        assert_eq!(
+            unsafe { hydra_engine_shutdown(h.engine, 5000) },
+            hydra_error_code_t::HYDRA_OK
+        );
+        moved
+        // `h` drops here, destroying the engine.
+    };
+
+    assert!(
+        dir.join("state.json").exists(),
+        "shutdown must write the state file"
+    );
+
+    // ---- second engine: restore and finish --------------------------------
+    let mut cfg: hydra_engine_config_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        hydra_engine_config_init(
+            &mut cfg,
+            std::mem::size_of::<hydra_engine_config_t>() as u32,
+        )
+    };
+    cfg.state_path = state.as_ptr();
+    cfg.max_connections = 1;
+    cfg.adaptive_concurrency = 0;
+    let engine = unsafe { hydra_engine_create(&cfg) };
+    assert!(!engine.is_null());
+    let h = Harness {
+        engine,
+        _state_path: None,
+        dir: dir.clone(),
+    };
+
+    let mut restored: usize = 0;
+    assert_eq!(
+        unsafe { hydra_engine_restore(h.engine, &mut restored) },
+        hydra_error_code_t::HYDRA_OK,
+        "{}",
+        last_error()
+    );
+    assert_eq!(restored, 1, "the job must come back");
+
+    let mut ids: hydra_job_id_array_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { hydra_engine_list_jobs(h.engine, &mut ids) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    assert_eq!(ids.len, 1);
+    let id = unsafe { *ids.items };
+    unsafe { hydra_job_id_array_free(&mut ids) };
+
+    let mut st = hydra_job_state_t::HYDRA_JOB_CREATED;
+    unsafe { hydra_job_get_state(h.engine, id, &mut st) };
+    assert_eq!(
+        st,
+        hydra_job_state_t::HYDRA_JOB_PAUSED,
+        "a restored job must not start itself"
+    );
+    let mut p: hydra_progress_t = unsafe { std::mem::zeroed() };
+    unsafe { hydra_job_get_progress(h.engine, id, &mut p) };
+    assert!(
+        p.bytes_downloaded > 0 && p.bytes_downloaded <= held,
+        "the restored range map should describe roughly what was fetched \
+         (restored {}, had {held})",
+        p.bytes_downloaded
+    );
+
+    assert_eq!(
+        unsafe { hydra_job_resume(h.engine, id) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let ev = await_terminal(&h, id, Duration::from_secs(180));
+    assert_eq!(
+        ev.kind,
+        hydra_event_type_t::HYDRA_EVENT_COMPLETED,
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        sha256(&std::fs::read(&out).unwrap()),
+        sha256(&body),
+        "an object resumed across a process boundary must still be correct"
+    );
+}
+
+/// Regression: `hydra_engine_destroy` used to reach its graceful stop by calling
+/// the exported `hydra_engine_shutdown` on a handle it had already poisoned, so
+/// the call rejected its own handle and did nothing. Jobs were not stopped and
+/// no state was written — and because every other test called shutdown
+/// explicitly, nothing noticed.
+#[test]
+fn destroying_without_an_explicit_shutdown_still_persists_state() {
+    let dir = scratch("destroy-persists");
+    let state_path = dir.join("state.json");
+    let state = CString::new(state_path.to_string_lossy().into_owned()).unwrap();
+    {
+        let mut cfg: hydra_engine_config_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            hydra_engine_config_init(
+                &mut cfg,
+                std::mem::size_of::<hydra_engine_config_t>() as u32,
+            )
+        };
+        cfg.state_path = state.as_ptr();
+        let engine = unsafe { hydra_engine_create(&cfg) };
+        assert!(!engine.is_null());
+        let h = Harness {
+            engine,
+            _state_path: None,
+            dir: std::env::temp_dir().join("hydra-ffi-unused"),
+        };
+        let id = make_job(&h, "http://127.0.0.1:1/x", &dir.join("f.bin"), |_| {});
+        assert_ne!(id, 0);
+        // Deliberately NO hydra_engine_shutdown here: destroy alone must be a
+        // correct, complete shutdown.
+    }
+    assert!(
+        state_path.exists(),
+        "destroy must write the state file even when shutdown was not called"
+    );
+    let body = std::fs::read_to_string(&state_path).unwrap();
+    assert!(
+        body.contains("127.0.0.1"),
+        "the job was not recorded: {body}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn credentials_are_never_written_to_the_state_file() {
+    let h = harness("secrets", true, |_| {});
+    let out = h.dir.join("secret.bin");
+    let user = CString::new("alice").unwrap();
+    let pass = CString::new("hunter2-do-not-persist").unwrap();
+    let name = CString::new("Authorization").unwrap();
+    let value = CString::new("Bearer tok-do-not-persist").unwrap();
+    let headers = [hydra_header_t {
+        name: name.as_ptr(),
+        value: value.as_ptr(),
+    }];
+    let id = make_job(&h, "http://127.0.0.1:1/x", &out, |c| {
+        c.username = user.as_ptr();
+        c.password = pass.as_ptr();
+        c.headers = headers.as_ptr();
+        c.header_count = 1;
+    });
+    assert_ne!(id, 0);
+    assert_eq!(
+        unsafe { hydra_engine_snapshot(h.engine) },
+        hydra_error_code_t::HYDRA_OK,
+        "{}",
+        last_error()
+    );
+    let written = std::fs::read_to_string(h.dir.join("state.json")).unwrap();
+    assert!(
+        !written.contains("hunter2-do-not-persist"),
+        "a password reached the state file"
+    );
+    assert!(
+        !written.contains("tok-do-not-persist"),
+        "an Authorization header reached the state file"
+    );
+    assert!(
+        written.contains("withheld_headers") && written.contains("Authorization"),
+        "the state file should record that a header was withheld: {written}"
+    );
+    // The username is not a secret and is kept, so a restored job can be
+    // re-armed with just the password.
+    assert!(written.contains("alice"));
+}
+
+/// Userinfo in a URL is a perfectly ordinary way to leak a password. It must be
+/// stripped at creation, so that nothing downstream — the snapshot, the state
+/// file, an error message naming the source — ever had it to leak.
+#[test]
+fn url_userinfo_never_reaches_a_snapshot_or_the_state_file() {
+    let h = harness("userinfo", true, |_| {});
+    let out = h.dir.join("secret.bin");
+    let id = make_job(
+        &h,
+        "ftp://bob:hunter2-do-not-leak@files.invalid/pub/x.tar",
+        &out,
+        |_| {},
+    );
+
+    let mut snap: hydra_job_snapshot_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { hydra_job_get_snapshot(h.engine, id, &mut snap) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let url = unsafe { CStr::from_ptr(snap.url.data) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { hydra_job_snapshot_free(&mut snap) };
+    assert!(
+        !url.contains("hunter2-do-not-leak") && !url.contains("bob"),
+        "the snapshot url leaked credentials: {url}"
+    );
+    assert_eq!(url, "ftp://files.invalid/pub/x.tar");
+
+    assert_eq!(
+        unsafe { hydra_engine_snapshot(h.engine) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let written = std::fs::read_to_string(h.dir.join("state.json")).unwrap();
+    assert!(
+        !written.contains("hunter2-do-not-leak"),
+        "a URL password reached the state file"
+    );
+    // The user half is not a secret and is kept, so a restored job needs only
+    // the password put back.
+    assert!(
+        written.contains("bob"),
+        "the username should survive: {written}"
+    );
+}
+
+/// The rule documented on `hydra_job_start`: what "start" reuses is the range
+/// map, so a cancel that cleared it restarts from zero and a cancel that kept
+/// it does not.
+#[test]
+fn cancel_mode_decides_whether_a_restart_keeps_its_bytes() {
+    let body = make_body(1024 * 1024);
+    let origin = serve(
+        body,
+        Behaviour {
+            delay_ms: 25,
+            chunk: 16 * 1024,
+            ..Behaviour::default()
+        },
+    );
+    let h = harness("restart", false, |c| {
+        c.max_connections = 1;
+        c.adaptive_concurrency = 0;
+    });
+
+    for (mode, expect_zero) in [
+        (hydra_cancel_mode_t::HYDRA_CANCEL_KEEP_PARTIAL, false),
+        (hydra_cancel_mode_t::HYDRA_CANCEL_REMOVE_PARTIAL, true),
+    ] {
+        let out = h.dir.join(format!("m{}.bin", mode as u32));
+        let id = make_job(&h, &origin.url("/m.bin"), &out, |c| c.adaptive = 0);
+        unsafe { hydra_job_start(h.engine, id) };
+        // Wait for real bytes, so "kept" has something to keep.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            let mut p: hydra_progress_t = unsafe { std::mem::zeroed() };
+            unsafe { hydra_job_get_progress(h.engine, id, &mut p) };
+            if p.bytes_downloaded > 32 * 1024 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            unsafe { hydra_job_cancel(h.engine, id, mode as u32) },
+            hydra_error_code_t::HYDRA_OK
+        );
+        await_terminal(&h, id, Duration::from_secs(30));
+
+        let mut p: hydra_progress_t = unsafe { std::mem::zeroed() };
+        unsafe { hydra_job_get_progress(h.engine, id, &mut p) };
+        if expect_zero {
+            assert_eq!(
+                p.bytes_downloaded, 0,
+                "REMOVE_PARTIAL must clear the range map, so a restart begins at zero"
+            );
+            assert!(!out.exists());
+        } else {
+            assert!(
+                p.bytes_downloaded > 0,
+                "KEEP_PARTIAL must preserve the range map, so a restart resumes"
+            );
+            assert!(out.exists());
+        }
+    }
+}
+
+/// Moving a destination out from under a running transfer would leave the
+/// finished ranges in the old file, the retried ranges in the new one, and a
+/// range map claiming a single complete object. The call refuses instead.
+#[test]
+fn a_destination_cannot_be_moved_while_the_job_is_active() {
+    let body = make_body(1024 * 1024);
+    let origin = serve(
+        body,
+        Behaviour {
+            delay_ms: 25,
+            chunk: 16 * 1024,
+            ..Behaviour::default()
+        },
+    );
+    let h = harness("repath", false, |c| {
+        c.max_connections = 1;
+        c.adaptive_concurrency = 0;
+    });
+    let out = h.dir.join("start.bin");
+    let moved = CString::new(h.dir.join("moved.bin").to_string_lossy().into_owned()).unwrap();
+    let id = make_job(&h, &origin.url("/r.bin"), &out, |c| c.adaptive = 0);
+
+    // Before it starts: allowed.
+    assert_eq!(
+        unsafe { hydra_job_set_output_path(h.engine, id, moved.as_ptr()) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let back = CString::new(out.to_string_lossy().into_owned()).unwrap();
+    unsafe { hydra_job_set_output_path(h.engine, id, back.as_ptr()) };
+
+    unsafe { hydra_job_start(h.engine, id) };
+    await_state(
+        &h,
+        id,
+        hydra_job_state_t::HYDRA_JOB_DOWNLOADING,
+        Duration::from_secs(20),
+    );
+    assert_eq!(
+        unsafe { hydra_job_set_output_path(h.engine, id, moved.as_ptr()) },
+        hydra_error_code_t::HYDRA_ERR_INVALID_STATE,
+        "an active job must refuse to have its destination moved"
+    );
+
+    // Paused: allowed again, and that is the documented way to do it.
+    unsafe { hydra_job_pause(h.engine, id) };
+    await_state(
+        &h,
+        id,
+        hydra_job_state_t::HYDRA_JOB_PAUSED,
+        Duration::from_secs(20),
+    );
+    assert_eq!(
+        unsafe { hydra_job_set_output_path(h.engine, id, moved.as_ptr()) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    unsafe { hydra_job_cancel(h.engine, id, 1) };
+    await_terminal(&h, id, Duration::from_secs(30));
+}
+
+/// Removing a job must take its persisted metadata with it, or a later restore
+/// resurrects something the application deliberately forgot.
+#[test]
+fn removing_a_job_also_removes_its_persisted_metadata() {
+    let h = harness("removepersist", true, |_| {});
+    let keep = make_job(&h, "http://127.0.0.1:1/keep", &h.dir.join("k.bin"), |_| {});
+    let drop = make_job(&h, "http://127.0.0.1:1/drop", &h.dir.join("d.bin"), |_| {});
+    assert_eq!(
+        unsafe { hydra_engine_snapshot(h.engine) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let before = std::fs::read_to_string(h.dir.join("state.json")).unwrap();
+    assert!(before.contains("/drop") && before.contains("/keep"));
+
+    assert_eq!(
+        unsafe { hydra_job_remove(h.engine, drop) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let after = std::fs::read_to_string(h.dir.join("state.json")).unwrap();
+    assert!(
+        !after.contains("/drop"),
+        "a removed job stayed in the state file: {after}"
+    );
+    assert!(
+        after.contains("/keep"),
+        "removing one job must not disturb the others"
+    );
+    let _ = keep;
+}
+
+#[test]
+fn events_coalesce_progress_but_never_lose_a_completion() {
+    let body = make_body(1024 * 1024);
+    let origin = serve(body, Behaviour::default());
+    // A queue far too small for the progress traffic a transfer generates.
+    let h = harness("events", false, |c| {
+        c.event_queue_capacity = 8;
+        c.progress_interval_ms = 10;
+    });
+    let out = h.dir.join("busy.bin");
+    let id = make_job(&h, &origin.url("/busy.bin"), &out, |_| {});
+    unsafe { hydra_job_start(h.engine, id) };
+
+    // Deliberately drain slowly, so the queue is under pressure the whole time.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut saw_completed = false;
+    let mut progress_events = 0;
+    while Instant::now() < deadline && !saw_completed {
+        let mut ev: hydra_event_t = unsafe { std::mem::zeroed() };
+        if unsafe { hydra_event_wait(h.engine, 200, &mut ev) } != hydra_error_code_t::HYDRA_OK {
+            continue;
+        }
+        if ev.kind == hydra_event_type_t::HYDRA_EVENT_PROGRESS {
+            progress_events += 1;
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        if ev.kind == hydra_event_type_t::HYDRA_EVENT_COMPLETED {
+            saw_completed = true;
+        }
+    }
+    assert!(
+        saw_completed,
+        "the completion event was lost under queue pressure ({progress_events} progress events seen)"
+    );
+}
+
+#[test]
+fn an_event_callback_sees_the_same_events_as_the_queue() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEEN: AtomicU64 = AtomicU64::new(0);
+    static COMPLETED: AtomicU64 = AtomicU64::new(0);
+
+    unsafe extern "C" fn on_event(ev: *const hydra_event_t, user: *mut std::ffi::c_void) {
+        assert!(!ev.is_null());
+        assert_eq!(
+            user as usize, 0xF00D,
+            "user_data must be passed back verbatim"
+        );
+        SEEN.fetch_add(1, Ordering::Relaxed);
+        if unsafe { (*ev).kind } == hydra_event_type_t::HYDRA_EVENT_COMPLETED {
+            COMPLETED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let body = make_body(64 * 1024);
+    let origin = serve(body, Behaviour::default());
+    let h = harness("callback", false, |_| {});
+    assert_eq!(
+        unsafe { hydra_event_set_callback(h.engine, Some(on_event), 0xF00D as *mut _) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let out = h.dir.join("cb.bin");
+    let id = make_job(&h, &origin.url("/cb.bin"), &out, |_| {});
+    unsafe { hydra_job_start(h.engine, id) };
+    let ev = await_terminal(&h, id, Duration::from_secs(60));
+    assert_eq!(ev.kind, hydra_event_type_t::HYDRA_EVENT_COMPLETED);
+    // The callback runs immediately AFTER the event is queued, which is what
+    // `hydra_event_set_callback` documents. This thread was woken by that same
+    // queue push, so on a loaded machine it can arrive here before the engine
+    // thread has made the call. Wait for the callback rather than racing it:
+    // the claim under test is that the callback sees the completion at all,
+    // not that it sees it first.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while COMPLETED.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(SEEN.load(Ordering::Relaxed) > 0, "the callback never ran");
+    assert_eq!(
+        COMPLETED.load(Ordering::Relaxed),
+        1,
+        "the callback must see the completion too, not instead"
+    );
+    // Clearing must be safe while the engine is alive.
+    assert_eq!(
+        unsafe { hydra_event_set_callback(h.engine, None, ptr::null_mut()) },
+        hydra_error_code_t::HYDRA_OK
+    );
+}
+
+#[test]
+fn a_shut_down_engine_refuses_work_and_releases_waiters() {
+    let h = harness("shutdown", false, |_| {});
+    assert_eq!(
+        unsafe { hydra_engine_shutdown(h.engine, 1000) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    // Idempotent.
+    assert_eq!(
+        unsafe { hydra_engine_shutdown(h.engine, 1000) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    assert_eq!(
+        unsafe { hydra_job_start(h.engine, 1) },
+        hydra_error_code_t::HYDRA_ERR_SHUTDOWN
+    );
+    // A wait after shutdown must return at once rather than sitting out its
+    // timeout: a consumer thread has to be able to exit.
+    let began = Instant::now();
+    let mut ev: hydra_event_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe { hydra_event_wait(h.engine, 30_000, &mut ev) };
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "wait did not return promptly"
+    );
+    assert!(
+        rc == hydra_error_code_t::HYDRA_ERR_SHUTDOWN || rc == hydra_error_code_t::HYDRA_OK,
+        "unexpected code {rc:?}"
+    );
+}
+
+#[test]
+fn max_jobs_holds_the_extra_jobs_in_the_queue() {
+    let body = make_body(512 * 1024);
+    let origin = serve(
+        body,
+        Behaviour {
+            delay_ms: 20,
+            chunk: 16 * 1024,
+            ..Behaviour::default()
+        },
+    );
+    let h = harness("maxjobs", false, |c| {
+        c.max_jobs = 1;
+        c.max_connections = 1;
+        c.adaptive_concurrency = 0;
+    });
+    let a = make_job(&h, &origin.url("/a"), &h.dir.join("a.bin"), |_| {});
+    let b = make_job(&h, &origin.url("/b"), &h.dir.join("b.bin"), |_| {});
+    unsafe { hydra_job_start(h.engine, a) };
+    unsafe { hydra_job_start(h.engine, b) };
+    await_state(
+        &h,
+        a,
+        hydra_job_state_t::HYDRA_JOB_DOWNLOADING,
+        Duration::from_secs(20),
+    );
+
+    let mut st = hydra_job_state_t::HYDRA_JOB_CREATED;
+    unsafe { hydra_job_get_state(h.engine, b, &mut st) };
+    assert_eq!(
+        st,
+        hydra_job_state_t::HYDRA_JOB_QUEUED,
+        "the second job must wait for a slot, not run alongside"
+    );
+
+    // Both finish once the ceiling is lifted.
+    assert_eq!(
+        unsafe { hydra_engine_set_max_jobs(h.engine, 2) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let done = await_all_terminal(&h, &[a, b], Duration::from_secs(120));
+    for id in [a, b] {
+        assert_eq!(
+            done[&id].kind,
+            hydra_event_type_t::HYDRA_EVENT_COMPLETED,
+            "job {id}: {}",
+            last_error()
+        );
+    }
+}
+
+#[test]
+fn source_information_is_available_while_a_job_runs() {
+    let body = make_body(512 * 1024);
+    let origin = serve(
+        body,
+        Behaviour {
+            delay_ms: 20,
+            chunk: 16 * 1024,
+            ..Behaviour::default()
+        },
+    );
+    let h = harness("sources", false, |c| {
+        c.max_connections = 2;
+        c.adaptive_concurrency = 0;
+        c.progress_interval_ms = 20;
+    });
+    let id = make_job(&h, &origin.url("/s.bin"), &h.dir.join("s.bin"), |c| {
+        c.adaptive = 0;
+        c.max_connections = 2;
+    });
+    unsafe { hydra_job_start(h.engine, id) };
+    await_state(
+        &h,
+        id,
+        hydra_job_state_t::HYDRA_JOB_DOWNLOADING,
+        Duration::from_secs(20),
+    );
+
+    let mut arr: hydra_source_array_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { hydra_job_get_sources(h.engine, id, &mut arr) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    assert_eq!(arr.len, 1, "one URL means one source");
+    let first = unsafe { &*arr.items };
+    let url = unsafe { CStr::from_ptr(first.url.data) }.to_string_lossy();
+    assert!(url.contains("/s.bin"), "source url was {url:?}");
+    unsafe { hydra_source_array_free(&mut arr) };
+    // Freeing twice is harmless.
+    unsafe { hydra_source_array_free(&mut arr) };
+
+    unsafe { hydra_job_cancel(h.engine, id, 1) };
+    await_terminal(&h, id, Duration::from_secs(30));
+}

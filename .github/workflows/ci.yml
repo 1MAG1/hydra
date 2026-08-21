@@ -78,6 +78,65 @@ jobs:
       - name: Run release tests
         run: cargo test --release --all-targets --all-features
 
+  ffi-abi:
+    name: FFI ABI Conformance
+    needs: [fmt, clippy]
+    # Three platforms, because the failures this job exists to catch are
+    # platform-specific by nature: a struct that packs differently, a symbol the
+    # linker cannot find, a system library the static archive needs and does not
+    # declare. A Linux-only run would find none of them.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cbindgen
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cbindgen
+
+      # The committed header is a published ABI artifact. If it no longer
+      # matches the Rust definitions it was generated from, third parties are
+      # compiling against a description of a library that does not exist.
+      - name: Check include/hydra.h is up to date
+        if: runner.os != 'Windows'
+        run: scripts/gen-ffi-header.sh --check
+
+      - name: Run the FFI test suite
+        run: cargo test -p hya-ffi --all-targets
+
+      # The Windows runners ship MSVC but do not put cl.exe on PATH, so a C
+      # compiler has to be arranged for before anything can be compiled.
+      - name: Set up the MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # The checks Rust tests structurally cannot perform: that a C compiler and
+      # a C++ compiler both accept the header, that all three sides agree on
+      # struct layout, that a second #include is harmless, and that every symbol
+      # the header promises is really in the archive.
+      #
+      # One script on all three platforms - it drives cl where cl is the
+      # toolchain. A second copy of it in PowerShell here would be a copy that
+      # nobody can run locally and that drifts from the real one.
+      - name: Build and run the C ABI smoke test
+        shell: bash
+        env:
+          MSYS_NO_PATHCONV: '1'
+          MSYS2_ARG_CONV_EXCL: '*'
+          MSYS2_ENV_CONV_EXCL: '*'
+        run: scripts/ffi-c-example.sh
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
