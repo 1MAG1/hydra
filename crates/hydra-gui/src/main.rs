@@ -90,6 +90,7 @@ fn boot() -> (App, Task<Message>) {
     extbus::publish_config(&cfg);
     extbus::start();
 
+    let quota_saved = (state.dl_quota.used, state.dl_quota.window_start);
     let mut app = App {
         cfg,
         state,
@@ -120,6 +121,7 @@ fn boot() -> (App, Task<Message>) {
         pending_delete: vec![],
         state_dirty: false,
         cfg_dirty: false,
+        quota_saved,
         last_clipboard: String::new(),
         pending_add: None,
         capture_raise: false,

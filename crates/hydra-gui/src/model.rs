@@ -67,6 +67,11 @@ pub struct DownloadItem {
     pub cookies: Option<String>,
     /// Per-download cap, bytes/sec, when the Speed Limiter tab enables one.
     pub speed_limit: Option<u64>,
+    /// Parked by the Connection tab's download limit, not by the user. The
+    /// quota tick resumes exactly these when the window rolls over or the
+    /// cap is raised; a hand-paused item carries `false` and stays put.
+    #[serde(default)]
+    pub limit_paused: bool,
     /// Byte spans confirmed on disk; drives resume and the chunk strip.
     pub held: Vec<(u64, u64)>,
     /// The `.part` staging file, pinned when the transfer first starts so a
@@ -521,6 +526,25 @@ pub struct ConfigFile {
     pub queues: Vec<QueueDef>,
 }
 
+/// Rolling accounting for the Connection tab's "Download no more than N
+/// MBytes every H hours".
+///
+/// Lives in the state file rather than in [`Settings`], deliberately: the
+/// Options dialog edits a *clone* of the settings and writes the whole clone
+/// back on OK, so a counter kept there would be rewound to whatever it read
+/// when the dialog opened — silently refunding every byte transferred while
+/// the dialog was on screen.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DlQuota {
+    /// Bytes transferred inside the current window.
+    pub used: u64,
+    /// Unix seconds the window opened; 0 = no window running yet. The window
+    /// starts at the first accounted byte, not at app start, so an idle
+    /// Hydra does not burn through periods it never downloaded in.
+    pub window_start: i64,
+}
+
 /// Runtime state: the download list. Kept separate from configuration so a
 /// hand-edited (or broken) config never touches the user's download history.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -528,6 +552,7 @@ pub struct ConfigFile {
 pub struct StateFile {
     pub next_id: DlId,
     pub downloads: Vec<DownloadItem>,
+    pub dl_quota: DlQuota,
 }
 
 impl Default for StateFile {
@@ -535,6 +560,7 @@ impl Default for StateFile {
         StateFile {
             next_id: 1,
             downloads: vec![],
+            dl_quota: DlQuota::default(),
         }
     }
 }
@@ -586,6 +612,12 @@ pub fn save_config(cfg: &ConfigFile) {
 // A `gui-state.json` from earlier builds is migrated in on first load.
 
 const DOWNLOADS: redb::TableDefinition<u64, &[u8]> = redb::TableDefinition::new("downloads");
+/// Small singleton records that are not download rows. Only the download
+/// limit's window counter lives here today; it is kept out of `config.toml`
+/// on purpose (it moves while transfers run, and that file is hand-editable)
+/// and out of the downloads table so saving it does not rewrite every row.
+const META: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("meta");
+const QUOTA_KEY: &str = "dl_quota";
 
 fn state_db() -> Option<&'static redb::Database> {
     use std::sync::OnceLock;
@@ -657,6 +689,18 @@ pub fn load_state() -> StateFile {
             }
         }
     }
+    if let Some(db) = state_db() {
+        use redb::ReadableDatabase;
+        if let Ok(txn) = db.begin_read() {
+            if let Ok(table) = txn.open_table(META) {
+                if let Ok(Some(row)) = table.get(QUOTA_KEY) {
+                    if let Ok(q) = serde_json::from_slice::<DlQuota>(row.value()) {
+                        st.dl_quota = q;
+                    }
+                }
+            }
+        }
+    }
     // A transfer that was live when the process died is not live now.
     for d in &mut st.downloads {
         if d.state.is_active() {
@@ -683,5 +727,22 @@ pub fn save_state(st: &StateFile) {
     }
     if let Err(e) = txn.commit() {
         crate::log::error(&format!("state save failed: {e}"));
+    }
+    save_quota(&st.dl_quota);
+}
+
+/// Persist the download-limit window on its own. The counter moves while
+/// transfers run, and [`save_state`] rewrites the whole downloads table —
+/// this is the one-row write a per-second update can afford.
+pub fn save_quota(q: &DlQuota) {
+    let Some(db) = state_db() else { return };
+    let Ok(txn) = db.begin_write() else { return };
+    {
+        if let (Ok(mut table), Ok(bytes)) = (txn.open_table(META), serde_json::to_vec(q)) {
+            let _ = table.insert(QUOTA_KEY, bytes.as_slice());
+        }
+    }
+    if let Err(e) = txn.commit() {
+        crate::log::error(&format!("download-limit counter save failed: {e}"));
     }
 }

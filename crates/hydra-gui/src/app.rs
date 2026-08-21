@@ -5,7 +5,8 @@
 
 use crate::engine::{self, Cmd, StartSpec};
 use crate::model::{
-    self, categorize, ConfigFile, DlId, DlState, DownloadItem, ProxyMode, SiteLogin, StateFile,
+    self, categorize, ConfigFile, DlId, DlQuota, DlState, DownloadItem, ProxyMode, SiteLogin,
+    StateFile,
 };
 use crate::sounds;
 use crate::{fmt, i18n};
@@ -324,6 +325,14 @@ pub struct OptionsState {
     pub login_pass: String,
     pub conn_exc_server: String,
     pub conn_exc_n: String,
+    /// Text buffers for the Download-limit numbers. The draft holds `u64`,
+    /// and binding an input straight to `n.to_string()` makes the field
+    /// un-clearable: an empty string fails to parse, the commit is skipped
+    /// and the old number is re-rendered on the next frame, so the user can
+    /// never backspace past the first digit. The buffer holds what was
+    /// typed; the draft takes it whenever it parses.
+    pub dl_limit_mb_txt: String,
+    pub dl_limit_hours_txt: String,
 }
 
 impl Default for OptionsState {
@@ -341,6 +350,8 @@ impl Default for OptionsState {
             login_pass: String::new(),
             conn_exc_server: String::new(),
             conn_exc_n: String::new(),
+            dl_limit_mb_txt: String::new(),
+            dl_limit_hours_txt: String::new(),
         }
     }
 }
@@ -704,6 +715,10 @@ pub struct App {
     /// so a 200-link batch add is one db write instead of 200.
     pub state_dirty: bool,
     pub cfg_dirty: bool,
+    /// `(used, window_start)` as last written to the state db, so the
+    /// download-limit counter is persisted only when it actually moved
+    /// instead of once a second regardless.
+    pub quota_saved: (u64, i64),
     /// Last clipboard text seen by the URL watcher (deduplication).
     pub last_clipboard: String,
     /// URL+auth waiting on the duplicate/exists decision dialog.
@@ -1092,7 +1107,118 @@ impl App {
         })
     }
 
+    // ------------------------------------------------- download limit
+
+    fn quota_exhausted(&self) -> bool {
+        quota_over_cap(&self.cfg.settings, &self.state.dl_quota)
+    }
+
+    /// Charge freshly arrived bytes against the current window.
+    ///
+    /// The caller passes the delta rather than a running total because
+    /// `downloaded` can move *backwards* — a repair shrinks the held set —
+    /// and a repair must not refund bytes that crossed the wire.
+    fn quota_account(&mut self, bytes: u64) {
+        if bytes == 0 || quota_cap(&self.cfg.settings).is_none() {
+            return;
+        }
+        let q = &mut self.state.dl_quota;
+        // The window opens at the first accounted byte, not at app start: an
+        // idle Hydra must not burn through periods it never downloaded in.
+        if q.window_start == 0 {
+            q.window_start = fmt::now_unix();
+        }
+        q.used = q.used.saturating_add(bytes);
+    }
+
+    /// Roll the window when it has elapsed, then reconcile the list with the
+    /// quota: over the cap, active transfers are parked; under it (rollover,
+    /// a raised cap, or the limit switched off), the transfers the limiter
+    /// itself parked come back.
+    fn quota_tick(&mut self) -> Task<Message> {
+        let q = &self.state.dl_quota;
+        if (q.used, q.window_start) != self.quota_saved {
+            self.quota_saved = (q.used, q.window_start);
+            model::save_quota(q);
+        }
+        if quota_window_elapsed(&self.cfg.settings, &self.state.dl_quota, fmt::now_unix()) {
+            crate::log::info(&format!(
+                "download limit: window elapsed after {}; counter reset",
+                fmt::size2(self.state.dl_quota.used)
+            ));
+            self.state.dl_quota = DlQuota::default();
+            self.save_state();
+        }
+        if self.quota_exhausted() {
+            self.quota_park()
+        } else {
+            self.quota_release()
+        }
+    }
+
+    /// Stop everything still transferring and mark it as the limiter's doing,
+    /// so the next window can tell it apart from a hand-paused item.
+    fn quota_park(&mut self) -> Task<Message> {
+        let ids = quota_park_targets(&self.state.downloads);
+        if ids.is_empty() {
+            return Task::none();
+        }
+        crate::log::info(&format!(
+            "download limit reached ({} of {} MB in {} h): pausing {} transfer(s)",
+            fmt::size2(self.state.dl_quota.used),
+            self.cfg.settings.dl_limit_mb,
+            self.cfg.settings.dl_limit_hours,
+            ids.len(),
+        ));
+        for id in ids {
+            self.stop_download(id);
+            if let Some(d) = self.item_mut(id) {
+                d.limit_paused = true;
+                d.status_line = i18n::tr("Download limit reached");
+            }
+        }
+        self.save_state();
+        Task::none()
+    }
+
+    /// Release what the limiter parked. Queue members go back to `Queued` and
+    /// let `queue_tick` pace them against `files_at_once`; direct downloads
+    /// start again immediately.
+    fn quota_release(&mut self) -> Task<Message> {
+        let released = quota_release_targets(&mut self.state.downloads);
+        // The common case, on every tick: nothing was parked, nothing to do —
+        // and in particular nothing to mark dirty, since a save rewrites the
+        // whole download table.
+        if released.is_empty() {
+            return Task::none();
+        }
+        crate::log::info(&format!(
+            "download limit: window open again, resuming {} transfer(s)",
+            released.len()
+        ));
+        let mut tasks = Vec::new();
+        for (id, requeued) in released {
+            if !requeued {
+                tasks.push(self.start_download(id, false));
+            }
+        }
+        self.save_state();
+        Task::batch(tasks)
+    }
+
     pub fn start_download(&mut self, id: DlId, open_progress: bool) -> Task<Message> {
+        // Over the window's cap nothing new goes on the wire. The item is
+        // marked as the limiter's, so the tick that reopens the window picks
+        // it up instead of leaving it paused until someone notices.
+        if self.quota_exhausted() {
+            if let Some(d) = self.item_mut(id) {
+                if !d.state.is_active() {
+                    d.limit_paused = true;
+                    d.status_line = i18n::tr("Download limit reached");
+                }
+            }
+            return Task::none();
+        }
         let user_agent = self.cfg.settings.user_agent.clone();
         let adaptive = self.cfg.settings.adaptive_conns;
         let Some(d) = self.item_mut(id) else {
@@ -1102,6 +1228,9 @@ impl App {
             return Task::none();
         }
         d.state = DlState::Connecting;
+        // Whatever parked it, it is running now: the flag must not survive
+        // into the next window and resume the same download twice.
+        d.limit_paused = false;
         d.status_line = i18n::tr("Connecting...");
         d.last_try = Some(fmt::now_unix());
         d.conns.clear();
@@ -1314,6 +1443,7 @@ impl App {
             auth,
             cookies: None,
             speed_limit: None,
+            limit_paused: false,
             held: vec![],
             part_path: None,
             rate: 0.0,
@@ -1386,7 +1516,13 @@ impl App {
                 q.running
                     && !self.state.downloads.iter().any(|d| {
                         d.queue.as_deref() == Some(q.name.as_str())
-                            && (d.state.is_active() || d.state == DlState::Queued)
+                            // `limit_paused` counts as outstanding work: a
+                            // queue whose files the download limit parked is
+                            // waiting for the next window, not finished, and
+                            // must not fire its sound or `exit_when_done`.
+                            && (d.state.is_active()
+                                || d.state == DlState::Queued
+                                || d.limit_paused)
                     })
             })
             .map(|q| q.name.clone())
@@ -1577,17 +1713,20 @@ impl App {
                 conns,
                 held,
             } => {
+                let mut fresh = 0u64;
                 if let Some(d) = self.item_mut(id) {
                     // `held` is authoritative for the byte total wherever it
                     // exists: after a repair the scheduler can shrink the
                     // held set below a previously-reported `done`, and
                     // storing the two independently made the bar and the
                     // chunk strip disagree from that point on.
-                    d.downloaded = if held.is_empty() {
+                    let total = if held.is_empty() {
                         done
                     } else {
                         sum_spans(&held)
                     };
+                    fresh = total.saturating_sub(d.downloaded);
+                    d.downloaded = total;
                     d.rate = rate;
                     d.eta_secs = eta;
                     d.conns = conns;
@@ -1595,6 +1734,13 @@ impl App {
                     if d.state == DlState::Connecting {
                         d.state = DlState::Receiving;
                     }
+                }
+                self.quota_account(fresh);
+                // Enforced here rather than left to the one-second tick: at
+                // 100 MB/s a tick of slack is 100 MB past the cap, and in
+                // power-save mode the tick is three seconds apart.
+                if self.quota_exhausted() {
+                    return self.quota_park();
                 }
                 Task::none()
             }
@@ -1665,6 +1811,7 @@ impl App {
                     .map(|p| p.remember_limit)
                     .unwrap_or(false);
                 if let Some(d) = self.item_mut(id) {
+                    let by_limit = d.limit_paused;
                     d.state = DlState::Paused;
                     // `held` authoritative, counter derived (see Progress).
                     if !held.is_empty() {
@@ -1678,7 +1825,11 @@ impl App {
                     }
                     // Keep the last measured rate/ETA on screen:
                     // a paused dialog still shows what the transfer was doing.
-                    d.status_line = i18n::tr("Pause");
+                    d.status_line = if by_limit {
+                        i18n::tr("Download limit reached")
+                    } else {
+                        i18n::tr("Pause")
+                    };
                     for c in &mut d.conns {
                         c.info = i18n::tr("Disconnect.");
                     }
@@ -1911,7 +2062,8 @@ impl App {
                 }
                 self.sweep_pending_deletes();
                 self.schedule_tick();
-                let queue = self.queue_tick();
+                let quota = self.quota_tick();
+                let queue = Task::batch([quota, self.queue_tick()]);
                 self.flush_saves();
                 if self.cfg.settings.monitor_clipboard {
                     Task::batch([queue, iced::clipboard::read().map(Message::ClipboardSeen)])
@@ -3483,6 +3635,8 @@ impl App {
                 self.options.draft = self.cfg.settings.clone();
                 self.options.draft_cats = self.cfg.categories.clone();
                 self.options.sel_category = "General".into();
+                self.options.dl_limit_mb_txt = self.cfg.settings.dl_limit_mb.to_string();
+                self.options.dl_limit_hours_txt = self.cfg.settings.dl_limit_hours.to_string();
                 self.options.auto_types_edit =
                     iced::widget::text_editor::Content::with_text(&self.cfg.settings.auto_types);
                 self.options.sites_edit = iced::widget::text_editor::Content::with_text(
@@ -3639,6 +3793,26 @@ impl App {
                 self.options.draft.dont_start_sites = self.options.sites_edit.text();
                 return Task::none();
             }
+            // The Download-limit numbers keep a text buffer beside the draft:
+            // digits only, and the draft takes the value only when it parses,
+            // so a momentarily empty field is a legal editing state instead of
+            // an ignored keystroke.
+            OptField::DlLimitMb(v) => {
+                let v: String = v.chars().filter(|c| c.is_ascii_digit()).take(9).collect();
+                if let Ok(n) = v.parse() {
+                    self.options.draft.dl_limit_mb = n;
+                }
+                self.options.dl_limit_mb_txt = v;
+                return Task::none();
+            }
+            OptField::DlLimitHours(v) => {
+                let v: String = v.chars().filter(|c| c.is_ascii_digit()).take(5).collect();
+                if let Ok(n) = v.parse() {
+                    self.options.draft.dl_limit_hours = n;
+                }
+                self.options.dl_limit_hours_txt = v;
+                return Task::none();
+            }
             _ => {}
         }
         let s = &mut self.options.draft;
@@ -3660,7 +3834,10 @@ impl App {
                     x.1 = b;
                 }
             }
-            OptField::AutoTypesEdit(_) | OptField::SitesEdit(_) => unreachable!(),
+            OptField::AutoTypesEdit(_)
+            | OptField::SitesEdit(_)
+            | OptField::DlLimitMb(_)
+            | OptField::DlLimitHours(_) => unreachable!(),
             OptField::ExcDialog(b) => s.show_exception_dialog = b,
             OptField::RememberLast(b) => s.remember_last_dir = b,
             OptField::ServerDate(b) => s.server_file_date = b,
@@ -3698,16 +3875,6 @@ impl App {
                 }
             }
             OptField::DlLimit(b) => s.dl_limit_enabled = b,
-            OptField::DlLimitMb(v) => {
-                if let Ok(n) = v.parse() {
-                    s.dl_limit_mb = n;
-                }
-            }
-            OptField::DlLimitHours(v) => {
-                if let Ok(n) = v.parse() {
-                    s.dl_limit_hours = n;
-                }
-            }
             OptField::WarnStop(b) => s.warn_before_stop = b,
             OptField::ProxyMode(m) => s.proxy_mode = m,
             OptField::ProxyScript(v) => s.proxy_script = v,
@@ -4055,6 +4222,66 @@ pub fn schedule_start_due(
     s.once || s.days.get(weekday).copied().unwrap_or(false)
 }
 
+/// Bytes the Connection tab's download limit allows per window, or `None`
+/// while the limit is switched off.
+pub fn quota_cap(s: &crate::model::Settings) -> Option<u64> {
+    s.dl_limit_enabled
+        .then(|| s.dl_limit_mb.saturating_mul(1024 * 1024))
+}
+
+/// Window length in seconds. Zero hours would describe a window that never
+/// rolls — a permanent block once the cap is hit — so it floors at one.
+pub fn quota_window_secs(s: &crate::model::Settings) -> i64 {
+    (s.dl_limit_hours.max(1) as i64).saturating_mul(3600)
+}
+
+/// Is the cap reached? False whenever the limit is off, so every caller can
+/// ask this one question instead of re-testing the checkbox.
+pub fn quota_over_cap(s: &crate::model::Settings, q: &DlQuota) -> bool {
+    matches!(quota_cap(s), Some(cap) if q.used >= cap)
+}
+
+/// Has the running window aged out? A window that never opened
+/// (`window_start == 0`) has nothing to roll.
+pub fn quota_window_elapsed(s: &crate::model::Settings, q: &DlQuota, now: i64) -> bool {
+    q.window_start > 0 && now.saturating_sub(q.window_start) >= quota_window_secs(s)
+}
+
+/// Everything the download limit must park: whatever is transferring, plus
+/// what is merely waiting for a slot — a queued item would otherwise be
+/// started by the very next `queue_tick` and immediately blocked, leaving
+/// the list saying "Queued" when nothing can move for hours.
+pub fn quota_park_targets(downloads: &[DownloadItem]) -> Vec<DlId> {
+    downloads
+        .iter()
+        .filter(|d| d.state.is_active() || d.state == DlState::Queued)
+        .map(|d| d.id)
+        .collect()
+}
+
+/// Hand back what the limiter parked, and only that: a hand-paused download
+/// carries `limit_paused == false` and must stay paused across a rollover.
+///
+/// Queue members go back to `Queued` so their queue paces them against
+/// `files_at_once`; every released id is returned, paired with whether the
+/// queue took it back — the caller starts the rest itself.
+pub fn quota_release_targets(downloads: &mut [DownloadItem]) -> Vec<(DlId, bool)> {
+    let mut released = vec![];
+    for d in downloads {
+        if !d.limit_paused {
+            continue;
+        }
+        d.limit_paused = false;
+        d.status_line.clear();
+        let requeued = d.queue.is_some();
+        if requeued {
+            d.state = DlState::Queued;
+        }
+        released.push((d.id, requeued));
+    }
+    released
+}
+
 /// Put a queue's paused/errored members back to `Queued` with a fresh retry
 /// budget. Shared by every start path (menu, toolbar, scheduler wall-clock,
 /// startup) via [`App::set_queue_running`].
@@ -4128,6 +4355,7 @@ mod tests {
             auth: None,
             cookies: None,
             speed_limit: None,
+            limit_paused: false,
             held: vec![],
             part_path: None,
             rate: 0.0,
@@ -4225,6 +4453,108 @@ mod tests {
         assert_eq!(mon.weekday().num_days_from_sunday(), 1);
         let sat = chrono::NaiveDate::from_ymd_opt(2026, 8, 22).unwrap();
         assert_eq!(sat.weekday().num_days_from_sunday(), 6);
+    }
+
+    fn limit_settings(mb: u64, hours: u64) -> crate::model::Settings {
+        crate::model::Settings {
+            dl_limit_enabled: true,
+            dl_limit_mb: mb,
+            dl_limit_hours: hours,
+            ..crate::model::Settings::default()
+        }
+    }
+
+    #[test]
+    fn quota_counts_only_while_the_limit_is_on() {
+        let mut off = limit_settings(2, 5);
+        off.dl_limit_enabled = false;
+        assert_eq!(quota_cap(&off), None);
+        // Off means off even with a counter left over from an earlier window:
+        // nothing may be blocked by a limit the user switched away.
+        let stale = DlQuota {
+            used: 999 * 1024 * 1024,
+            window_start: 1,
+        };
+        assert!(!quota_over_cap(&off, &stale));
+        assert_eq!(quota_cap(&limit_settings(2, 5)), Some(2 * 1024 * 1024));
+    }
+
+    #[test]
+    fn quota_blocks_at_the_cap_not_before() {
+        let s = limit_settings(2, 5);
+        let cap = 2 * 1024 * 1024;
+        let under = DlQuota {
+            used: cap - 1,
+            window_start: 100,
+        };
+        let at = DlQuota {
+            used: cap,
+            window_start: 100,
+        };
+        assert!(!quota_over_cap(&s, &under));
+        assert!(quota_over_cap(&s, &at));
+    }
+
+    #[test]
+    fn quota_window_rolls_on_the_hour_it_was_given() {
+        let s = limit_settings(2, 5);
+        let q = DlQuota {
+            used: 10,
+            window_start: 1000,
+        };
+        assert!(!quota_window_elapsed(&s, &q, 1000 + 5 * 3600 - 1));
+        assert!(quota_window_elapsed(&s, &q, 1000 + 5 * 3600));
+        // A window that never opened has nothing to roll, whatever the clock
+        // says — otherwise a fresh install would "reset" on every tick.
+        let never = DlQuota {
+            used: 0,
+            window_start: 0,
+        };
+        assert!(!quota_window_elapsed(&s, &never, 9_999_999));
+        // Zero hours would describe a window that never rolls: floored at one
+        // so the cap can never become a permanent block.
+        assert_eq!(quota_window_secs(&limit_settings(2, 0)), 3600);
+    }
+
+    #[test]
+    fn quota_parks_running_and_waiting_work_only() {
+        let downloads = vec![
+            item(1, "/d", "a.zip", None, DlState::Receiving),
+            item(2, "/d", "b.zip", None, DlState::Connecting),
+            item(3, "/d", "c.zip", Some("Q"), DlState::Queued),
+            item(4, "/d", "d.zip", None, DlState::Paused),
+            item(5, "/d", "e.zip", None, DlState::Complete),
+            item(6, "/d", "f.zip", None, DlState::Error),
+        ];
+        // Queued is included: leaving it alone would have `queue_tick` start
+        // it a second later only for the cap to refuse it, over and over.
+        assert_eq!(quota_park_targets(&downloads), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn quota_releases_only_what_it_parked() {
+        let mut downloads = vec![
+            item(1, "/d", "a.zip", None, DlState::Paused),
+            item(2, "/d", "b.zip", Some("Q"), DlState::Paused),
+            item(3, "/d", "c.zip", None, DlState::Paused),
+        ];
+        downloads[0].limit_paused = true;
+        downloads[1].limit_paused = true;
+        downloads[1].status_line = "Download limit reached".into();
+        // #3 is the user's own pause and carries no flag.
+        let released = quota_release_targets(&mut downloads);
+        assert_eq!(released, vec![(1, false), (2, true)]);
+        // The queue member is handed back to its queue rather than started
+        // behind the queue's back; the direct download is the caller's to
+        // start, and stays paused until it does.
+        assert_eq!(downloads[1].state, DlState::Queued);
+        assert!(downloads[1].status_line.is_empty());
+        assert_eq!(downloads[0].state, DlState::Paused);
+        assert!(!downloads[0].limit_paused && !downloads[1].limit_paused);
+        // Hand-paused: untouched.
+        assert_eq!(downloads[2].state, DlState::Paused);
+        // Idempotent — a second tick releases nothing.
+        assert!(quota_release_targets(&mut downloads).is_empty());
     }
 
     #[test]

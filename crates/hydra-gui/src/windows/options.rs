@@ -343,6 +343,31 @@ fn downloads(app: &App) -> El<'_> {
     .into()
 }
 
+/// One-line readout of the live window beneath the limit controls: what the
+/// running limit has counted and when it rolls over. Reads the *saved*
+/// settings, not the draft — the draft is not in force until OK is pressed.
+fn quota_line(app: &App) -> String {
+    let s = &app.cfg.settings;
+    if !s.dl_limit_enabled {
+        return tr("Limit off: transfers are not counted.");
+    }
+    let q = &app.state.dl_quota;
+    if q.window_start == 0 {
+        return tr("The period starts with the next downloaded byte.");
+    }
+    let left = crate::app::quota_window_secs(s)
+        .saturating_sub(crate::fmt::now_unix().saturating_sub(q.window_start))
+        .max(0) as u64;
+    format!(
+        "{} {} / {} \u{2014} {} {}",
+        tr("Used this period:"),
+        crate::fmt::size2(q.used),
+        crate::fmt::size2(crate::app::quota_cap(s).unwrap_or(0)),
+        tr("resets in"),
+        crate::fmt::eta(left),
+    )
+}
+
 fn connection(app: &App) -> El<'_> {
     let s = &app.options.draft;
     let st = &app.options;
@@ -400,21 +425,24 @@ fn connection(app: &App) -> El<'_> {
         ]
         .spacing(8),
         section(tr("Download limits")),
-        checkbox(s.dl_limit_enabled)
-            .label(tr("Download limits"))
-            .on_toggle(|b| o(OptField::DlLimit(b)))
-            .size(15.0)
-            .text_size(theme::FONT_SIZE)
-            .style(theme::check),
+        hinted(
+            checkbox(s.dl_limit_enabled)
+                .label(tr("Download limits"))
+                .on_toggle(|b| o(OptField::DlLimit(b)))
+                .size(15.0)
+                .text_size(theme::FONT_SIZE)
+                .style(theme::check),
+            tr("Caps how much Hydra may transfer per period — for metered or capped connections. Transfers pause when the cap is reached and resume by themselves when the next period starts."),
+        ),
         row![
             text(tr("Download no more than")).size(theme::FONT_SIZE),
-            text_input("200", &s.dl_limit_mb.to_string())
+            text_input("200", &st.dl_limit_mb_txt)
                 .on_input(|v| o(OptField::DlLimitMb(v)))
                 .size(theme::FONT_SIZE)
                 .style(theme::input)
                 .width(80.0),
             text(tr("MBytes every")).size(theme::FONT_SIZE),
-            text_input("5", &s.dl_limit_hours.to_string())
+            text_input("5", &st.dl_limit_hours_txt)
                 .on_input(|v| o(OptField::DlLimitHours(v)))
                 .size(theme::FONT_SIZE)
                 .style(theme::input)
@@ -423,6 +451,9 @@ fn connection(app: &App) -> El<'_> {
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
+        text(quota_line(app))
+            .size(theme::FONT_SIZE - 1.0)
+            .color(theme::dim_text(&iced::Theme::Light)),
         checkbox(s.warn_before_stop)
             .label(tr("Show warning before stopping downloads"))
             .on_toggle(|b| o(OptField::WarnStop(b)))
