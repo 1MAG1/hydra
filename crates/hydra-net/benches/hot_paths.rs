@@ -187,7 +187,7 @@ fn bench_hex(c: &mut Criterion) {
     g.bench_function("40k_digests", |b| {
         b.iter(|| {
             let mut acc = 0usize;
-            for c in black_box(&bulk).chunks_exact(32) {
+            for c in black_box(&bulk).as_chunks::<32>().0 {
                 acc += to_lower_hex(c).len();
             }
             acc

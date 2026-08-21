@@ -67,9 +67,8 @@ use std::fmt;
 pub fn to_lower_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = vec![0u8; bytes.len() * 2];
-    // `chunks_exact(2)` over the output gives LLVM a fixed-width store per input
-    // byte and drops the per-index bounds check.
-    for (o, &b) in out.chunks_exact_mut(2).zip(bytes) {
+    let (chunks, _) = out.as_chunks_mut::<2>();
+    for (o, &b) in chunks.iter_mut().zip(bytes) {
         o[0] = HEX[(b >> 4) as usize];
         o[1] = HEX[(b & 0x0f) as usize];
     }
