@@ -50,7 +50,7 @@
 **HYDRA** is a high-performance network file retriever designed for speed, resilience, and adaptability. It dynamically partitions downloads across multiple connections and independent mirror sources, continuously rebalancing work to maximize throughput without stalling on slow peers. It ships as both a `wget`/`curl`-compatible CLI and a cross-platform desktop download manager with browser integration.
 
 <p align="center">
-  <img src="docs/img/screenshot.png" alt="Hydra Download Manager" width="720">
+  <img src="docs/img/screenshot.jpg" alt="Hydra Download Manager" width="720">
 </p>
 
 ## Key Features
