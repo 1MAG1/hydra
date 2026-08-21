@@ -286,6 +286,55 @@ if [ "$toolchain" = "msvc" ]; then
     LINK_EXE="$(dirname "$(command -v "$CC")")/link.exe"
     [ -x "$LINK_EXE" ] || LINK_EXE="link"
 
+    # Not every library rustc names lives in LIB. `windows-targets` ships its
+    # own import library - windows.0.52.0.lib and friends - inside the crate and
+    # tells rustc where it is with a link-search path; `--print
+    # native-static-libs` reports the name and drops the path. No Visual Studio
+    # installation has that file, so the link dies on LNK1181 for a library that
+    # is sitting in the cargo registry. Find the crate's copy and hand the
+    # linker the directory.
+    #
+    # Which libraries a crate ships this way is a function of the target: the
+    # x86_64 build resolves the same imports through the SDK and never names it.
+    crate_lib_dirs=()
+    remember_crate_lib_dir() {
+        local dir="$1" seen
+        for seen in ${crate_lib_dirs[@]+"${crate_lib_dirs[@]}"}; do
+            [ "$seen" = "$dir" ] && return 0
+        done
+        crate_lib_dirs+=("$dir")
+    }
+    # Both places a dependency can leave one: a build script's OUT_DIR, and the
+    # unpacked crate source (registry, or vendored into the tree).
+    # CARGO_HOME may be set in the Windows spelling, which no glob in this
+    # shell can walk. Ask cygpath for the POSIX one.
+    cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+    cargo_home="$(cygpath -u "$cargo_home" 2>/dev/null || printf '%s' "$cargo_home")"
+    find_shipped_lib_dir() {
+        local name="$1" dir
+        for dir in "$root/target/$profile/build"/*/out \
+                   "$cargo_home/registry/src"/*/*/lib \
+                   "$root/vendor"/*/lib; do
+            if [ -f "$dir/$name" ]; then
+                printf '%s' "$dir"
+                return 0
+            fi
+        done
+        return 1
+    }
+    for arg in $native_libs; do
+        # Linker flags, not libraries; the response file skips them too.
+        case "$arg" in /*|-*) continue ;; esac
+        find_in_lib "$arg" >/dev/null && continue
+        if shipped_dir="$(find_shipped_lib_dir "$arg")"; then
+            echo "    $arg is not in LIB; using the copy in $shipped_dir"
+            remember_crate_lib_dir "$(winpath "$shipped_dir")"
+        else
+            echo "    warning: $arg is in neither LIB nor any crate lib" \
+                 "directory; the link will probably fail on it" >&2
+        fi
+    done
+
     # -MT, not the default -MD: .cargo/config.toml builds the Windows targets
     # with +crt-static, so rustc asks for libcmt and a C object compiled against
     # the DLL runtime would drag in a second, conflicting CRT.
@@ -322,7 +371,8 @@ if [ "$toolchain" = "msvc" ]; then
             printf -- '/OUT:"%s"\n' "$(winpath "$out/$prog.exe")"
             printf '"%s"\n' "$(winpath "$out/$prog.obj")"
             printf '"%s"\n' "$(winpath "$archive")"
-            for dir in ${lib_dirs_win[@]+"${lib_dirs_win[@]}"}; do
+            for dir in ${lib_dirs_win[@]+"${lib_dirs_win[@]}"} \
+                       ${crate_lib_dirs[@]+"${crate_lib_dirs[@]}"}; do
                 printf -- '/LIBPATH:"%s"\n' "$dir"
             done
             # Ignore default library search in LIB environment, resolving CRT
