@@ -116,6 +116,12 @@ struct Conn {
     detector: crate::detect::CollapseDetector,
     last_progress: f64,
     setup_end: f64,
+    /// When the request this connection is running now was issued.
+    ///
+    /// Arrivals older than this belong to a request that has been superseded —
+    /// reclaimed after a stall, cancelled, or failed — and must not be credited,
+    /// even when they land exactly at the cursor. See `on_bytes_at`.
+    started_at: f64,
     stalled: bool,
     /// Bytes and wall clock accumulated since the last RATE sample.
     ///
@@ -148,6 +154,7 @@ impl Conn {
             rate_acc_dt: 0.0,
             last_progress: 0.0,
             setup_end: 0.0,
+            started_at: f64::NEG_INFINITY,
             stalled: false,
         }
     }
@@ -513,6 +520,27 @@ impl Scheduler {
         if off != c.pos || off < r.lo {
             return; // stale arrival from a superseded range
         }
+        // ---- and stale by TIME, not only by offset --------------------------
+        //
+        // Matching the cursor is not enough to prove an arrival belongs to the
+        // request in flight. When a connection is reclaimed and re-requested, the
+        // new request starts at exactly the cursor the old one stopped at — so
+        // the last writes of the aborted request, still in the caller's queue,
+        // land at precisely the offset the new request is waiting for.
+        //
+        // Crediting them is not a coverage error (the bytes are on disk) but it
+        // desynchronises the connection: the cursor moves past where the new
+        // response begins, so every arrival that response produces fails the test
+        // above and is discarded. The connection then delivers bytes that are
+        // never counted, reads as silent, and is rescued only by the stall
+        // timeout — seconds of dead air, and the transfer visibly frozen for them
+        // once the endgame has left one connection carrying the remainder.
+        //
+        // A request cannot be answered before it was issued, so the arrival's own
+        // timestamp settles it.
+        if now < c.started_at {
+            return;
+        }
         let room = r.hi.saturating_sub(c.pos);
         let step = n.min(room);
         if step == 0 {
@@ -555,6 +583,45 @@ impl Scheduler {
         for j in idxs {
             self.reclaim(j);
         }
+    }
+
+    /// A connection's transport failed: reclaim its range NOW, and hold that
+    /// connection back for `retry_after` seconds.
+    ///
+    /// # Why silence is not the right signal for a failure
+    ///
+    /// The stall timeout exists to grade a connection that is *delivering
+    /// nothing*, and it has to be patient — several seconds at least, scaled to
+    /// the measured setup cost, because a slow path is not a broken one. A fetch
+    /// that has already returned an error needs none of that patience: the
+    /// question the timeout is there to answer has been answered, by the
+    /// transport, definitively.
+    ///
+    /// Without this the two are conflated, and the cost is paid in whole stall
+    /// timeouts. A connection whose socket was closed by the peer, whose body was
+    /// truncated, or whose request was refused looks exactly like a slow one, so
+    /// the range is not re-requested for 4-45 s (the range `stall_timeout` covers
+    /// on real paths). Early in a transfer the other connections cover for it and
+    /// nothing is visible; at the end, when the remaining work has concentrated
+    /// onto one or two connections, the whole transfer freezes for it — the
+    /// reported "downloads stall past 90%, transfer rate falls to zero, every
+    /// connection shows disconnected" failure.
+    ///
+    /// `retry_after` is the caller's backoff for THIS connection only. The range
+    /// goes back to the unassigned set immediately either way, so an idle
+    /// connection can pick it up on the next tick without waiting for it.
+    pub fn on_conn_error(&mut self, conn: usize, now: f64, retry_after: f64) {
+        if conn >= self.conns.len() {
+            return;
+        }
+        self.reclaim(conn);
+        let until = now + retry_after.max(0.0);
+        let c = &mut self.conns[conn];
+        c.setup_end = until;
+        // The stall clock starts when the connection is allowed to work again;
+        // otherwise the backoff it was told to take is charged against it as
+        // silence and it is graded stalled the moment it comes back.
+        c.last_progress = until;
     }
 
     fn reclaim(&mut self, j: usize) {
@@ -908,6 +975,7 @@ impl Scheduler {
         let c = &mut self.conns[j];
         c.range = Some(r);
         c.pos = r.lo;
+        c.started_at = now;
         c.setup_end = now + delta;
         c.last_progress = now + delta;
         c.stalled = false;
@@ -1176,6 +1244,48 @@ mod tests {
             delta_est: 0.05,
             ..Default::default()
         }
+    }
+
+    /// An arrival from a request that has already been superseded must not be
+    /// credited against the request that replaced it.
+    ///
+    /// The bytes are real and on disk, so crediting them looks harmless — but it
+    /// advances the cursor past where the NEW request starts reading, and every
+    /// arrival from that request then fails the `off == pos` test and is
+    /// discarded. The connection delivers bytes the scheduler never counts, so it
+    /// reads as silent and is only rescued by the stall timeout, seconds later.
+    /// That is the same dead air the transport's error handling exists to remove,
+    /// reintroduced through the arrival path.
+    #[test]
+    fn a_late_arrival_from_a_superseded_request_is_not_credited() {
+        let mut s = Scheduler::new(1000, vec![src(1.0)], &[1]);
+        s.tick(0.0);
+        assert_eq!(s.conn_range(0), Some((0, 0, 1000)));
+        // 100 bytes land and are credited.
+        s.on_bytes_at(0, 0, 100, 1.0, 0.5);
+        assert_eq!(s.bytes_held(), 100);
+        // The connection is reclaimed and re-requested from where it got to.
+        s.on_conn_error(0, 9.0, 0.0);
+        let acts = s.tick(10.0);
+        assert!(
+            matches!(acts.as_slice(), [Action::Request { conn: 0, range }] if range.lo == 100),
+            "the reclaimed remainder must be re-requested from 100: {acts:?}"
+        );
+        // Now the aborted request's last write arrives, timestamped BEFORE the new
+        // request was issued.
+        s.on_bytes_at(0, 100, 50, 9.5, 0.1);
+        assert_eq!(
+            s.bytes_held(),
+            100,
+            "an arrival older than the request in flight was credited to it"
+        );
+        // And the new request's own first arrival, at the same offset, must land.
+        s.on_bytes_at(0, 100, 50, 10.2, 0.1);
+        assert_eq!(
+            s.bytes_held(),
+            150,
+            "the live request's arrival was discarded as stale"
+        );
     }
 
     #[test]

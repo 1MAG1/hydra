@@ -639,6 +639,35 @@ pub async fn probe<C: Connector>(c: &C, t: &Target) -> io::Result<Probe> {
 /// point of a rate cap is to slow what is taken off the wire, and shaping only
 /// the writes would let the kernel receive buffer fill at full speed while the
 /// user was told the transfer was capped.
+/// Read until the end of the response header block.
+///
+/// `Ok(Some(n))` is the offset of the first body byte; `Ok(None)` means the peer
+/// closed the connection first, which is a fact the caller must decide about
+/// rather than an outcome this can classify on its own — on a pooled connection
+/// it means the socket had gone stale, on a fresh one it means the request was
+/// dropped.
+async fn read_head<S>(s: &mut S, buf: &mut [u8], head: &mut Vec<u8>) -> io::Result<Option<usize>>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    loop {
+        let n = s.read(buf).await?;
+        if n == 0 {
+            return Ok(None);
+        }
+        head.extend_from_slice(&buf[..n]);
+        if let Some(p) = find_crlf2(head) {
+            return Ok(Some(p));
+        }
+        if head.len() > 64 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "header too large",
+            ));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch_range<C: Connector>(
     c: Arc<C>,
@@ -681,44 +710,73 @@ pub(crate) async fn fetch_range<C: Connector>(
         Disposition::Close
     };
     let req = build_request_head_disp("GET", &t, Some((lo, hi.saturating_sub(1))), disp);
-    // A pooled connection may have been closed by the peer while it sat idle, and
-    // that is indistinguishable from a healthy one until the write or the first
-    // read fails. Treat any such failure as a miss and retry once on a fresh
-    // connection rather than surfacing it: the range is perfectly fetchable, and
-    // the scheduler would otherwise see a phantom stall.
-    if let Err(e) = s.write_all(req.as_bytes()).await {
-        if !from_pool {
-            return Err(e);
-        }
-        if let Some(p) = pool.as_ref() {
-            p.record_miss();
-        }
-        s = c.connect(&t).await?;
-        s.write_all(req.as_bytes()).await?;
-    }
 
     // Read headers, then stream the body straight to its file offset.
     let mut buf = vec![0u8; READ_BUF];
     let mut head = Vec::new();
     let body_start;
-    let mut n_head = 0usize;
+    // ---- send the request, retrying ONCE on a fresh connection ---------------
+    //
+    // A pooled connection may have been closed by the peer while it sat idle, and
+    // that is indistinguishable from a healthy one until the write or the first
+    // read fails. Both halves must be handled, and it is the second one that
+    // matters in the field: a peer that has sent FIN still ACCEPTS the request —
+    // it lands in the send buffer and `write_all` returns success — so the close
+    // only ever surfaces as EOF on the first READ.
+    //
+    // Treating that EOF as a completed fetch (which is what an early `Ok(())`
+    // here does) hands the scheduler a connection that will never deliver a byte
+    // and never report a failure, so the range is not re-requested until the
+    // stall timeout expires — 4 to 45 s of dead air per occurrence, and the whole
+    // transfer freezes for it once the endgame has concentrated the remaining
+    // work onto one or two connections. Measured against an origin that closes
+    // every keep-alive socket after one response: a 4 MiB transfer took 30.5 s
+    // instead of 0.35 s, all of it spent waiting out stall timeouts.
+    //
+    // So a pooled connection that produced NOTHING is retried on a fresh one,
+    // which costs a redial and is invisible; anything else is an error, and the
+    // caller reclaims the range at once rather than waiting for silence to expire.
+    let mut redialed = false;
     loop {
-        let n = s.read(&mut buf).await?;
-        if n == 0 {
-            return Ok(());
+        // Anything that goes wrong before a header block has been parsed is
+        // retryable on a pooled socket, whatever shape it took: a refused write,
+        // a reset, a clean EOF, or bytes that are not a response at all because
+        // the socket was carrying the tail of the previous one. A ranged GET is
+        // idempotent and nothing has been written to the sink yet, so re-sending
+        // it on a fresh connection cannot duplicate anything.
+        let retryable = from_pool && !redialed;
+        let dead = match s.write_all(req.as_bytes()).await {
+            Ok(()) => match read_head(&mut s, &mut buf, &mut head).await {
+                Ok(Some(p)) => {
+                    body_start = p;
+                    break;
+                }
+                Ok(None) if head.is_empty() => None,
+                // Part of a header block, then silence.
+                Ok(None) => Some(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "connection closed part-way through the response headers",
+                )),
+                Err(e) => Some(e),
+            },
+            Err(e) => Some(e),
+        };
+        if !retryable {
+            return Err(dead.unwrap_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "connection closed before the response headers arrived",
+                )
+            }));
         }
-        head.extend_from_slice(&buf[..n]);
-        n_head += n;
-        if let Some(p) = find_crlf2(&head) {
-            body_start = p;
-            break;
+        // Whatever it was — a refused write, a half-written request, a clean EOF
+        // — the pooled socket is dead and the range is still perfectly fetchable.
+        if let Some(p) = pool.as_ref() {
+            p.record_miss();
         }
-        if n_head > 64 * 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "header too large",
-            ));
-        }
+        s = c.connect(&t).await?;
+        head.clear();
+        redialed = true;
     }
 
     // ------------------------------------------------------------------
@@ -816,8 +874,14 @@ pub(crate) async fn fetch_range<C: Connector>(
     let mut off = lo;
     let mut last = Instant::now();
     let first_body = &head[body_start..];
+    // Body bytes that came in with the headers and are past the far end we asked
+    // for. There should never be any — a 206's body is exactly the range — so
+    // their presence means the response is not framed the way this code believes,
+    // and the socket must not be offered for reuse.
+    let mut over_read = false;
     if !first_body.is_empty() {
         let take = first_body.len().min((hi - off) as usize);
+        over_read = first_body.len() > take;
         // These bytes arrived alongside the headers and are as real as any other:
         // they are charged against the cap too, or a small object could be
         // delivered entirely unshaped in the header read.
@@ -836,10 +900,22 @@ pub(crate) async fn fetch_range<C: Connector>(
         last = now;
     }
 
-    // Re-read the bound each pass: `hi` above was only its value at request time.
-    let mut hi = hi;
-    while off < hi {
-        let want = pace.read_size(((hi - off) as usize).min(READ_BUF));
+    // Re-read the bound each pass: `hi` is only its value at request time, and it
+    // must STAY that, because it is what "the far end moved" is measured against
+    // once the body is done. The live cursor is a separate binding.
+    //
+    // Shadowing it with `let mut hi = hi` — which is what this was — silently
+    // deleted the pool's shrink guard below: by the time it ran, `hi` had been
+    // reassigned to the current watermark on every read, so `hi_final < hi` was
+    // false however far the far end had moved. A preempted connection was
+    // therefore pooled with the server still streaming the tail it had been
+    // relieved of, and the next request to reuse that socket read that tail
+    // instead of its own response headers — 64 KiB of body, no header block, and
+    // a "header too large" failure on a perfectly healthy endpoint. Repairs
+    // cluster in the endgame, so this fired hardest exactly where users saw it.
+    let mut cur_hi = hi;
+    while off < cur_hi {
+        let want = pace.read_size(((cur_hi - off) as usize).min(READ_BUF));
         let n = s.read(&mut buf[..want]).await?;
         if n == 0 {
             break;
@@ -848,8 +924,8 @@ pub(crate) async fn fetch_range<C: Connector>(
         // before crediting, and clamp: bytes past the new bound belong to whichever
         // connection was given them, so writing them here would double-count
         // coverage and reintroduce the duplicate-span cost this exists to remove.
-        hi = bound.get();
-        let n = n.min(hi.saturating_sub(off) as usize);
+        cur_hi = bound.get();
+        let n = n.min(cur_hi.saturating_sub(off) as usize);
         if n == 0 {
             break;
         }
@@ -901,8 +977,16 @@ pub(crate) async fn fetch_range<C: Connector>(
     let server_will_close = header_value(&head_str, "connection")
         .map(|v| v.to_ascii_lowercase().contains("close"))
         .unwrap_or(false);
+    // A fourth reason, and the one that needs no repair to go wrong: the response
+    // was not a `206`. A `200` to a request from offset 0 is accepted above,
+    // because the bytes are the object's and they belong where they land — but its
+    // body is the WHOLE object while this loop reads only as far as `hi`, so the
+    // remainder is still in the socket. `off >= hi_final` is satisfied and says
+    // nothing. Only a partial response is known to have ended where the client
+    // stopped reading.
+    let framed_exactly = status == 206 && !over_read;
     if let Some(p) = pool.as_ref() {
-        if !shrunk && !server_will_close && off >= hi_final {
+        if framed_exactly && !shrunk && !server_will_close && off >= hi_final {
             p.put(&t, s);
         }
     }
@@ -1314,6 +1398,16 @@ pub async fn fetch_range_retry<C: Connector>(
     }
 }
 
+/// Seconds a throttle error asks the caller to wait.
+///
+/// The `Retry-After` a 429/503 carried travels as text inside the error, because
+/// `io::Error` is the only channel the fetch path has. Parsing it back is how
+/// both callers — the retrying transport and the scheduler-driven one — honour a
+/// server that has told them exactly how long to stand down.
+pub(crate) fn retry_after_secs(e: &io::Error) -> Option<f64> {
+    parse_secs_from(&e.to_string())
+}
+
 /// Seconds embedded in a throttle error message.
 fn parse_secs_from(msg: &str) -> Option<f64> {
     msg.split("retry after ")
@@ -1647,6 +1741,68 @@ mod tests {
             assert_eq!(total, 12, "split at {split}: arrivals must sum to the body");
             let _ = std::fs::remove_file(&path);
         }
+    }
+
+    /// A connection whose far end was lowered mid-body must not be pooled.
+    ///
+    /// The loop stops where the repair told it to, but the SERVER is still
+    /// sending toward the end the request named, so the socket holds an unknown
+    /// number of unread body bytes. Handing it to the next request makes that
+    /// request read a response tail where a status line should be.
+    ///
+    /// The guard for this was written and then disabled by a shadowed variable:
+    /// the read loop reassigned the very binding the guard compared against, so
+    /// "the far end moved" was never true. The transfer-level tests could not see
+    /// it, because the client REJECTS the mis-framed response it then reads — the
+    /// file stays byte-exact and only the wasted request and the delay show, which
+    /// is why this asserts on the pool itself.
+    #[tokio::test]
+    async fn a_connection_whose_range_was_shrunk_is_never_pooled() {
+        use crate::origin::OriginSet;
+        const SIZE: u64 = 1024 * 1024;
+        let net = Arc::new(OriginSet::new());
+        let (port, ctl) = net.spawn(SIZE, 2 * 1024 * 1024);
+        // Keep-alive, or the response says `close` and the pool would refuse the
+        // socket for a reason that has nothing to do with what is being tested.
+        ctl.keep_alive
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let t = Target::direct("127.0.0.1", port, "/obj");
+
+        let path = std::env::temp_dir().join("hydra_shrunk_not_pooled.bin");
+        let path_s = path.to_string_lossy().to_string();
+        let sink = Arc::new(SparseSink::create(&path_s, SIZE).unwrap());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let pool: crate::pool::SharedPool<tokio::io::DuplexStream> =
+            Arc::new(crate::pool::ConnPool::new());
+
+        let bound = crate::Watermark::fixed(SIZE);
+        let b2 = bound.clone();
+        tokio::spawn(async move {
+            // Long enough that the body is well under way and short enough that
+            // most of it is still to come.
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            b2.shrink_to(SIZE / 4);
+        });
+        let r = fetch_range(
+            net.clone(),
+            0,
+            t.clone(),
+            0,
+            bound,
+            sink,
+            tx,
+            Instant::now(),
+            Pace::unlimited(),
+            Some(pool.clone()),
+        )
+        .await;
+        assert!(r.is_ok(), "a shrink is not a failure: {r:?}");
+        assert!(
+            pool.take(&t).is_none(),
+            "a preempted connection was offered back for reuse with the rest of \
+             its response still arriving on it"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A chunked body that stops early is an error, not a short success.

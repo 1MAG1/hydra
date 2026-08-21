@@ -68,6 +68,30 @@ pub struct OriginControl {
     /// client MUST NOT pool the socket, so the pool stays empty and a reuse test
     /// would pass by doing nothing.
     pub keep_alive: Arc<AtomicBool>,
+    /// Silently close a keep-alive connection after it has answered this many
+    /// requests (0 = never).
+    ///
+    /// Models what every real server does and what no in-process test did: a
+    /// socket the client has finished with, and is holding for reuse, is closed by
+    /// the SERVER on the server's own terms. Servers bound keep-alive both by idle
+    /// time (every CDN) and by request count (nginx `keepalive_requests`), and
+    /// either way the close is silent — a FIN, not a `Connection: close` header on
+    /// the previous response — so a pooled stream stays indistinguishable from a
+    /// healthy one until the next request's first read returns zero.
+    ///
+    /// Counted in requests rather than in idle milliseconds because that is the
+    /// form this transport can actually be made to hit: it wakes on every arrival,
+    /// so a pooled socket here is reused within microseconds and no realistic idle
+    /// window would ever expire.
+    pub close_after_requests: Arc<AtomicU64>,
+    /// Cut every Nth response off half-way through its body (0 = never).
+    ///
+    /// `lie_length` models an origin that ALWAYS truncates, which a client must
+    /// refuse outright. This models the far commoner one that truncates
+    /// occasionally — a CDN node recycled mid-response, a load balancer dropping
+    /// a connection — where the correct behaviour is not to fail but to re-request
+    /// the remainder promptly.
+    pub truncate_every: Arc<AtomicU64>,
     /// Requests this origin has answered, across every connection.
     ///
     /// With `keep_alive` on, comparing this against `connections` is the direct
@@ -119,6 +143,8 @@ impl OriginControl {
             redirect_to: Arc::new(Mutex::new(None)),
             chunked: Arc::new(AtomicU64::new(0)),
             keep_alive: Arc::new(AtomicBool::new(false)),
+            close_after_requests: Arc::new(AtomicU64::new(0)),
+            truncate_every: Arc::new(AtomicU64::new(0)),
             requests: Arc::new(AtomicU64::new(0)),
             connections: Arc::new(AtomicU64::new(0)),
             served: Arc::new(AtomicU64::new(0)),
@@ -246,12 +272,36 @@ async fn serve<S>(sock: &mut S, size: u64, ctl: OriginControl) -> std::io::Resul
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    let mut answered = 0u64;
     loop {
         let more = serve_one(sock, size, &ctl).await?;
         if !more {
             return Ok(());
         }
+        answered += 1;
+        let budget = ctl.close_after_requests.load(Ordering::Relaxed);
+        if budget > 0 && answered >= budget {
+            half_close(sock).await?;
+            return Ok(());
+        }
     }
+}
+
+/// Close the write half and keep reading, the way a TCP peer that has sent FIN
+/// does: the client's next request still writes successfully into a socket whose
+/// reply will never come, and only its first READ reveals the close.
+///
+/// Dropping the stream instead would fail the client's WRITE, which is the easy
+/// half of the problem and the half a client already has to handle to connect at
+/// all. The silent half is what strands a pooled connection.
+async fn half_close<S>(sock: &mut S) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    sock.shutdown().await?;
+    let mut drain = [0u8; 4096];
+    while sock.read(&mut drain).await? > 0 {}
+    Ok(())
 }
 
 /// Answer one request. Returns whether the connection may carry another.
@@ -272,7 +322,12 @@ where
             break;
         }
     }
-    ctl.requests.fetch_add(1, Ordering::Relaxed);
+    // This request's sequence number, taken at the increment. Reading the counter
+    // later instead would be a race: with n ranges in flight, every one of them
+    // is counted before any of their bodies start streaming, so all n would read
+    // the same value and a rule like "every third response" would fire n times or
+    // not at all.
+    let seq = ctl.requests.fetch_add(1, Ordering::Relaxed) + 1;
     let text = String::from_utf8_lossy(&req).to_string();
     let is_head = text.starts_with("HEAD");
     let ranges_ok = ctl.ranges.load(Ordering::Relaxed);
@@ -377,11 +432,10 @@ where
     // A truncating origin: the advertised Content-Length is honest-looking but
     // the connection closes early. A client that trusts the header and reports
     // success here delivers a short file.
-    let truncate_at = if ctl.lie_length.load(Ordering::Relaxed) {
-        Some(lo + len / 2)
-    } else {
-        None
-    };
+    let cut_every = ctl.truncate_every.load(Ordering::Relaxed);
+    let cut =
+        ctl.lie_length.load(Ordering::Relaxed) || (cut_every > 0 && seq.is_multiple_of(cut_every));
+    let truncate_at = if cut { Some(lo + len / 2) } else { None };
 
     // Stream the body under the rate cap, in 16 KiB slices with a sleep between.
     const SLICE: usize = 16 * 1024;
