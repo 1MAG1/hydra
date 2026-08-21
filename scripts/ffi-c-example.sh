@@ -120,8 +120,10 @@ if [ "$toolchain" = "msvc" ]; then
 
     for prog in abi_smoke download; do
         echo "==> compiling $prog.c"
+        # -std:c11 explicitly: cl's default dialect for .c has no
+        # _Static_assert, and the header asserts its whole layout with it.
         # shellcheck disable=SC2086
-        "$CC" "${cflags[@]}" "-Fe:$(winpath "$out/$prog.exe")" \
+        "$CC" "${cflags[@]}" -std:c11 "-Fe:$(winpath "$out/$prog.exe")" \
             "-Fo:$(winpath "$out/$prog.obj")" \
             "$(winpath "$root/examples/ffi-c/$prog.c")" \
             -link "$(winpath "$lib")" $native_libs
@@ -131,10 +133,20 @@ if [ "$toolchain" = "msvc" ]; then
     # consumer might compile it in - not just the one this project happens to
     # use. Compiled only, not linked: these assert about types.
     echo "==> checking the header across C dialects"
-    for std in c11 c17; do
-        "$CC" "${cflags[@]}" "-std:$std" -c \
-            "$(winpath "$root/examples/ffi-c/header_c.c")" \
-            "-Fo:$(winpath "$out/header_$std.obj")"
+    # `default` is cl with no /std at all, which is the dialect a consumer's
+    # existing project most likely uses and is pre-C11 - the case the header's
+    # HYDRA_STATIC_ASSERT fallback exists for. Checking only c11 and c17 would
+    # never compile that branch.
+    for std in default c11 c17; do
+        if [ "$std" = default ]; then
+            "$CC" "${cflags[@]}" -c \
+                "$(winpath "$root/examples/ffi-c/header_c.c")" \
+                "-Fo:$(winpath "$out/header_default.obj")"
+        else
+            "$CC" "${cflags[@]}" "-std:$std" -c \
+                "$(winpath "$root/examples/ffi-c/header_c.c")" \
+                "-Fo:$(winpath "$out/header_$std.obj")"
+        fi
         echo "    $std ok"
     done
 
@@ -151,6 +163,40 @@ if [ "$toolchain" = "msvc" ]; then
     client="$out/download.exe"
 else
     CC="${CC:-cc}"
+
+    # rustc's list says what the LINKER needs, and it is right about that. It is
+    # not a list of files that exist to be found: -lc is the compiler driver's
+    # own business on every Unix, and recent macOS SDKs ship no libm to find
+    # because it lives inside libSystem. Passing those through unexamined turns
+    # a working link into `cannot find -lc`. So ask this compiler which of them
+    # it can resolve, and drop only the ones it cannot - the answer comes from
+    # the toolchain doing the link rather than from a list in this script.
+    usable_libs() {
+        local probe="$out/probe.c" kept="" dropped=""
+        printf 'int main(void) { return 0; }\n' > "$probe"
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                # `-framework Foo` is two tokens and names no file to look for.
+                -framework) kept="$kept $1 ${2:-}"; shift 2; continue ;;
+                -l*)
+                    if "$CC" "$probe" "$1" -o "$out/probe.out" >/dev/null 2>&1; then
+                        kept="$kept $1"
+                    else
+                        dropped="$dropped $1"
+                    fi
+                    ;;
+                *) kept="$kept $1" ;;
+            esac
+            shift
+        done
+        rm -f "$probe" "$out/probe.out"
+        [ -z "$dropped" ] || echo "    dropped (no such library for $CC):$dropped" >&2
+        printf '%s' "${kept# }"
+    }
+    # shellcheck disable=SC2086
+    link_libs="$(usable_libs $native_libs)"
+    [ "$link_libs" = "$native_libs" ] || echo "    linking with: $link_libs"
+
     # Strict C: the header is a published artifact and must compile cleanly for
     # somebody whose build is stricter than ours.
     cflags=(-std=c11 -Wall -Wextra -Wpedantic -Werror -I "$root/include")
@@ -159,14 +205,16 @@ else
         echo "==> compiling $prog.c"
         # shellcheck disable=SC2086
         "$CC" "${cflags[@]}" -o "$out/$prog" "$root/examples/ffi-c/$prog.c" \
-            "$lib" $native_libs
+            "$lib" $link_libs
     done
 
     # The header is a published artifact, so it has to survive every dialect a
     # consumer might compile it in - not just the one this project happens to
     # use. Compiled only, not linked: these assert about types.
     echo "==> checking the header across C dialects"
-    for std in c11 c17; do
+    # c99 as well as c11: under C99 the header falls back from _Static_assert
+    # to a negative-length typedef, and that branch has to keep compiling.
+    for std in c99 c11 c17; do
         "$CC" "-std=$std" -Wall -Wextra -Wpedantic -Werror -I "$root/include" \
             -c "$root/examples/ffi-c/header_c.c" -o "$out/header_$std.o"
         echo "    $std ok"

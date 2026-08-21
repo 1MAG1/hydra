@@ -243,8 +243,19 @@ after_includes = """
 /* Static assertions, spelled for whichever language is compiling this. */
 #if defined(__cplusplus)
   #define HYDRA_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
-#else
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
   #define HYDRA_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#else
+  /* Pre-C11, which is what MSVC compiles a .c file as unless it is given
+   * /std:c11 or later. Declaring an array with a negative length fails just as
+   * loudly, and the layout checks below are the point rather than the spelling
+   * of the assertion. The message survives as the typedef's neighbour in the
+   * error, which is as much as this construct can carry. */
+  #define HYDRA_STATIC_ASSERT_JOIN_(a, b) a##b
+  #define HYDRA_STATIC_ASSERT_NAME_(a, b) HYDRA_STATIC_ASSERT_JOIN_(a, b)
+  #define HYDRA_STATIC_ASSERT(cond, msg) \
+      typedef char HYDRA_STATIC_ASSERT_NAME_(hydra_static_assert_, \
+                                             __LINE__)[(cond) ? 1 : -1]
 #endif
 
 /* The code classifiers (hydra_succeeded / hydra_failed / hydra_is_error and
