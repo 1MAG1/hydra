@@ -414,8 +414,8 @@ async fn async_main() -> std::process::ExitCode {
             print_formats(*json, category.as_deref(), what.as_deref());
             return std::process::ExitCode::SUCCESS;
         }
-        Some(cli::Command::Update { json }) => {
-            return update::run(*json).await;
+        Some(cli::Command::Update { json, beta }) => {
+            return update::run(*json, *beta).await;
         }
         Some(cli::Command::Completions { shell }) => {
             print!("{}", completions::render(*shell));

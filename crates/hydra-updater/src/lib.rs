@@ -96,6 +96,22 @@ impl Release {
         self.asset_for(cli_asset_name)
     }
 
+    /// The installable this machine's packaging uses — `.deb`, `.rpm`,
+    /// `.dmg`, `.pkg` or the Windows setup — for installs Hydra must not
+    /// replace file by file.
+    ///
+    /// Matched by shape rather than by an exact name ([`PackageKind::asset_shape`]).
+    pub fn package_asset(&self) -> Option<&ReleaseAsset> {
+        let (prefix, ext, arch) = package_kind()?.asset_shape();
+        self.package_asset_for(prefix, ext, arch)
+    }
+
+    fn package_asset_for(&self, prefix: &str, ext: &str, arch: &str) -> Option<&ReleaseAsset> {
+        self.assets
+            .iter()
+            .find(|a| a.name.starts_with(prefix) && a.name.ends_with(ext) && a.name.contains(arch))
+    }
+
     /// Asset lookup across both spellings of the release version: the tag's
     /// first, then the tag without its pre-release suffix. The pipeline
     /// names assets from the workspace manifest version, which may stay on
@@ -178,6 +194,140 @@ pub fn archive_ext() -> &'static str {
         "zip"
     } else {
         "tar.gz"
+    }
+}
+
+/// The Linux packages' name — not `hydra`, which is the THC login cracker
+/// in distro repos (scripts/package-linux.sh).
+const PACKAGE_NAME: &str = "hydra-download-manager";
+
+/// The installable this machine's packaging uses, offered when Hydra cannot
+/// replace its own files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackageKind {
+    Deb,
+    Rpm,
+    Dmg,
+    Pkg,
+    Exe,
+}
+
+impl PackageKind {
+    /// `(asset name prefix, asset name suffix, architecture token)` — how
+    /// the release pipeline spells this format's file. The version sits
+    /// between prefix and arch and is deliberately not matched: every format
+    /// spells it its own way (`0.3.4~rc` for deb, a separate release field
+    /// for rpm).
+    fn asset_shape(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            PackageKind::Deb => (PACKAGE_NAME, ".deb", arch_tag()),
+            PackageKind::Rpm => (PACKAGE_NAME, ".rpm", rpm_arch()),
+            PackageKind::Dmg => ("Hydra-", ".dmg", macos_arch()),
+            PackageKind::Pkg => ("Hydra-", ".pkg", macos_arch()),
+            PackageKind::Exe => ("hydra-", "-setup.exe", windows_arch()),
+        }
+    }
+}
+
+/// The installable format that owns this machine's copy of Hydra.
+///
+/// Linux: whichever package database exists. macOS: the `.pkg` when its
+/// receipt is on disk, the `.dmg` otherwise — both deliver a whole
+/// `Hydra Download Manager.app`, which is the only correct way to replace
+/// one. Windows: the setup installer.
+pub fn package_kind() -> Option<PackageKind> {
+    if cfg!(target_os = "linux") {
+        if Path::new("/var/lib/dpkg/status").exists() {
+            Some(PackageKind::Deb)
+        } else if Path::new("/var/lib/rpm").exists() {
+            Some(PackageKind::Rpm)
+        } else {
+            None
+        }
+    } else if cfg!(target_os = "macos") {
+        // `pkgutil` records an installer receipt per package identifier
+        // (scripts/package-macos-pkg.sh); a dragged .dmg leaves none.
+        if Path::new("/var/db/receipts/io.github.ja7ad.hydra.plist").exists() {
+            Some(PackageKind::Pkg)
+        } else {
+            Some(PackageKind::Dmg)
+        }
+    } else if cfg!(target_os = "windows") {
+        Some(PackageKind::Exe)
+    } else {
+        None
+    }
+}
+
+/// Architecture as rpm spells it (`uname -m`), unlike dpkg's and the
+/// archives' [`arch_tag`].
+fn rpm_arch() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    }
+}
+
+/// Architecture as the macOS disk image and installer name it: Apple's
+/// `arm64`, but `uname`'s `x86_64` on Intel.
+fn macos_arch() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    }
+}
+
+/// Architecture as the Windows installer names it (`x64`, not `amd64`).
+fn windows_arch() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    }
+}
+
+/// True when `dir` sits inside a macOS application bundle.
+///
+/// A bundle is replaced whole or not at all: its executable is named
+/// `Contents/MacOS/Hydra Download Manager` while the release archive ships
+/// `hydra-gui`, so a file-by-file swap silently misses the GUI itself and
+/// relaunches the old version; `Info.plist`'s version string and the ad-hoc
+/// code signature covering it would go stale even if the names matched.
+pub fn in_app_bundle(dir: &Path) -> bool {
+    dir.components().any(|c| {
+        Path::new(&c)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+    })
+}
+
+/// Whether the in-place swap can and should run for an install in `dir`.
+///
+/// Two ways to fail: the directory is not ours to rewrite (root-owned
+/// `/usr/bin` from a deb or rpm, `/Applications` from a `.pkg`), or it is a
+/// macOS bundle, which only a whole-bundle install can update correctly.
+pub fn can_update_in_place(dir: &Path) -> bool {
+    !in_app_bundle(dir) && dir_is_writable(dir)
+}
+
+/// Whether this process can replace files in `dir`.
+///
+/// The in-place update rewrites the install directory, which a packaged
+/// install (`/usr/bin` from a deb or rpm, `/Applications` for another user)
+/// does not allow. Probing beats guessing from the path: a tarball install
+/// under `~/.local/bin` and a system one under `/usr/bin` differ only in who
+/// owns them. Creating a file is the only honest test — Unix write
+/// permission on a directory is not implied by anything readable.
+pub fn dir_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".hydra-write-test-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -282,6 +432,44 @@ fn newest_prerelease(list: Vec<Release>) -> Option<Release> {
             Some(b) if !is_newer(r.version(), b.version()) => Some(b),
             _ => Some(r),
         })
+}
+
+/// Release notes with HTML comments stripped.
+///
+/// GitHub's generated notes open with a `<!-- Release notes generated using
+/// configuration in .github/release.yml at v0.3.4-rc -->` marker. It is
+/// plumbing: the CLI dumps notes as plain text and the GUI renders them as
+/// simple styled lines, so neither hides it the way a markdown renderer
+/// would.
+pub fn clean_notes(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        rest = match rest[start..].find("-->") {
+            Some(end) => &rest[start + end + "-->".len()..],
+            // An unterminated comment swallows the rest, as a renderer would.
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    // Removing a comment leaves the blank line it sat on; collapse the runs
+    // it opens up so the notes do not start or read as full of holes.
+    let mut notes = String::with_capacity(out.len());
+    let mut blanks = 0;
+    for line in out.trim().lines() {
+        if line.trim().is_empty() {
+            blanks += 1;
+            if blanks > 1 {
+                continue;
+            }
+        } else {
+            blanks = 0;
+        }
+        notes.push_str(line.trim_end());
+        notes.push('\n');
+    }
+    notes.trim_end().to_string()
 }
 
 // ----------------------------------------------------------------- checksums
@@ -418,6 +606,13 @@ fn replace_file(src: &Path, dest: &Path) -> io::Result<()> {
         }
         match try_replace(src, dest) {
             Ok(()) => return Ok(()),
+            // On Unix a permission error is the directory's owner, not a
+            // lock that will clear: /usr/bin from a deb or rpm install can
+            // never be rewritten by the user's own process, and retrying it
+            // 40 times only delays the relaunch by 20 seconds. Windows
+            // reports the same kind while the old exe is still mapped, so
+            // there the loop still has to run.
+            Err(e) if cfg!(unix) && e.kind() == io::ErrorKind::PermissionDenied => return Err(e),
             Err(e) => last = Some(e),
         }
     }
@@ -583,6 +778,97 @@ mod tests {
         assert_eq!(version_core("0.3.2-rc.2"), "0.3.2");
         assert_eq!(version_core("0.3.2+build7"), "0.3.2");
         assert_eq!(version_core("0.3.2"), "0.3.2");
+    }
+
+    #[test]
+    fn notes_lose_html_comments() {
+        let body = "<!-- Release notes generated using configuration in \
+            .github/release.yml at v0.3.4-rc -->\n\n\n## What's Changed\n\
+            - fix <!-- inline --> things\n\n\n\n- more\n\n";
+        let out = clean_notes(body);
+        assert!(!out.contains("<!--") && !out.contains("-->"));
+        assert!(out.starts_with("## What's Changed"));
+        assert_eq!(out, "## What's Changed\n- fix  things\n\n- more");
+        // Nothing to strip leaves the notes as they were.
+        assert_eq!(clean_notes("## Notes\n- one"), "## Notes\n- one");
+        // An unterminated comment takes the rest with it.
+        assert_eq!(clean_notes("keep\n<!-- dangling"), "keep");
+    }
+
+    #[test]
+    fn packaged_installs_match_their_own_naming() {
+        // Real v0.3.4-rc names. Every format spells the version and the
+        // architecture its own way, which is why the match is by shape.
+        let mut r = rel("v0.3.4-rc", true);
+        for name in [
+            "hydra-download-manager_0.3.4_arm64.deb",
+            "hydra-download-manager_0.3.4_amd64.deb",
+            "hydra-download-manager-0.3.4-1.aarch64.rpm",
+            "hydra-download-manager-0.3.4-1.x86_64.rpm",
+            "Hydra-0.3.4-arm64.dmg",
+            "Hydra-0.3.4-arm64.pkg",
+            "Hydra-0.3.4-x86_64.dmg",
+            "hydra-0.3.4-windows-arm64-setup.exe",
+            "hydra-0.3.4-windows-x64-setup.exe",
+            "hydra-0.3.4-linux-arm64.tar.gz",
+        ] {
+            r.assets.push(ReleaseAsset {
+                name: name.into(),
+                browser_download_url: String::new(),
+                size: 0,
+            });
+        }
+        for (kind, arch, want) in [
+            (
+                PackageKind::Deb,
+                "arm64",
+                "hydra-download-manager_0.3.4_arm64.deb",
+            ),
+            (
+                PackageKind::Rpm,
+                "aarch64",
+                "hydra-download-manager-0.3.4-1.aarch64.rpm",
+            ),
+            (PackageKind::Dmg, "arm64", "Hydra-0.3.4-arm64.dmg"),
+            (PackageKind::Pkg, "arm64", "Hydra-0.3.4-arm64.pkg"),
+            (PackageKind::Dmg, "x86_64", "Hydra-0.3.4-x86_64.dmg"),
+            (PackageKind::Exe, "x64", "hydra-0.3.4-windows-x64-setup.exe"),
+        ] {
+            let (prefix, ext, _) = kind.asset_shape();
+            assert_eq!(
+                r.package_asset_for(prefix, ext, arch)
+                    .map(|a| a.name.as_str()),
+                Some(want),
+                "{kind:?} {arch}"
+            );
+        }
+        // A release without installables offers none.
+        assert!(rel("v0.3.4-rc", true)
+            .package_asset_for(PACKAGE_NAME, ".deb", "amd64")
+            .is_none());
+    }
+
+    #[test]
+    fn app_bundles_are_never_updated_file_by_file() {
+        // The bundle's GUI is `Contents/MacOS/Hydra Download Manager`, not
+        // the archive's `hydra-gui`, so a per-file swap replaces the CLI and
+        // relaunches the same old app.
+        let app = Path::new("/Applications/Hydra Download Manager.app/Contents/MacOS");
+        assert!(in_app_bundle(app));
+        assert!(!can_update_in_place(app));
+        assert!(!in_app_bundle(Path::new("/usr/local/bin")));
+        assert!(!in_app_bundle(Path::new("/home/j/apps/hydra")));
+    }
+
+    #[test]
+    fn writability_is_probed_not_guessed() {
+        let dir = std::env::temp_dir().join(format!("hydra-wtest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(dir_is_writable(&dir));
+        assert!(!dir_is_writable(&dir.join("no-such-subdir")));
+        // The probe leaves nothing behind.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
