@@ -35,6 +35,32 @@ case "$host" in
     *)                 toolchain="unix" ;;
 esac
 
+# A bash on Windows puts Git's /usr/bin at the front of PATH, and GNU coreutils
+# ships a `link` there. That matters before a single line of C is compiled:
+# whenever the environment already looks like a developer shell - which is what
+# a `vcvarsall`/msvc-dev-cmd step makes it - rustc stops looking Visual Studio
+# up for itself and just runs `link.exe` from PATH. It finds coreutils' one, and
+# the build dies linking a *build script* (proc-macro2, quote) with
+# "/usr/bin/link: extra operand ...rcgu.o" and advice about repairing Visual
+# Studio that has nothing to do with it. Put the directory holding cl.exe first;
+# link.exe is its neighbour. Below, LINK_EXE names that same link.exe outright,
+# for this script's own linking.
+if [ "$toolchain" = "msvc" ]; then
+    msvc_cl="$(command -v "${CC:-cl}" 2>/dev/null || true)"
+    # Checked here rather than after the build: without a C compiler this
+    # script cannot finish anyway, and saying so now costs nothing while the
+    # build that would precede the same message costs minutes.
+    [ -n "$msvc_cl" ] || {
+        echo "error: ${CC:-cl} is not on PATH - run this from a Visual Studio" \
+             "developer shell" >&2
+        exit 1
+    }
+    if [ -x "$(dirname "$msvc_cl")/link.exe" ]; then
+        PATH="$(dirname "$msvc_cl"):$PATH"
+        export PATH
+    fi
+fi
+
 out="$root/target/ffi-c"
 mkdir -p "$out"
 
@@ -107,12 +133,8 @@ if [ "$toolchain" = "msvc" ]; then
         if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
     }
 
+    # Located at the top of the script, where PATH was arranged around it.
     CC="${CC:-cl}"
-    command -v "$CC" >/dev/null 2>&1 || {
-        echo "error: $CC is not on PATH - run this from a Visual Studio" \
-             "developer shell" >&2
-        exit 1
-    }
 
     # No usable LIB: ask the Visual Studio installation itself rather
     # than giving up. This is what a developer shell does, and it is why this script

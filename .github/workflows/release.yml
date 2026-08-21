@@ -298,8 +298,12 @@ jobs:
           - target: armv7-unknown-linux-gnueabihf
             runner: ubuntu-latest
             # `ring` and `blake3` compile C and assembly, so a Rust target is
-            # not enough — cross-compiling needs a cross C toolchain.
-            apt: gcc-arm-linux-gnueabihf
+            # not enough — cross-compiling needs a cross C toolchain. The
+            # armhf libc headers are only a *recommendation* of the cross gcc
+            # package, so `--no-install-recommends` leaves them out; without
+            # them the cross compiler falls back to the runner's own
+            # /usr/include and dies on a missing bits/libc-header-start.h.
+            apt: gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
             env_cc: arm-linux-gnueabihf-gcc
             env_ar: arm-linux-gnueabihf-ar
           # ---- Linux, musl: static, no host glibc dependency -----------------
@@ -470,11 +474,16 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
+  # Skipped on every tag push: `inputs` exists only for workflow_dispatch, so
+  # the `if` below is false and both expressions above it would evaluate to the
+  # empty string. The fallbacks keep the job's name readable and its `runs-on`
+  # a real label in that state - a job GitHub never starts should still be a
+  # job GitHub could start.
   build-ffi-extra:
-    name: libhydra ${{ inputs.extra_ffi_target }} (manual)
+    name: libhydra ${{ inputs.extra_ffi_target || 'extra target' }} (manual)
     needs: [verify-version, ffi-header]
     if: github.event_name == 'workflow_dispatch' && inputs.extra_ffi_target != ''
-    runs-on: ${{ inputs.extra_ffi_runner }}
+    runs-on: ${{ inputs.extra_ffi_runner || 'ubuntu-latest' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
