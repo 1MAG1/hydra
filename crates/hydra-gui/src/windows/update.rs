@@ -51,16 +51,33 @@ pub fn view(app: &App) -> El<'_> {
         .height(Length::Fill)
         .style(theme::panel);
 
-    let status: El<'_> = match &app.updater.phase {
-        UpdatePhase::Idle => text(format!(
+    // A packaged install (deb/rpm in /usr/bin) cannot be rewritten by the
+    // user's own process, so the dialog offers the distro package instead of
+    // an in-place update.
+    let download_line = |name: &str, size: u64| {
+        text(format!(
             "{} {} ({})",
             tr("Download:"),
-            info.asset_name,
-            fmt::size2(info.size)
+            name,
+            fmt::size2(size)
         ))
         .size(theme::FONT_SIZE - 1.0)
         .color(theme::dim_text(&iced::Theme::Light))
-        .into(),
+    };
+    let status: El<'_> = match &app.updater.phase {
+        UpdatePhase::Idle if !info.in_place => {
+            let mut col = column![text(tr(
+                "This copy of Hydra cannot update itself in place. Download the new installer and install it the way you installed this one."
+            ))
+            .size(theme::FONT_SIZE - 1.0)
+            .color(iced::Color::from_rgb8(0x9A, 0x6A, 0x00))]
+            .spacing(4);
+            if let Some((name, _, size)) = &info.package {
+                col = col.push(download_line(name, *size));
+            }
+            col.into()
+        }
+        UpdatePhase::Idle => download_line(&info.asset_name, info.size).into(),
         UpdatePhase::Downloading { got, total } => {
             let frac = match total {
                 Some(t) if *t > 0 => *got as f32 / *t as f32,
@@ -113,6 +130,24 @@ pub fn view(app: &App) -> El<'_> {
     .into();
 
     let buttons: El<'_> = match &app.updater.phase {
+        // Nothing to run in place: the package is downloaded in a browser
+        // and installed by the package manager, which is the only thing that
+        // may write /usr/bin. Without a package for this machine the release
+        // page is the whole offer.
+        UpdatePhase::Idle if !info.in_place => row![
+            page_btn,
+            iced::widget::space::horizontal(),
+            dlg_btn_primary(
+                tr("Download Installer"),
+                info.package
+                    .as_ref()
+                    .map(|(_, url, _)| Message::UpdateOpenUrl(url.clone()))
+            ),
+            dlg_btn(tr("Close"), Some(Message::UpdateCancel)),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .into(),
         UpdatePhase::Idle => row![
             page_btn,
             iced::widget::space::horizontal(),
@@ -188,16 +223,100 @@ fn notes_body(notes: &str) -> El<'_> {
         {
             row![
                 text("•").size(theme::FONT_SIZE),
-                text(clean_inline(item)).size(theme::FONT_SIZE),
+                text(shorten_refs(&clean_inline(item))).size(theme::FONT_SIZE),
             ]
             .spacing(6)
             .into()
+        } else if let Some((label, url)) = trailing_link(&clean_inline(trimmed)) {
+            // "Full Changelog: https://…/compare/v0.3.3-rc...v0.3.4-rc" — a
+            // URL that long is unreadable inline and useless as dead text.
+            row![
+                text(label).size(theme::FONT_SIZE),
+                button(text(link_label(&url)).size(theme::FONT_SIZE))
+                    .padding(0)
+                    .style(link_button)
+                    .on_press(Message::UpdateOpenUrl(url)),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center)
+            .into()
         } else {
-            text(clean_inline(trimmed)).size(theme::FONT_SIZE).into()
+            text(shorten_refs(&clean_inline(trimmed)))
+                .size(theme::FONT_SIZE)
+                .into()
         };
         col = col.push(el);
     }
     col.width(Length::Fill).into()
+}
+
+/// A line ending in a bare URL, split into the text before it and the URL:
+/// `("Full Changelog:", "https://…")`. `None` when the line does not end in
+/// one, so ordinary prose is left alone.
+fn trailing_link(line: &str) -> Option<(String, String)> {
+    let last = line.split_whitespace().next_back()?;
+    if !(last.starts_with("https://") || last.starts_with("http://")) {
+        return None;
+    }
+    let label = line[..line.rfind(last)?].trim_end().to_string();
+    Some((label, last.to_string()))
+}
+
+/// What a link shows: a compare URL is its `v0.3.3-rc...v0.3.4-rc` tail,
+/// which says what the changelog spans without the 60 characters of host and
+/// path around it. Anything else shows the URL itself.
+fn link_label(url: &str) -> String {
+    match url.split_once("/compare/") {
+        Some((_, range)) => range.to_string(),
+        None => url.to_string(),
+    }
+}
+
+/// A borderless, blue, clickable run of text.
+fn link_button(_theme: &iced::Theme, status: button::Status) -> button::Style {
+    let color = match status {
+        button::Status::Hovered | button::Status::Pressed => {
+            iced::Color::from_rgb8(0x0B, 0x2A, 0x9E)
+        }
+        _ => iced::Color::from_rgb8(0x1F, 0x3F, 0xC4),
+    };
+    button::Style {
+        background: None,
+        text_color: color,
+        ..button::Style::default()
+    }
+}
+
+/// Collapse GitHub pull/issue URLs to `(#14)`, dropping the `in` that
+/// introduces them: `by @ja7ad in https://…/pull/14` -> `by @ja7ad (#14)`.
+/// The notes are read in a 500 px dialog, and the URL is one click away on
+/// the release page anyway.
+fn shorten_refs(s: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    for word in s.split_whitespace() {
+        match issue_number(word) {
+            Some(n) => {
+                if words.last().map(String::as_str) == Some("in") {
+                    words.pop();
+                }
+                words.push(format!("(#{n})"));
+            }
+            None => words.push(word.to_string()),
+        }
+    }
+    words.join(" ")
+}
+
+/// The number in a `github.com/<owner>/<repo>/pull|issues/<n>` URL.
+fn issue_number(word: &str) -> Option<&str> {
+    let w = word.trim_end_matches(['.', ',', ')', ']']);
+    let (_, tail) = w.split_once("github.com/")?;
+    let mut parts = tail.split('/');
+    let (_owner, _repo, kind, n) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    if kind != "pull" && kind != "issues" {
+        return None;
+    }
+    (!n.is_empty() && n.chars().all(|c| c.is_ascii_digit())).then_some(n)
 }
 
 /// Strip the inline markdown that would otherwise render as literal noise:
@@ -232,7 +351,7 @@ fn clean_inline(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::clean_inline;
+    use super::*;
 
     #[test]
     fn inline_markdown_strips_to_text() {
@@ -243,5 +362,30 @@ mod tests {
             "by someone in #12"
         );
         assert_eq!(clean_inline("a bare [ bracket"), "a bare [ bracket");
+    }
+
+    #[test]
+    fn pr_urls_become_numbers() {
+        assert_eq!(
+            shorten_refs("Fix quota tracking by @ja7ad in https://github.com/ja7ad/hydra/pull/15"),
+            "Fix quota tracking by @ja7ad (#15)"
+        );
+        assert_eq!(
+            shorten_refs("closes https://github.com/ja7ad/hydra/issues/9."),
+            "closes (#9)"
+        );
+        // Other URLs, and prose that merely contains "in", stay put.
+        let keep = "See https://hydra.dev/docs in the manual";
+        assert_eq!(shorten_refs(keep), keep);
+    }
+
+    #[test]
+    fn changelog_line_splits_into_label_and_link() {
+        let line = "Full Changelog: https://github.com/ja7ad/hydra/compare/v0.3.3-rc...v0.3.4-rc";
+        let (label, url) = trailing_link(line).expect("trailing url");
+        assert_eq!(label, "Full Changelog:");
+        assert_eq!(link_label(&url), "v0.3.3-rc...v0.3.4-rc");
+        assert_eq!(link_label("https://example.com/x"), "https://example.com/x");
+        assert!(trailing_link("no link here").is_none());
     }
 }

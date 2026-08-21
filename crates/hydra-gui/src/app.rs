@@ -548,6 +548,9 @@ pub enum Message {
     UpdateNow,
     UpdateCancel,
     UpdateOpenPage,
+    /// Open a link out of the release notes (the "Full Changelog" compare
+    /// URL) in the browser.
+    UpdateOpenUrl(String),
     /// Progress of a running update, streamed from `update::run`.
     UpdateEvent(crate::update::UpdateEvent),
     // scheduler
@@ -2922,6 +2925,12 @@ impl App {
                     "update: user chose Update Now for {}",
                     info.version
                 ));
+                // The dialog does not offer this for a packaged install; a
+                // shortcut or a stale frame must not start a download the
+                // finisher would then be unable to apply.
+                if !info.in_place {
+                    return Task::none();
+                }
                 if !matches!(
                     self.updater.phase,
                     UpdatePhase::Idle | UpdatePhase::Failed(_)
@@ -2962,6 +2971,12 @@ impl App {
                     if !info.html_url.is_empty() {
                         let _ = open::that_detached(&info.html_url);
                     }
+                }
+                Task::none()
+            }
+            Message::UpdateOpenUrl(url) => {
+                if url.starts_with("https://") || url.starts_with("http://") {
+                    let _ = open::that_detached(url);
                 }
                 Task::none()
             }

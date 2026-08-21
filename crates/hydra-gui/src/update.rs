@@ -28,6 +28,13 @@ pub struct UpdateInfo {
     pub size: u64,
     /// `SHA256SUMS.txt` asset, when the release publishes one.
     pub sums_url: Option<String>,
+    /// Whether Hydra can replace its own files. False for a packaged
+    /// install (`/usr/bin` from a deb or rpm): the dialog then offers the
+    /// distro package instead of an in-place update.
+    pub in_place: bool,
+    /// The `.deb`/`.rpm` for this machine, when the install is packaged and
+    /// the release ships one: (file name, download URL, size).
+    pub package: Option<(String, String, u64)>,
 }
 
 /// Progress of a running update, streamed into the dialog.
@@ -68,9 +75,35 @@ pub async fn check(beta: bool) -> Result<Option<UpdateInfo>, String> {
         ));
         return Ok(None);
     };
+    // Can the finisher actually rewrite this install? A deb or rpm owns
+    // /usr/bin as root and a `.pkg` owns /Applications, so the swap is
+    // refused; a macOS bundle is worse, because the swap half-succeeds —
+    // the archive's `hydra-gui` is not the bundle's `Hydra Download
+    // Manager`, so only the CLI gets replaced and the same old app comes
+    // back. Better to say so now than to download 11 MB first.
+    let install_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(PathBuf::from));
+    let in_place = install_dir
+        .as_deref()
+        .is_some_and(hya_updater::can_update_in_place);
+    if !in_place {
+        crate::log::info(&format!(
+            "update {} available but {} cannot be updated in place; offering the installer instead",
+            rel.version(),
+            install_dir
+                .as_deref()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| "the install directory".into())
+        ));
+    }
+    let package = (!in_place)
+        .then(|| rel.package_asset())
+        .flatten()
+        .map(|a| (a.name.clone(), a.browser_download_url.clone(), a.size));
     Ok(Some(UpdateInfo {
         version: rel.version().to_string(),
-        notes: rel.body.clone(),
+        notes: hya_updater::clean_notes(&rel.body),
         html_url: rel.html_url.clone(),
         asset_name: asset.name.clone(),
         asset_url: asset.browser_download_url.clone(),
@@ -78,6 +111,8 @@ pub async fn check(beta: bool) -> Result<Option<UpdateInfo>, String> {
         sums_url: rel
             .asset("SHA256SUMS.txt")
             .map(|a| a.browser_download_url.clone()),
+        in_place,
+        package,
     }))
 }
 

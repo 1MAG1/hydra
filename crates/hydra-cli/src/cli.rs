@@ -851,6 +851,12 @@ pub enum Command {
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
+
+        /// Include release candidates: report the newest `-rc` pre-release
+        /// while it is ahead of the latest stable release. Once stable
+        /// catches up, this reports stable again.
+        #[arg(long)]
+        beta: bool,
     },
 
     /// Generate a completion script AND install it into the shell's standard
