@@ -489,7 +489,15 @@ async fn ftp_fetch(job: &Job, u: &Url, p: &mut Progress, outs: String) -> Outcom
     let px = proxy_for(u);
     let ep = u.to_endpoint(px.as_ref().map(|(h, pt)| (h.as_str(), *pt)));
     let conn = Arc::new(hya_net::TcpConnector);
-    let f = hya_net::ftp::FtpFetcher::new(conn);
+    // `--limit-rate` applies here too. One connection means one limiter, and it
+    // is built for this fetch alone; the aggregate story the HTTP path tells
+    // across connections has nothing to aggregate over.
+    let pace = if job.limit_rate > 0 {
+        hya_net::polite::Pace::shared(Arc::new(hya_net::polite::RateLimiter::new(job.limit_rate)))
+    } else {
+        hya_net::polite::Pace::unlimited()
+    };
+    let f = hya_net::ftp::FtpFetcher::new(conn).with_pace(pace);
 
     p.phase("connecting and logging in");
     let probe = match f.probe(&ep).await {
