@@ -987,7 +987,21 @@ impl App {
             skip_taskbar: self.cfg.settings.hide_from_taskbar,
             ..Default::default()
         };
-        #[cfg(not(target_os = "windows"))]
+        // Linux: the app id is how the desktop matches a window back to its
+        // .desktop file — GNOME/KDE read the Wayland app_id (and the X11
+        // WM_CLASS) and look up Icon= there for the dock, the alt-tab
+        // switcher and the process list. winit leaves it empty by default,
+        // and Wayland has no per-window icon protocol, so the `icon:` field
+        // below is X11/Windows-only: without this the shell has nothing to
+        // match on and falls back to a generic icon even though the app
+        // menu entry shows the logo. Must stay equal to the basename of
+        // hydra.desktop (scripts/package-linux.sh, install.sh).
+        #[cfg(target_os = "linux")]
+        let platform_specific = window::settings::PlatformSpecific {
+            application_id: "hydra".to_string(),
+            ..Default::default()
+        };
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         let platform_specific = window::settings::PlatformSpecific::default();
         let (id, task) = window::open(window::Settings {
             size: iced::Size::new(size.0, size.1),

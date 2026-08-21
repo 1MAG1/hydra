@@ -185,6 +185,9 @@ jobs:
             cp scripts/install-native-host.sh "stage/${GUI_NAME}/scripts/"
           fi
           cp LICENSE LICENSING.md THIRD-PARTY-NOTICES.md README.md "stage/${GUI_NAME}/"
+          # install.sh puts this into the per-user hicolor theme as hydra.png,
+          # which is what Icon=hydra in the generated .desktop resolves to.
+          cp docs/logo.png "stage/${GUI_NAME}/"
 
           if [ "${{ matrix.os }}" = windows ]; then
             (cd stage && 7z a "../dist/${CLI_NAME}.zip" "${CLI_NAME}")
