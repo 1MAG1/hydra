@@ -31,7 +31,7 @@ fn kv<'a>(k: String, v: String) -> El<'a> {
     .into()
 }
 
-fn status_tab<'a>(d: &'a DownloadItem) -> El<'a> {
+fn status_tab<'a>(app: &'a App, d: &'a DownloadItem) -> El<'a> {
     let pct = d
         .size
         .map(|s| fmt::pct(d.downloaded, s))
@@ -70,7 +70,10 @@ fn status_tab<'a>(d: &'a DownloadItem) -> El<'a> {
                 }
             ),
         ),
-        kv(tr("Transfer rate"), fmt::rate(d.rate)),
+        kv(
+            tr("Transfer rate"),
+            fmt::rate_capped(d.rate, app.effective_limit(d))
+        ),
         kv(
             tr("Time left"),
             d.eta_secs.map(fmt::eta).unwrap_or_default()
@@ -91,7 +94,10 @@ fn status_tab<'a>(d: &'a DownloadItem) -> El<'a> {
 fn speed_tab<'a>(app: &'a App, d: &'a DownloadItem) -> El<'a> {
     let p = app.prog.get(&d.id).cloned().unwrap_or_default();
     column![
-        kv(tr("Transfer rate"), fmt::rate(d.rate)),
+        kv(
+            tr("Transfer rate"),
+            fmt::rate_capped(d.rate, app.effective_limit(d))
+        ),
         checkbox(p.limit_on)
             .label(tr("Use Speed Limiter"))
             .on_toggle(move |b| Message::ProgLimitOn(d.id, b))
@@ -293,7 +299,7 @@ pub fn view(app: &App, id: crate::model::DlId) -> El<'_> {
     }
 
     let tab_body: El<'_> = match p.tab {
-        ProgTab::Status => status_tab(d),
+        ProgTab::Status => status_tab(app, d),
         ProgTab::Speed => speed_tab(app, d),
         ProgTab::Completion => completion_tab(app, d),
     };
