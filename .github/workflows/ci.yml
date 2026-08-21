@@ -131,6 +131,10 @@ jobs:
       # nobody can run locally and that drifts from the real one.
       - name: Build and run the C ABI smoke test
         shell: bash
+        env:
+          MSYS_NO_PATHCONV: '1'
+          MSYS2_ARG_CONV_EXCL: '*'
+          MSYS2_ENV_CONV_EXCL: '*'
         run: scripts/ffi-c-example.sh
 
   coverage:

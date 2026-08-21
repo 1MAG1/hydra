@@ -102,7 +102,7 @@ if [ "$toolchain" = "msvc" ]; then
     # by hand; MSVC flags are spelled with `-` so they are never candidates.
     # What this does NOT fix is a space inside an argument - see the response
     # files further down, which is where that is dealt with.
-    export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+    export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' MSYS2_ENV_CONV_EXCL='*'
     winpath() {
         if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
     }
@@ -303,6 +303,8 @@ if [ "$toolchain" = "msvc" ]; then
             for dir in ${lib_dirs_win[@]+"${lib_dirs_win[@]}"}; do
                 printf -- '/LIBPATH:"%s"\n' "$dir"
             done
+            # Explicitly name static CRT libraries so /LIBPATH resolves them
+            printf 'libcmt.lib\nlibvcruntime.lib\nlibucrt.lib\noldnames.lib\n'
             # shellcheck disable=SC2086
             printf '%s\n' $native_libs
         } > "$rsp"
