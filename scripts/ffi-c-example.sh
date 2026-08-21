@@ -189,6 +189,28 @@ if [ "$toolchain" = "msvc" ]; then
         fi
     fi
 
+    # bash can read LIB and find libcmt.lib in it and link.exe still reports
+    # LNK1104 on that exact file, so the variable is not surviving the hop into
+    # the linker. Stop depending on it: every directory LIB names is handed over
+    # as an explicit -LIBPATH, which is an argument rather than an environment
+    # variable and cannot be reinterpreted on the way.
+    libpaths=()
+    lib_dirs="${LIB:-}"
+    while [ -n "$lib_dirs" ]; do
+        case "$lib_dirs" in
+            *\;*) dir="${lib_dirs%%;*}"; lib_dirs="${lib_dirs#*;}" ;;
+            *)    dir="$lib_dirs";        lib_dirs="" ;;
+        esac
+        if [ -n "$dir" ]; then libpaths+=("-LIBPATH:$dir"); fi
+    done
+
+    # And invoke the linker ourselves rather than through cl, so that the
+    # argument list this script builds is the argument list link.exe sees.
+    # link.exe sits next to cl.exe; `command -v link` would find GNU coreutils'
+    # link first on a bash PATH.
+    LINK_EXE="$(dirname "$(command -v "$CC")")/link.exe"
+    [ -x "$LINK_EXE" ] || LINK_EXE="link"
+
     # -MT, not the default -MD: .cargo/config.toml builds the Windows targets
     # with +crt-static, so rustc asks for libcmt and a C object compiled against
     # the DLL runtime would drag in a second, conflicting CRT.
@@ -199,11 +221,14 @@ if [ "$toolchain" = "msvc" ]; then
         echo "==> compiling $prog.c"
         # -std:c11 explicitly: cl's default dialect for .c has no
         # _Static_assert, and the header asserts its whole layout with it.
-        # shellcheck disable=SC2086
-        "$CC" "${cflags[@]}" -std:c11 "-Fe:$(winpath "$out/$prog.exe")" \
+        "$CC" "${cflags[@]}" -std:c11 -c \
             "-Fo:$(winpath "$out/$prog.obj")" \
-            "$(winpath "$root/examples/ffi-c/$prog.c")" \
-            -link "$(winpath "$archive")" $native_libs
+            "$(winpath "$root/examples/ffi-c/$prog.c")"
+        echo "==> linking $prog.exe"
+        # shellcheck disable=SC2086
+        "$LINK_EXE" -nologo "-out:$(winpath "$out/$prog.exe")" \
+            "$(winpath "$out/$prog.obj")" "$(winpath "$archive")" \
+            ${libpaths[@]+"${libpaths[@]}"} $native_libs
     done
 
     # The header is a published artifact, so it has to survive every dialect a

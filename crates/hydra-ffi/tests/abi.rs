@@ -1170,6 +1170,16 @@ fn an_event_callback_sees_the_same_events_as_the_queue() {
     unsafe { hydra_job_start(h.engine, id) };
     let ev = await_terminal(&h, id, Duration::from_secs(60));
     assert_eq!(ev.kind, hydra_event_type_t::HYDRA_EVENT_COMPLETED);
+    // The callback runs immediately AFTER the event is queued, which is what
+    // `hydra_event_set_callback` documents. This thread was woken by that same
+    // queue push, so on a loaded machine it can arrive here before the engine
+    // thread has made the call. Wait for the callback rather than racing it:
+    // the claim under test is that the callback sees the completion at all,
+    // not that it sees it first.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while COMPLETED.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(SEEN.load(Ordering::Relaxed) > 0, "the callback never ran");
     assert_eq!(
         COMPLETED.load(Ordering::Relaxed),
