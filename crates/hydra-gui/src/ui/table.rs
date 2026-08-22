@@ -9,7 +9,7 @@
 use crate::app::{App, El, Message, SortKey};
 use crate::model::DownloadItem;
 use crate::{fmt, i18n::tr, icons, theme};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, svg, text};
+use iced::widget::{column, container, mouse_area, row, scrollable, svg, text};
 use iced::Length;
 
 const COLS: [(&str, f32, Option<SortKey>); 8] = [
@@ -57,11 +57,23 @@ fn header(app: &App) -> El<'_> {
             }
             _ => "",
         };
-        let cell = button(text(format!("{}{arrow}", tr(label))).size(theme::FONT_SIZE))
+        let cell = container(
+            text(format!("{}{arrow}", tr(label)))
+                .size(theme::FONT_SIZE)
+                .wrapping(iced::widget::text::Wrapping::None),
+        )
             .padding([3, 6])
             .width(w[i])
             .height(24.0)
-            .style(theme::btn_header);
+            .clip(true)
+            .style(theme::header_cell(app.hover_col == Some(i)));
+        // A container under a `mouse_area`, not a `button`: a button forces the
+        // hand cursor, and `mouse_area::interaction` can only override a child
+        // that asks for none.
+        let cell = mouse_area(cell)
+            .interaction(iced::mouse::Interaction::Idle)
+            .on_enter(Message::HeaderEnter(i))
+            .on_exit(Message::HeaderExit(i));
         r = match key {
             Some(k) => r.push(cell.on_press(Message::SortBy(*k))),
             None => r.push(cell),
@@ -119,14 +131,20 @@ fn row_line<'a>(tw: f32) -> El<'a> {
         .into()
 }
 
-/// An empty ruled row so the list shows a full grid below the data.
+/// An empty ruled row so the list shows a full grid below the data. It is a
+/// press target too: a drag begun here sweeps into the rows above/below it,
+/// and a plain click on it clears the selection.
 fn filler_row<'a>(w: &[f32], tw: f32) -> El<'a> {
     let mut r = row![].spacing(0);
     for width in w {
         r = r.push(cell(text("").size(theme::FONT_SIZE).into(), *width));
         r = r.push(rule_grip());
     }
-    column![r, row_line(tw)].into()
+    mouse_area(column![r, row_line(tw)])
+        .interaction(iced::mouse::Interaction::Idle)
+        .on_press(Message::EmptyPress)
+        .on_enter(Message::EmptyEnter)
+        .into()
 }
 
 /// File-type glyph for a row: the item's category (or, when unset, the
@@ -208,15 +226,21 @@ fn data_row<'a>(app: &App, d: &'a DownloadItem) -> El<'a> {
     .spacing(0);
 
     let tw = total_width(&w);
+    // The row is a plain container, not a button: `button` reports its press
+    // only on mouse-*release* (so the drag never knows where it started) and
+    // always paints the hand cursor. `mouse_area` presses on the way down,
+    // which is what both drag-selection and the arrow cursor need.
     column![
         mouse_area(
-            button(content)
-                .padding(0)
-                .style(theme::btn_row(selected))
-                .on_press(Message::RowClick(d.id)),
+            container(content)
+                .width(tw)
+                .style(theme::row_cell(selected, app.hover_row == Some(d.id))),
         )
+        .interaction(iced::mouse::Interaction::Idle)
+        .on_press(Message::RowClick(d.id))
         .on_right_press(Message::RowRightClick(d.id))
-        .on_enter(Message::RowEnter(d.id)),
+        .on_enter(Message::RowEnter(d.id))
+        .on_exit(Message::RowExit(d.id)),
         row_line(tw),
     ]
     .into()
