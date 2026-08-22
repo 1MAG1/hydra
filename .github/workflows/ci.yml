@@ -91,8 +91,14 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # fetch-depth: 0, and only in this job. The old-header check compiles
+      # every include/hydra.h this project has ever published against the
+      # library built here, and it finds them by tag. A shallow clone has no
+      # tags and the check would have nothing to run.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -135,7 +141,35 @@ jobs:
           MSYS_NO_PATHCONV: '1'
           MSYS2_ARG_CONV_EXCL: '*'
           MSYS2_ENV_CONV_EXCL: '*'
+          # No published header may be skipped silently. Without this a
+          # checkout that somehow has no tags would report a pass for a check
+          # that never ran.
+          HYDRA_REQUIRE_LEGACY_HEADERS: '1'
         run: scripts/ffi-c-example.sh
+
+      # The same script again under the other Linux compiler. GCC and Clang
+      # disagree about which warnings exist and, historically, about how a
+      # struct with mixed field widths is padded - and the header is a
+      # published artifact that has to survive both. Only on Linux: macOS has
+      # one system compiler and Windows has MSVC, both already covered above.
+      - name: Build and run the C ABI smoke test with Clang
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CC: clang
+          CXX: clang++
+          HYDRA_REQUIRE_LEGACY_HEADERS: '1'
+        run: scripts/ffi-c-example.sh
+
+      # And whether the change was ALLOWED. header-check above proves the header
+      # still matches the Rust; this proves the Rust did not move anything ABI 1
+      # froze. Last, because it also verifies that every symbol the baseline
+      # promises is really in the archive - and the archive is what the step
+      # above builds. The rules, and what to do when this fails, are in
+      # docs/ffi/ABI.md.
+      - name: Check the ABI 1 stability contract
+        shell: bash
+        run: scripts/ffi-abi-compat.sh
 
   coverage:
     name: Code Coverage

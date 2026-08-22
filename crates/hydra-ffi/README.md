@@ -7,6 +7,12 @@ turns them into an **embeddable engine**: one static or shared library, one
 header, and a contract a program written in C, Go, Swift, Kotlin, Dart, C# or
 Python can hold on to across releases.
 
+> The canonical specification is [**`docs/ffi/ABI.md`**](../../docs/ffi/ABI.md):
+> design principles, the ABI 1 stability policy, ownership, the event queue's
+> ordering and drop guarantees, and how all of it is enforced. This page is the
+> crate's own README — what is here, why it is shaped this way, and how to
+> build it.
+
 ```text
                          Applications
                               │
@@ -121,7 +127,28 @@ deliberately no `hydra_read_data`.
 | **Callbacks** | `user_data` is never owned and never freed by hydra. It must outlive the registration. |
 
 Every function in `hydra.h` restates its own threading, blocking and allocation
-behaviour. That is the artifact binding authors read.
+behaviour. That is the artifact binding authors read; the reasoning behind each
+row above is in [`docs/ffi/ABI.md`](../../docs/ffi/ABI.md) section 4.
+
+### The stability policy, enforced
+
+`crates/hydra-ffi/abi/abi-1.manifest` is the frozen layout of ABI 1 — every
+enumerator value, every field offset and width, every struct size, every
+exported symbol. `scripts/ffi-abi-compat.sh` derives the same facts from the
+current header and refuses anything the contract does not permit: fields may not
+move, enumerators may not be renumbered, symbols may not disappear, and only the
+two size-prefixed configuration structs may grow. `scripts/ffi-c-example.sh`
+then compiles every header this project has published against the library built
+from the working tree.
+
+```sh
+make ffi-compat   # the layout gate
+make ffi-test     # the Rust suite, the C/C++ conformance program, and every
+                  # published header against this library
+```
+
+A change that cannot pass those is an ABI 2 change. See
+[`docs/ffi/ABI.md`](../../docs/ffi/ABI.md) section 3.
 
 ## Backpressure
 

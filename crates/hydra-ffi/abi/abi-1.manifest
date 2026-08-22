@@ -1,0 +1,248 @@
+abi 1
+enum hydra_cancel_mode_t.HYDRA_CANCEL_KEEP_PARTIAL 0
+enum hydra_cancel_mode_t.HYDRA_CANCEL_REMOVE_PARTIAL 1
+enum hydra_checksum_algorithm_t.HYDRA_CHECKSUM_BLAKE3 5
+enum hydra_checksum_algorithm_t.HYDRA_CHECKSUM_MD5 1
+enum hydra_checksum_algorithm_t.HYDRA_CHECKSUM_NONE 0
+enum hydra_checksum_algorithm_t.HYDRA_CHECKSUM_SHA1 2
+enum hydra_checksum_algorithm_t.HYDRA_CHECKSUM_SHA256 3
+enum hydra_checksum_algorithm_t.HYDRA_CHECKSUM_SHA512 4
+enum hydra_error_code_t.HYDRA_ERR_AGAIN 5
+enum hydra_error_code_t.HYDRA_ERR_ALREADY_EXISTS 17
+enum hydra_error_code_t.HYDRA_ERR_CANCELLED 15
+enum hydra_error_code_t.HYDRA_ERR_CHECKSUM 13
+enum hydra_error_code_t.HYDRA_ERR_CONNECTION 7
+enum hydra_error_code_t.HYDRA_ERR_INTERNAL 20
+enum hydra_error_code_t.HYDRA_ERR_INVALID_ARGUMENT 1
+enum hydra_error_code_t.HYDRA_ERR_INVALID_STATE 3
+enum hydra_error_code_t.HYDRA_ERR_INVALID_URL 2
+enum hydra_error_code_t.HYDRA_ERR_IO 10
+enum hydra_error_code_t.HYDRA_ERR_NETWORK 6
+enum hydra_error_code_t.HYDRA_ERR_NOT_FOUND 16
+enum hydra_error_code_t.HYDRA_ERR_NO_SPACE 12
+enum hydra_error_code_t.HYDRA_ERR_PERMISSION 11
+enum hydra_error_code_t.HYDRA_ERR_PROTOCOL 9
+enum hydra_error_code_t.HYDRA_ERR_RESOURCE_LIMIT 18
+enum hydra_error_code_t.HYDRA_ERR_SHUTDOWN 19
+enum hydra_error_code_t.HYDRA_ERR_TIMEOUT 8
+enum hydra_error_code_t.HYDRA_ERR_UNSUPPORTED 4
+enum hydra_error_code_t.HYDRA_ERR_VERIFICATION 14
+enum hydra_error_code_t.HYDRA_OK 0
+enum hydra_event_type_t.HYDRA_EVENT_CANCELLED 13
+enum hydra_event_type_t.HYDRA_EVENT_COMPLETED 11
+enum hydra_event_type_t.HYDRA_EVENT_ENGINE_SHUTDOWN 14
+enum hydra_event_type_t.HYDRA_EVENT_FAILED 12
+enum hydra_event_type_t.HYDRA_EVENT_JOB_CREATED 0
+enum hydra_event_type_t.HYDRA_EVENT_JOB_QUEUED 1
+enum hydra_event_type_t.HYDRA_EVENT_JOB_STARTED 2
+enum hydra_event_type_t.HYDRA_EVENT_PAUSED 5
+enum hydra_event_type_t.HYDRA_EVENT_PROGRESS 4
+enum hydra_event_type_t.HYDRA_EVENT_RESOLVED 3
+enum hydra_event_type_t.HYDRA_EVENT_RESUMED 6
+enum hydra_event_type_t.HYDRA_EVENT_RETRYING 7
+enum hydra_event_type_t.HYDRA_EVENT_SOURCE_CHANGED 8
+enum hydra_event_type_t.HYDRA_EVENT_STALLED 9
+enum hydra_event_type_t.HYDRA_EVENT_VERIFYING 10
+enum hydra_job_state_t.HYDRA_JOB_CANCELLED 8
+enum hydra_job_state_t.HYDRA_JOB_COMPLETED 6
+enum hydra_job_state_t.HYDRA_JOB_CREATED 0
+enum hydra_job_state_t.HYDRA_JOB_DOWNLOADING 3
+enum hydra_job_state_t.HYDRA_JOB_FAILED 7
+enum hydra_job_state_t.HYDRA_JOB_PAUSED 4
+enum hydra_job_state_t.HYDRA_JOB_QUEUED 1
+enum hydra_job_state_t.HYDRA_JOB_RESOLVING 2
+enum hydra_job_state_t.HYDRA_JOB_VERIFYING 5
+enum hydra_log_level_t.HYDRA_LOG_DEBUG 3
+enum hydra_log_level_t.HYDRA_LOG_ERROR 0
+enum hydra_log_level_t.HYDRA_LOG_INFO 2
+enum hydra_log_level_t.HYDRA_LOG_TRACE 4
+enum hydra_log_level_t.HYDRA_LOG_WARN 1
+enum hydra_network_policy_t.HYDRA_NETWORK_ANY 0
+enum hydra_network_policy_t.HYDRA_NETWORK_UNMETERED 1
+enum hydra_network_policy_t.HYDRA_NETWORK_WIFI_ONLY 2
+enum hydra_power_mode_t.HYDRA_POWER_BATTERY_SAVER 1
+enum hydra_power_mode_t.HYDRA_POWER_NORMAL 0
+enum hydra_power_mode_t.HYDRA_POWER_RESTRICTED 2
+enum hydra_priority_t.HYDRA_PRIORITY_HIGH 2
+enum hydra_priority_t.HYDRA_PRIORITY_LOW 0
+enum hydra_priority_t.HYDRA_PRIORITY_NORMAL 1
+enum hydra_proxy_type_t.HYDRA_PROXY_HTTP 1
+enum hydra_proxy_type_t.HYDRA_PROXY_NONE 0
+enum hydra_proxy_type_t.HYDRA_PROXY_SOCKS4 2
+enum hydra_proxy_type_t.HYDRA_PROXY_SOCKS4A 3
+enum hydra_proxy_type_t.HYDRA_PROXY_SOCKS5 4
+field hydra_checksum_t.algorithm 0 4
+field hydra_checksum_t.digest 8 8
+field hydra_checksum_t.digest_len 16 8
+field hydra_checksum_t.reserved 4 4
+field hydra_engine_config_t.adaptive_concurrency 40 1
+field hydra_engine_config_t.allow_insecure_tls 42 1
+field hydra_engine_config_t.event_queue_capacity 24 4
+field hydra_engine_config_t.max_bytes_per_second 32 8
+field hydra_engine_config_t.max_connections 12 4
+field hydra_engine_config_t.max_jobs 8 4
+field hydra_engine_config_t.max_retries 16 4
+field hydra_engine_config_t.network_policy 44 4
+field hydra_engine_config_t.power_mode 48 4
+field hydra_engine_config_t.progress_interval_ms 20 4
+field hydra_engine_config_t.range_stealing 41 1
+field hydra_engine_config_t.reserved 72 32
+field hydra_engine_config_t.reserved0 43 1
+field hydra_engine_config_t.size 0 4
+field hydra_engine_config_t.state_path 56 8
+field hydra_engine_config_t.user_agent 64 8
+field hydra_engine_config_t.version 4 4
+field hydra_engine_config_t.worker_threads 28 4
+field hydra_error_t.code 0 4
+field hydra_error_t.http_status 8 4
+field hydra_error_t.message 16 16
+field hydra_error_t.os_error 4 4
+field hydra_event_t.dropped_events 112 8
+field hydra_event_t.error 88 4
+field hydra_event_t.http_status 92 4
+field hydra_event_t.job_id 8 8
+field hydra_event_t.kind 0 4
+field hydra_event_t.os_error 96 4
+field hydra_event_t.progress 16 72
+field hydra_event_t.reserved 100 4
+field hydra_event_t.state 4 4
+field hydra_event_t.timestamp_ms 104 8
+field hydra_header_t.name 0 8
+field hydra_header_t.value 8 8
+field hydra_job_config_t.adaptive 121 1
+field hydra_job_config_t.auto_start 122 1
+field hydra_job_config_t.checksum 72 24
+field hydra_job_config_t.header_count 40 8
+field hydra_job_config_t.headers 32 8
+field hydra_job_config_t.max_bytes_per_second 112 8
+field hydra_job_config_t.max_connections 96 4
+field hydra_job_config_t.max_retries 100 4
+field hydra_job_config_t.output_path 24 8
+field hydra_job_config_t.password 56 8
+field hydra_job_config_t.priority 104 4
+field hydra_job_config_t.proxy 64 8
+field hydra_job_config_t.reserved 124 32
+field hydra_job_config_t.reserved0 108 4
+field hydra_job_config_t.reserved1 123 1
+field hydra_job_config_t.resume 120 1
+field hydra_job_config_t.size 0 4
+field hydra_job_config_t.url_count 16 8
+field hydra_job_config_t.urls 8 8
+field hydra_job_config_t.username 48 8
+field hydra_job_config_t.version 4 4
+field hydra_job_id_array_t.items 0 8
+field hydra_job_id_array_t.len 8 8
+field hydra_job_snapshot_t.created_at_ms 152 8
+field hydra_job_snapshot_t.error_code 12 4
+field hydra_job_snapshot_t.error_message 136 16
+field hydra_job_snapshot_t.file_name 120 16
+field hydra_job_snapshot_t.finished_at_ms 168 8
+field hydra_job_snapshot_t.id 0 8
+field hydra_job_snapshot_t.output_path 104 16
+field hydra_job_snapshot_t.progress 16 72
+field hydra_job_snapshot_t.started_at_ms 160 8
+field hydra_job_snapshot_t.state 8 4
+field hydra_job_snapshot_t.url 88 16
+field hydra_metrics_t.bytes_received 0 8
+field hydra_metrics_t.bytes_written 8 8
+field hydra_metrics_t.error_count 32 8
+field hydra_metrics_t.events_dropped 72 8
+field hydra_metrics_t.jobs_completed 56 8
+field hydra_metrics_t.jobs_created 48 8
+field hydra_metrics_t.jobs_failed 64 8
+field hydra_metrics_t.request_count 16 8
+field hydra_metrics_t.retry_count 24 8
+field hydra_metrics_t.stall_count 40 8
+field hydra_progress_t.active_connections 40 4
+field hydra_progress_t.active_sources 44 4
+field hydra_progress_t.average_bytes_per_second 24 8
+field hydra_progress_t.bytes_downloaded 0 8
+field hydra_progress_t.bytes_per_second 16 8
+field hydra_progress_t.completed_ranges 48 4
+field hydra_progress_t.eta_seconds 32 8
+field hydra_progress_t.retry_count 56 8
+field hydra_progress_t.stall_count 64 8
+field hydra_progress_t.total_bytes 8 8
+field hydra_progress_t.total_ranges 52 4
+field hydra_proxy_config_t.host 8 8
+field hydra_proxy_config_t.kind 0 4
+field hydra_proxy_config_t.password 24 8
+field hydra_proxy_config_t.port 4 2
+field hydra_proxy_config_t.reserved 6 2
+field hydra_proxy_config_t.username 16 8
+field hydra_runtime_policy_t.allow_cellular 8 1
+field hydra_runtime_policy_t.allow_metered 9 1
+field hydra_runtime_policy_t.network_policy 0 4
+field hydra_runtime_policy_t.pause_on_low_battery 10 1
+field hydra_runtime_policy_t.pause_when_backgrounded 11 1
+field hydra_runtime_policy_t.power_mode 4 4
+field hydra_runtime_policy_t.reserved 12 4
+field hydra_source_array_t.items 0 8
+field hydra_source_array_t.len 8 8
+field hydra_source_info_t.active 56 1
+field hydra_source_info_t.active_connections 48 4
+field hydra_source_info_t.bytes_downloaded 24 8
+field hydra_source_info_t.bytes_per_second 32 8
+field hydra_source_info_t.error_count 52 4
+field hydra_source_info_t.id 0 8
+field hydra_source_info_t.latency_us 40 8
+field hydra_source_info_t.reserved 57 7
+field hydra_source_info_t.url 8 16
+field hydra_string_t.data 0 8
+field hydra_string_t.len 8 8
+struct hydra_checksum_t 24
+struct hydra_engine_config_t 104
+struct hydra_error_t 32
+struct hydra_event_t 120
+struct hydra_header_t 16
+struct hydra_job_config_t 160
+struct hydra_job_id_array_t 16
+struct hydra_job_snapshot_t 176
+struct hydra_metrics_t 80
+struct hydra_progress_t 72
+struct hydra_proxy_config_t 32
+struct hydra_runtime_policy_t 16
+struct hydra_source_array_t 16
+struct hydra_source_info_t 64
+struct hydra_string_t 16
+symbol hydra_engine_config_init
+symbol hydra_engine_create
+symbol hydra_engine_destroy
+symbol hydra_engine_get_metrics
+symbol hydra_engine_get_policy
+symbol hydra_engine_list_jobs
+symbol hydra_engine_restore
+symbol hydra_engine_set_log_callback
+symbol hydra_engine_set_max_bytes_per_second
+symbol hydra_engine_set_max_jobs
+symbol hydra_engine_set_policy
+symbol hydra_engine_shutdown
+symbol hydra_engine_snapshot
+symbol hydra_error_free
+symbol hydra_error_name
+symbol hydra_event_next
+symbol hydra_event_set_callback
+symbol hydra_event_wait
+symbol hydra_event_wake
+symbol hydra_ffi_abi_version
+symbol hydra_ffi_version_string
+symbol hydra_job_cancel
+symbol hydra_job_config_init
+symbol hydra_job_create
+symbol hydra_job_get_progress
+symbol hydra_job_get_snapshot
+symbol hydra_job_get_sources
+symbol hydra_job_get_state
+symbol hydra_job_id_array_free
+symbol hydra_job_pause
+symbol hydra_job_remove
+symbol hydra_job_resume
+symbol hydra_job_set_credentials
+symbol hydra_job_set_max_bytes_per_second
+symbol hydra_job_set_output_path
+symbol hydra_job_snapshot_free
+symbol hydra_job_start
+symbol hydra_last_error
+symbol hydra_runtime_policy_init
+symbol hydra_source_array_free
+symbol hydra_string_free

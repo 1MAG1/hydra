@@ -427,6 +427,47 @@ if [ "$toolchain" = "msvc" ]; then
         echo "    $std ok"
     done
 
+    # Compile and link one extra program against a DIFFERENT header directory,
+    # reusing everything this branch worked out about MSVC. Used for the
+    # published-header check at the foot of the script.
+    build_extra() { # src, include dir, output basename
+        local src="$1" inc="$2" name="$3" rsp dir arg
+        rsp="$out/$name.cl.rsp"
+        {
+            printf -- '%s\n' "${cflags[@]}"
+            printf -- '/I"%s"\n' "$(winpath "$inc")"
+            printf -- '/std:c11\n/c\n'
+            printf -- '/Fo:"%s"\n' "$(winpath "$out/$name.obj")"
+            printf '"%s"\n' "$(winpath "$src")"
+        } > "$rsp"
+        "$CC" "@$(winpath "$rsp")"
+
+        rsp="$out/$name.link.rsp"
+        {
+            printf -- '/nologo\n'
+            printf -- '/OUT:"%s"\n' "$(winpath "$out/$name.exe")"
+            printf '"%s"\n' "$(winpath "$out/$name.obj")"
+            printf '"%s"\n' "$(winpath "$archive")"
+            for dir in ${lib_dirs_win[@]+"${lib_dirs_win[@]}"} \
+                       ${crate_lib_dirs[@]+"${crate_lib_dirs[@]}"}; do
+                printf -- '/LIBPATH:"%s"\n' "$dir"
+            done
+            printf -- '/NODEFAULTLIB\n'
+            printf 'libcmt.lib\nlibvcruntime.lib\nlibucrt.lib\noldnames.lib\n'
+            for arg in $native_libs; do
+                case "$arg" in
+                    /*|-*) ;;
+                    *) printf '%s\n' "$arg" ;;
+                esac
+            done
+        } > "$rsp"
+        "$LINK_EXE" "@$(winpath "$rsp")" || { report_link_failure "$rsp"; return 1; }
+        # Answered through a variable rather than stdout: cl echoes the source
+        # file name as it compiles, and a command substitution would capture
+        # that along with the path.
+        extra_bin="$out/$name.exe"
+    }
+
     smoke="$out/abi_smoke.exe"
     client="$out/download.exe"
 else
@@ -500,12 +541,76 @@ else
         echo "==> skipping the C++ header check (no C++ compiler)"
     fi
 
+    # The same thing for a Unix cc: one extra program, compiled against a
+    # header directory that is not this tree's include/.
+    build_extra() { # src, include dir, output basename
+        local src="$1" inc="$2" name="$3"
+        # -Wno-error here and nowhere else: an old header is a FROZEN artifact.
+        # It cannot be edited to satisfy a warning a newer compiler learned to
+        # emit, and refusing to build it would turn a compiler upgrade into a
+        # false ABI break. Errors still fail.
+        # shellcheck disable=SC2086
+        "$CC" -std=c11 -Wall -Wextra -I "$inc" -o "$out/$name" "$src" \
+            "$archive" $link_libs
+        extra_bin="$out/$name"
+    }
+
     smoke="$out/abi_smoke"
     client="$out/download"
 fi
 
 echo "==> running the ABI smoke test"
 "$smoke"
+
+# --------------------------------------------------------------------------
+# Old header, new library.
+#
+# Everything above compiles against the header sitting next to the library it
+# links, which is the one arrangement a stable ABI does not need to be stable
+# for. The interesting case is the program somebody compiled two releases ago
+# and has not rebuilt: its struct sizes, its enumerator values and its inline
+# helpers are all frozen inside its object file, and the library it loads today
+# has to still fit them.
+#
+# Every published header is in this repository's git history, tagged. Extract
+# each one, build examples/ffi-c/compat_probe.c against it, link it against the
+# archive built from the working tree, and run it.
+# --------------------------------------------------------------------------
+echo
+echo "==> checking published headers against this library"
+legacy_root="$out/legacy"
+rm -rf "$legacy_root"
+mkdir -p "$legacy_root"
+
+legacy_tags=""
+if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+    for tag in $(git -C "$root" tag --sort=version:refname); do
+        git -C "$root" cat-file -e "$tag:include/hydra.h" 2>/dev/null || continue
+        mkdir -p "$legacy_root/$tag"
+        git -C "$root" show "$tag:include/hydra.h" > "$legacy_root/$tag/hydra.h"
+        legacy_tags="$legacy_tags $tag"
+    done
+fi
+
+if [ -z "$legacy_tags" ]; then
+    # A shallow CI checkout has no tags, and a fresh clone of a fork may have
+    # none either. That is a missing input rather than a passing check, so CI
+    # sets HYDRA_REQUIRE_LEGACY_HEADERS=1 (with fetch-depth: 0) and this becomes
+    # an error there instead of a note.
+    if [ "${HYDRA_REQUIRE_LEGACY_HEADERS:-0}" = "1" ]; then
+        echo "error: no published header found in git history - this checkout has" \
+             "no tags, so the old-header check could not run" >&2
+        exit 1
+    fi
+    echo "    skipped: no tagged include/hydra.h in this checkout"
+else
+    for tag in $legacy_tags; do
+        echo "    $tag"
+        build_extra "$root/examples/ffi-c/compat_probe.c" \
+                    "$legacy_root/$tag" "compat_$tag"
+        "$extra_bin"
+    done
+fi
 
 echo
 echo "built $client - try:"

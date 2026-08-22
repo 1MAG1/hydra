@@ -10,6 +10,18 @@ and integrity verification. What the ABI adds is durable job identity,
 persistence, and a platform-policy boundary that makes the engine usable on a
 phone.
 
+It is also a **separate product** from the `hydra` application, with its own
+version, its own release archives, its own compatibility promise and its own
+permissive licence. You can embed it without taking the CLI or the GUI with
+you, and without inheriting their GPL.
+
+## Start here
+
+**[The ABI specification](ABI.md)** — the design principles, the ABI 1
+stability policy, ownership, the event queue's ordering and drop guarantees,
+credentials, rate limits, persistence, and how all of it is enforced in CI.
+Read it once before writing a binding; everything else on this page assumes it.
+
 ## Pick your platform
 
 | | |
@@ -108,9 +120,16 @@ independent of file size — a 40 GB download costs the same memory as a 4 MB on
 fallible call returns a code with the detail available from
 `hydra_last_error()`.
 
-The full contract is at the top of [`hydra.h`](../../include/hydra.h) itself,
-and every function restates its own threading, blocking and allocation
-behaviour.
+**The ABI is frozen, and mechanically so.** Within ABI 1 no field moves, no
+enumerator is renumbered, no symbol disappears, and new fields are appended only
+to the two size-prefixed configuration structs. CI compiles every header this
+project has ever published against the library built from the current branch,
+and checks the whole layout against a frozen manifest. The rules are in
+[ABI.md](ABI.md); the enforcement is described in its section 6.
+
+The full specification is [ABI.md](ABI.md). The declarations, each restating its
+own threading, blocking and allocation behaviour, are in
+[`hydra.h`](../../include/hydra.h).
 
 ## Licence
 

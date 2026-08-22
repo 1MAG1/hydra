@@ -70,22 +70,39 @@ cargo test --all-targets --all-features
 cargo test --release --all-targets --all-features
 ```
 
-If you touched `crates/hydra-ffi`, three more:
+If you touched `crates/hydra-ffi`, four more:
 
 ```bash
 # 4. include/hydra.h is generated and committed; CI fails if it drifted.
 #    Needs cbindgen: cargo install cbindgen --locked
 make header-check
 
-# 5. The check no Rust test can perform: a C compiler accepting the header,
-#    the two sides agreeing on struct layout, every promised symbol present.
-#    Also compiles the header alone as C11/C17 and C++11/C++17.
+# 5. Whether the change was ALLOWED. Every enumerator value, field offset,
+#    struct size and exported symbol in ABI 1 is frozen; additions the
+#    contract permits pass, movements do not. See docs/ffi/ABI.md.
+make ffi-compat
+
+# 6. The checks no Rust test can perform: a C compiler accepting the header,
+#    the two sides agreeing on struct layout, every promised symbol present,
+#    and every header this project has ever published still working against
+#    the library built from your branch. Also compiles the header alone as
+#    C99/C11/C17 and C++11/C++17.
 make ffi-test
 
-# 6. If you changed the packaging, the release archive still builds.
+# 7. If you changed the packaging, the release archive still builds.
 #    This is the same script the release workflow runs.
 make ffi-dist
 ```
+
+**The ABI is a promise, not a preference.** [`docs/ffi/ABI.md`](docs/ffi/ABI.md)
+is the specification: read section 3 before changing anything in
+`crates/hydra-ffi/src/abi.rs`. In short — within ABI 1, fields never move and
+never change width or meaning, enumerator values are never reassigned, symbols
+never disappear, and new fields may only be appended to the two size-prefixed
+configuration structs. Anything else needs `HYDRA_FFI_ABI_VERSION = 2`, not an
+edit to `crates/hydra-ffi/abi/abi-1.manifest`. That file is regenerated with
+`scripts/ffi-abi-compat.sh --update` only when appending within the rules or
+starting a new ABI version — never to make a failing check pass.
 
 `libhydra` is released for Linux (glibc and musl), macOS, Windows, Android and
 iOS. The per-platform integration guides are in [`docs/ffi/`](docs/ffi/) and are
@@ -96,7 +113,7 @@ to one of them too.
 
 - Put unit tests next to the code they cover; integration tests go in each crate's `tests/` directory.
 - New engine behavior in `hydra-core` should come with tests — the scheduler is deliberately I/O-free precisely so it can be tested deterministically without a network.
-- Anything added to the C ABI needs a test in `crates/hydra-ffi/tests/abi.rs`, which calls the exported symbols the way a C program does. Reaching into the crate's internals from there defeats the purpose: the point is evidence that the *interface* works. If the change alters the header, add a check to `examples/ffi-c/abi_smoke.c` as well — struct-layout and linkage faults are invisible to Rust tests by construction.
+- Anything added to the C ABI needs a test in `crates/hydra-ffi/tests/abi.rs`, which calls the exported symbols the way a C program does. Reaching into the crate's internals from there defeats the purpose: the point is evidence that the *interface* works. If the change alters the header, add a check to `examples/ffi-c/abi_smoke.c` as well — struct-layout and linkage faults are invisible to Rust tests by construction. `examples/ffi-c/compat_probe.c` is the other side of that: it is compiled against every *published* header rather than the current one, so it may only use the ABI 1 surface that has existed since ABI 1 was published.
 - Coverage is tracked on [Codecov](https://codecov.io/gh/ja7ad/hydra). A PR doesn't need to hit a specific number, but changes that add meaningful logic without any tests will usually get pushback.
 - To reproduce the coverage report locally:
 

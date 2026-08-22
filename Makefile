@@ -11,6 +11,7 @@
 #   make ffi        the embeddable C library (static + shared) -> target/<profile>
 #   make header     regenerate include/hydra.h from the Rust definitions
 #   make header-check  fail if include/hydra.h is out of date
+#   make ffi-compat the ABI 1 stability gate (docs/ffi/ABI.md)
 #   make ffi-test   the FFI test suite plus the C ABI conformance program
 #   make ffi-dist   a release archive of libhydra for the host target
 #   make ffi-android  libhydra for the four Android ABIs (needs the NDK)
@@ -27,8 +28,8 @@ PROFILE ?= release
 CARGO   ?= cargo
 
 .PHONY: all build cli gui host app dmg deb rpm linux windows package clean \
-        require-macos require-linux ffi header header-check ffi-test \
-        ffi-dist ffi-android ffi-apple
+        require-macos require-linux ffi header header-check ffi-compat \
+        ffi-test ffi-dist ffi-android ffi-apple
 
 all: build
 
@@ -69,11 +70,20 @@ header:
 header-check:
 	scripts/gen-ffi-header.sh --check
 
+# The other half of header-check. That one asks whether the header still matches
+# the Rust; this one asks whether the change was ALLOWED -- every enumerator
+# value, field offset, struct size and exported symbol in ABI 1 is frozen in
+# crates/hydra-ffi/abi/abi-1.manifest, and additions the contract permits pass
+# while movements do not. The rules are in docs/ffi/ABI.md.
+ffi-compat:
+	scripts/ffi-abi-compat.sh
+
 # The Rust ABI suite, then the C conformance program. The second half is the one
 # that catches a header that does not compile or a symbol that is not in the
 # archive -- things no Rust test can see.
 ffi-test:
 	$(CARGO) test -p hya-ffi --all-targets
+	scripts/ffi-abi-compat.sh
 	scripts/ffi-c-example.sh
 
 # Release archives. These call the SAME scripts the release workflow runs --

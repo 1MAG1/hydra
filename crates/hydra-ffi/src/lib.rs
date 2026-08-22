@@ -13,12 +13,33 @@
 //! Provides a stable C ABI over `hya-core` and `hya-net`, enabling hydra
 //! to be embedded into applications across C, Go, Swift, Kotlin, Dart, C#, and Python.
 //!
-//! ## Key Principles
+//! ## Design principles
+//!
+//! `libhydra` is an embeddable engine, not a Rust-to-C wrapper. The ABI
+//! prioritises, in this order: stable binary compatibility, explicit
+//! ownership, panic isolation, runtime independence, thread safety, bounded
+//! asynchronous events, cross-language interoperability, platform
+//! independence.
+//!
 //! - **Canonical C ABI**: Exposes stable C symbols with opaque handles (`hydra_engine_t`) and integer job IDs (`hydra_job_id_t`).
 //! - **Isolated Memory**: Hydra manages its own allocations; callers free returned objects via matching `*_free` functions.
-//! - **Asynchronous Queue**: Non-blocking, bounded event queue with coalescing progress events and guaranteed terminal delivery.
+//! - **Asynchronous Queue**: Non-blocking, bounded event queue with coalescing progress events and guaranteed terminal delivery. The queue is the primitive; callbacks are an optional convenience.
 //! - **Panic Safety**: All exported functions catch panics internally and translate them to error codes.
 //! - **Self-Contained Runtime**: The engine manages its internal Tokio worker threads without requiring a host event loop.
+//!
+//! ## The ABI contract
+//!
+//! `docs/ffi/ABI.md` is the canonical specification, and `include/hydra.h` is
+//! generated from this crate. Within ABI version 1 nothing already published
+//! may move: fields keep their offset, width and meaning, enumerator values are
+//! never reassigned, exported symbols never disappear, and new fields may only
+//! be appended to the two size-prefixed configuration structs. Anything else
+//! requires `HYDRA_FFI_ABI_VERSION = 2`.
+//!
+//! That is enforced rather than asserted. `crates/hydra-ffi/abi/abi-1.manifest`
+//! holds the frozen layout and `scripts/ffi-abi-compat.sh` checks this crate
+//! against it on every pull request, alongside a build of every published
+//! header against the library from the current branch.
 
 #![allow(non_camel_case_types)]
 #![warn(missing_docs)]
