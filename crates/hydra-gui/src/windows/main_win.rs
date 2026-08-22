@@ -78,5 +78,22 @@ pub fn view(app: &App) -> El<'_> {
                 .into();
         }
     }
+    // Rubber-band box of a drag-selection in progress. It only paints, never
+    // handles input: a plain container captures nothing, so the rows below it
+    // keep receiving the sweep.
+    if let Some((a, b)) = app.band {
+        let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+        let (w, h) = ((a.x - b.x).abs(), (a.y - b.y).abs());
+        if w > 2.0 || h > 2.0 {
+            let box_ = container(iced::widget::space::horizontal())
+                .width(w)
+                .height(h)
+                .style(theme::band);
+            return iced::widget::stack![base, iced::widget::pin(box_).x(x).y(y)]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        }
+    }
     base
 }

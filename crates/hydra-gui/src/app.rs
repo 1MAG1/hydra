@@ -493,6 +493,13 @@ pub enum Message {
     RawKey(iced::keyboard::Key, iced::keyboard::Modifiers),
     SelectAll,
     RowEnter(DlId),
+    RowExit(DlId),
+    /// Left press on the empty ruled area below the last download.
+    EmptyPress,
+    /// A drag swept onto the empty ruled area below the last download.
+    EmptyEnter,
+    HeaderEnter(usize),
+    HeaderExit(usize),
     QueueMenuOpen(bool),
     ClipboardAddStart(Option<String>),
     ShortcutEdit(String, String),
@@ -734,8 +741,29 @@ pub struct App {
     /// Open split-button dropdown on the toolbar: Some(true)=Start queue,
     /// Some(false)=Stop queue.
     pub queue_menu: Option<bool>,
-    /// Row the pointer went down on, for drag-selection.
+    /// Anchor row of an in-progress drag-selection: the first row the sweep
+    /// touched. `None` while a drag that started on empty space has not
+    /// reached a row yet.
     pub list_press: Option<DlId>,
+    /// A left button is down somewhere in the download list — on a row or on
+    /// the empty ruled area below it. Drag-selection only extends while this
+    /// is set, so plain hovering never moves the selection.
+    pub list_drag: bool,
+    /// Rubber-band rectangle of the drag in progress, as (press point,
+    /// current point) in window coordinates — the translucent box the sweep
+    /// paints over the list.
+    pub band: Option<(Point, Point)>,
+    /// The drag started on the empty ruled area, which is always *below* the
+    /// last item — so the band's fixed edge is the end of the list, not a row
+    /// the sweep happened to touch. Keeping it positional means a fast sweep
+    /// whose motion events coalesce still selects every row it passed.
+    pub list_drag_from_empty: bool,
+    /// Row under the pointer. The list rows are plain containers (a `button`
+    /// would force the hand cursor and only report its press on release, which
+    /// breaks drag-selection), so the hover highlight is tracked here.
+    pub hover_row: Option<DlId>,
+    /// Header cell under the pointer, for the same reason.
+    pub hover_col: Option<usize>,
     /// Live results shown in the Permissions window.
     pub perm_status: crate::windows::permissions::PermStatus,
     /// Main window origin/size on screen, tracked so dialogs open centred
@@ -2179,6 +2207,7 @@ impl App {
                 Task::none()
             }
             Message::RowClick(id) => {
+                self.band = Some((self.cursor, self.cursor));
                 if self.mods.command() || self.mods.control() {
                     // Toggle membership.
                     if self.selected.contains(&id) {
@@ -2211,6 +2240,8 @@ impl App {
                 self.selected = vec![id];
                 self.sel_anchor = Some(id);
                 self.list_press = Some(id);
+                self.list_drag = true;
+                self.list_drag_from_empty = false;
                 if double {
                     let st = self.item(id).map(|d| d.state);
                     match st {
@@ -2236,6 +2267,11 @@ impl App {
             }
             Message::CursorMoved(p) => {
                 self.cursor = p;
+                if self.list_drag {
+                    if let Some(band) = self.band.as_mut() {
+                        band.1 = p;
+                    }
+                }
                 if let Some((col, grab_x, start_w)) = self.resizing {
                     if let Some(w) = self.col_widths.get_mut(col) {
                         *w = (start_w + (p.x - grab_x)).clamp(40.0, 800.0);
@@ -2322,17 +2358,82 @@ impl App {
                 Task::none()
             }
             Message::RowEnter(id) => {
-                // Rubber-band selection: pointer went down on a row and swept
-                // here with the button still held.
-                if let Some(anchor) = self.list_press {
-                    let order: Vec<DlId> = self.visible().iter().map(|d| d.id).collect();
-                    let a = order.iter().position(|x| *x == anchor);
-                    let b = order.iter().position(|x| *x == id);
-                    if let (Some(a), Some(b)) = (a, b) {
-                        let (lo, hi) = (a.min(b), a.max(b));
-                        self.selected = order[lo..=hi].to_vec();
-                        self.sel_anchor = Some(anchor);
+                self.hover_row = Some(id);
+                // Rubber-band selection: the button went down in the list and
+                // the sweep arrived here still holding it.
+                if !self.list_drag {
+                    return Task::none();
+                }
+                let order: Vec<DlId> = self.visible().iter().map(|d| d.id).collect();
+                let anchor = if self.list_drag_from_empty {
+                    // Band pinned to the end of the list: the press was below
+                    // every row.
+                    match order.last() {
+                        Some(last) => *last,
+                        None => return Task::none(),
                     }
+                } else {
+                    let a = self.list_press.unwrap_or(id);
+                    self.list_press = Some(a);
+                    a
+                };
+                let a = order.iter().position(|x| *x == anchor);
+                let b = order.iter().position(|x| *x == id);
+                if let (Some(a), Some(b)) = (a, b) {
+                    let (lo, hi) = (a.min(b), a.max(b));
+                    self.selected = order[lo..=hi].to_vec();
+                    self.sel_anchor = Some(anchor);
+                }
+                Task::none()
+            }
+            Message::EmptyPress => {
+                // Pressing the empty ruled area arms a sweep pinned to the end
+                // of the list and drops the selection, the way a listview does.
+                self.list_drag = true;
+                self.list_drag_from_empty = true;
+                self.list_press = None;
+                self.band = Some((self.cursor, self.cursor));
+                self.selected.clear();
+                self.sel_anchor = None;
+                self.last_click = None;
+                Task::none()
+            }
+            Message::EmptyEnter => {
+                self.hover_row = None;
+                if !self.list_drag {
+                    return Task::none();
+                }
+                if self.list_drag_from_empty {
+                    // Both ends of the band are below the last row: it covers
+                    // nothing.
+                    self.selected.clear();
+                    self.sel_anchor = None;
+                    return Task::none();
+                }
+                // Swept off the bottom of the data: the band reaches the end.
+                let Some(anchor) = self.list_press else {
+                    return Task::none();
+                };
+                let order: Vec<DlId> = self.visible().iter().map(|d| d.id).collect();
+                if let Some(a) = order.iter().position(|x| *x == anchor) {
+                    self.selected = order[a..].to_vec();
+                    self.sel_anchor = Some(anchor);
+                }
+                Task::none()
+            }
+            Message::RowExit(id) => {
+                if self.hover_row == Some(id) {
+                    self.hover_row = None;
+                }
+                Task::none()
+            }
+            Message::HeaderEnter(col) => {
+                self.hover_col = Some(col);
+                Task::none()
+            }
+            Message::HeaderExit(col) => {
+                if self.hover_col == Some(col) {
+                    self.hover_col = None;
                 }
                 Task::none()
             }
@@ -2372,6 +2473,9 @@ impl App {
                     self.save_state();
                 }
                 self.list_press = None;
+                self.list_drag = false;
+                self.list_drag_from_empty = false;
+                self.band = None;
                 Task::none()
             }
             Message::ColResizeStart(col) => {

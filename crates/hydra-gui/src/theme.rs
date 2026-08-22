@@ -223,29 +223,6 @@ pub fn btn_toolbar(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// Column header of the download list: flat on the surface colour like the
-/// classic listview header — no box border, the hairline separators between
-/// columns are drawn by the grip strips.
-pub fn btn_header(theme: &Theme, status: button::Status) -> button::Style {
-    let dark = is_dark(theme);
-    let bg = match status {
-        button::Status::Hovered | button::Status::Pressed => {
-            if dark {
-                c(0x2E2E2E)
-            } else {
-                c(0xF5F9FF)
-            }
-        }
-        _ => surface(theme),
-    };
-    button::Style {
-        background: Some(Background::Color(bg)),
-        text_color: text_color(theme),
-        border: border(Color::TRANSPARENT, 0.0, 0.0),
-        ..Default::default()
-    }
-}
-
 /// Menu-bar title ("Tasks", "File", ...) and dropdown row.
 pub fn btn_menu(theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
@@ -270,6 +247,72 @@ pub fn btn_menu(theme: &Theme, status: button::Status) -> button::Style {
 }
 
 /// A row of the download table / tree / any list box.
+/// A download-list row. The rows are containers rather than buttons — a
+/// button paints the hand cursor and reports its press only on release, which
+/// kills drag-selection — so hover is passed in from `App::hover_row`.
+pub fn row_cell(selected: bool, hovered: bool) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let dark = is_dark(theme);
+        let bg = if selected {
+            Some(Background::Color(if dark {
+                c(SELECT_BG_DARK)
+            } else {
+                c(SELECT_BG)
+            }))
+        } else if hovered {
+            Some(Background::Color(if dark {
+                c(0x2A3A4A)
+            } else {
+                c(0xE9F3FD)
+            }))
+        } else {
+            None
+        };
+        container::Style {
+            background: bg,
+            text_color: Some(text_color(theme)),
+            ..Default::default()
+        }
+    }
+}
+
+/// The rubber-band rectangle a drag-selection paints over the list:
+/// translucent selection fill inside a solid 1 px edge, like a listview
+/// marquee.
+pub fn band(theme: &Theme) -> container::Style {
+    let dark = is_dark(theme);
+    let edge = if dark { c(0x4A9EFF) } else { c(0x3399FF) };
+    container::Style {
+        background: Some(Background::Color(Color { a: 0.25, ..edge })),
+        border: border(edge, 1.0, 0.0),
+        ..Default::default()
+    }
+}
+
+/// Column header cell of the download list: flat on the surface colour like
+/// the classic listview header — no box border, the hairline separators
+/// between columns are drawn by the grip strips. A container rather than a
+/// button, so the header keeps the arrow cursor the rest of the list has.
+pub fn header_cell(hovered: bool) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let dark = is_dark(theme);
+        let bg = if hovered {
+            if dark {
+                c(0x2E2E2E)
+            } else {
+                c(0xF5F9FF)
+            }
+        } else {
+            surface(theme)
+        };
+        container::Style {
+            background: Some(Background::Color(bg)),
+            text_color: Some(text_color(theme)),
+            ..Default::default()
+        }
+    }
+}
+
 pub fn btn_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {
         let dark = is_dark(theme);
