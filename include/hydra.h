@@ -8,8 +8,31 @@
  * The source of truth is crates/hydra-ffi/src/{abi,exports}.rs.
  *
  * ---------------------------------------------------------------------------
- * THE CONTRACT
+ * THE SPECIFICATION IS docs/ffi/ABI.md
  * ---------------------------------------------------------------------------
+ *
+ * This header is the machine-readable half of the ABI: the declarations your
+ * compiler reads, each carrying its own threading, blocking and allocation
+ * behaviour. docs/ffi/ABI.md is the other half - the design principles, the
+ * stability policy, the event queue's ordering and drop guarantees, and the
+ * rules for credentials, rate limits, persistence and destinations. Read it
+ * once before writing a binding.
+ *
+ * https://github.com/ja7ad/hydra/blob/main/docs/ffi/ABI.md
+ *
+ * What follows is the short form, for the reader who is already here.
+ *
+ * ABI VERSION
+ *   Compare HYDRA_FFI_ABI_VERSION against hydra_ffi_abi_version() at startup
+ *   and refuse to continue on a mismatch. Nothing below means anything if the
+ *   two disagree. The ABI version is independent of the library version.
+ *
+ *   Within one ABI version: existing fields never move and never change width
+ *   or meaning, enumerator values are never reassigned or reused, exported
+ *   symbols never disappear, ownership rules never change, and new fields are
+ *   appended only to the two size-prefixed configuration structs. Anything
+ *   else becomes ABI 2. See ABI.md section 3; the frozen layout lives in
+ *   crates/hydra-ffi/abi/abi-1.manifest and is enforced in CI.
  *
  * OWNERSHIP
  *   Memory allocated by hydra is freed by hydra, through the matching *_free
@@ -20,31 +43,29 @@
  *   Strings you pass IN are borrowed for the duration of that call only. hydra
  *   copies whatever it needs before returning, so you never have to keep a
  *   buffer alive on hydra's behalf.
+ *   user_data handed to a callback is never owned and never freed by hydra; it
+ *   must outlive the registration.
  *
  * ENCODING
  *   Every string crossing this boundary is UTF-8. Invalid UTF-8 supplied by a
  *   caller is HYDRA_ERR_INVALID_ARGUMENT, never a lossy conversion.
  *
  * LANGUAGE BASELINE
- *   C11 or later, or C++11 or later. This header uses fixed-width integer
- *   types and static assertions and does not attempt to support older
- *   dialects; every language this ABI targets can meet that baseline.
+ *   C11 or later, or C++11 or later. Fixed-width integer types and static
+ *   assertions throughout; every language this ABI targets can meet that.
  *
  * ENUM REPRESENTATION
- *   Every ABI-visible enum VALUE is represented as a uint32_t. That is the
- *   promise, and it is deliberately a statement about values rather than about
- *   enumeration types: under C++ and C23 the typedef names a real enum with
- *   uint32_t as its fixed underlying type, while under C11 the typedef IS
- *   uint32_t and the enumerators are ordinary constants. C11 says nothing
- *   about the width of an enumeration type itself, so nothing here depends on
- *   it. The assertions at the foot of this header check the promise in
- *   whichever mode you compile.
+ *   Every ABI-visible enum VALUE is a uint32_t. That is a statement about
+ *   values rather than about enumeration types: under C++ and C23 the typedef
+ *   names a real enum with uint32_t as its fixed underlying type, while under
+ *   C11 the typedef IS uint32_t and the enumerators are ordinary constants.
+ *   The assertions at the foot of this header check it in whichever mode you
+ *   compile.
  *
- *   Note the asymmetry in struct fields: a field hydra WRITES (an event's kind,
- *   a snapshot's state, an error's code) is declared as the enum, because hydra
- *   constructs it. A field hydra READS from you is a uint32_t and is validated,
- *   because you can put any bit pattern in a struct field and an out-of-range
- *   enum value would otherwise be undefined behaviour on the Rust side.
+ *   Hence the asymmetry in struct fields: a field hydra WRITES (an event's
+ *   kind, a snapshot's state, an error's code) is declared as the enum, because
+ *   hydra constructs it. A field hydra READS from you is a uint32_t and is
+ *   validated, because you can put any bit pattern in a struct field.
  *
  * ERRORS
  *   Every fallible call returns hydra_error_code_t. The detail behind it -
@@ -66,78 +87,19 @@
  *   event consumption    thread-safe, but intended for ONE consumer
  *   hydra_engine_destroy synchronisation-sensitive: must not race with any
  *                        other call on the same engine
- *   Each function's own comment states whether it blocks and whether it
- *   allocates.
  *
  * RUNTIME
  *   The engine owns its own threads. Your program needs no async runtime, no
  *   event loop and no particular thread. No Rust future appears in this ABI.
  *
  * EVENTS
- *   The queue is the fundamental mechanism; callbacks are an optional
- *   convenience and are marked EXPERIMENTAL for now, because getting a
- *   foreign callback right differs sharply between the JVM, .NET, Go, Swift
- *   and Python. The queue is bounded, so:
- *     - progress events COALESCE (at most one pending per job; a newer sample
- *       replaces an older one),
- *     - terminal events (COMPLETED, FAILED, CANCELLED, ENGINE_SHUTDOWN) are
- *       NEVER dropped,
- *     - life-cycle events drop oldest-first once the bound is reached, and
- *       every drop is counted in hydra_event_t.dropped_events.
- *
- *   ORDERING. Guaranteed WITHIN a single job, and only there. It is a PARTIAL
- *   order, not a single sequence - a job can fail while resolving, so RESOLVED
- *   is not something every run reaches:
- *
- *       JOB_CREATED -> JOB_QUEUED -> JOB_STARTED
- *
- *       after JOB_STARTED, in this relative order where they occur at all:
- *           RESOLVED        at most once per attempt, once size and range
- *                           support are known
- *           PROGRESS        zero or more times, only after RESOLVED
- *           RETRYING        zero or more times
- *           STALLED         zero or more times
- *           SOURCE_CHANGED  zero or more times
- *           VERIFYING       at most once, and always before COMPLETED
- *
- *       PAUSED -> RESUMED, and a RESUMED job re-enters at JOB_QUEUED
- *
- *       COMPLETED, FAILED and CANCELLED are terminal: each is that job's last
- *       event until the job is started again, and exactly one of them ends an
- *       attempt that was not paused. Any of them may follow JOB_STARTED
- *       directly - a bad URL fails before RESOLVED, a cancel can land at any
- *       point.
- *
- *   There is NO ordering guarantee between events belonging to different jobs.
- *   Two jobs run concurrently on threads hydra owns, so an application must
- *   treat each job's stream as independent - which is also what makes the
- *   queue easy to demultiplex into one stream per job in a binding.
- *
- *   There is ONE consumer. Several threads may call the event functions
- *   safely, but every event is delivered exactly once, so a thread draining
- *   the queue while waiting for job A will consume and discard job B's
- *   completion unless it keeps it. Drain in one place and dispatch from there.
- *
- * CALLBACK POINTERS
- *   user_data is NEVER owned by hydra and is NEVER freed by hydra. It is
- *   stored, never dereferenced, and handed back to your function verbatim. It
- *   must outlive the callback registration; freeing it while a callback is
- *   installed is a use-after-free in your program, not in hydra's. This applies
- *   to both hydra_event_set_callback() and hydra_engine_set_log_callback().
- *
- * MACROS
- *   The helpers below are thin wrappers over static inline functions, so an
- *   argument with side effects is evaluated exactly once. HYDRA_IS_ERROR(f())
- *   calls f() one time, which a naive macro would not.
- *
- * CREDENTIALS
- *   Passwords, proxy passwords and the Authorization, Proxy-Authorization and
- *   Cookie headers never appear in a job snapshot, an event, an error message,
- *   the log sink, the metrics, or the persisted state file. Userinfo embedded
- *   in a URL (ftp://user:pass@host/path) is stripped at hydra_job_create() and
- *   moved into the job's credentials, so the URL hydra stores and reports
- *   carries no secret either. A restored job therefore comes back without its
- *   credentials by design - re-arm it with hydra_job_set_credentials().
+ *   The bounded queue is the fundamental mechanism; callbacks are an optional
+ *   convenience and are EXPERIMENTAL. Progress events coalesce, terminal
+ *   events (COMPLETED, FAILED, CANCELLED, ENGINE_SHUTDOWN) are never dropped,
+ *   life-cycle events drop oldest-first and every drop is counted in
+ *   hydra_event_t.dropped_events. Ordering is guaranteed WITHIN one job only,
+ *   and every event is delivered exactly once - drain in one place and
+ *   dispatch from there. The full order is in ABI.md section 5.
  *
  * BYTES
  *   File data never crosses this ABI. hydra writes the object directly to its
@@ -145,61 +107,22 @@
  *   progress and errors only. That is what keeps resident memory independent
  *   of file size.
  *
- * RATE LIMITS
- *   Exactly:
+ * CREDENTIALS
+ *   Passwords, proxy passwords and the Authorization, Proxy-Authorization and
+ *   Cookie headers never appear in a snapshot, an event, an error message, the
+ *   log sink, the metrics, or the persisted state file. Userinfo in a URL is
+ *   stripped at hydra_job_create(). A restored job comes back without its
+ *   credentials by design - re-arm it with hydra_job_set_credentials().
  *
- *       engine_max = hydra_engine_config_t.max_bytes_per_second  (0 = none)
- *       job_max    = hydra_job_config_t.max_bytes_per_second     (0 = none)
- *
- *       job_max == 0 and engine_max == 0  ->  unlimited
- *       job_max  > 0                      ->  that job alone is capped at
- *                                             job_max
- *       engine_max  > 0                   ->  every job shares ONE limiter at
- *                                             engine_max, so the cap is a true
- *                                             aggregate across all of them
- *
- *   Both apply at once when both are set: a job under an engine-wide cap AND
- *   one of its own moves at whichever is lower at that moment, and the
- *   aggregate guarantee is not given up by the jobs that set their own.
- *
- *   Every cap is read live, on every read. hydra_engine_set_max_bytes_per_second
- *   and hydra_job_set_max_bytes_per_second therefore bind a transfer that is
- *   ALREADY RUNNING, in both directions, including a job that started with no
- *   cap at all.
- *
- * DESTINATIONS
- *   In this ABI version a destination is a filesystem path, and that is all.
- *   It is enough for Linux, macOS, Windows and for an app-private directory on
- *   Android or iOS. It is NOT enough for a content URI, a security-scoped
- *   resource or a document-provider handle, and a future ABI may add other
- *   destination kinds alongside the path. Do not assume a path is permanently
- *   the only storage model; do assume it will keep working.
- *
- * PERSISTENCE
- *   The state file is written ATOMICALLY - a temporary file and a rename - so
- *   a process death mid-write cannot leave a truncated one. Atomic is not the
- *   same as durable: hydra does not fsync the file or its directory, so a
- *   sudden power loss may lose the most recent snapshot entirely, and you get
- *   the previous consistent one instead. Nothing is ever half-written; the
- *   newest write may simply not be there. Do not read more into "atomic" than
- *   that.
- *
- *   state_path is this version's persistence mechanism: hydra owns the file and
- *   its format. A future ABI may add host-managed persistence, so that an
- *   application can put job state in Room, Core Data or its own database. Do
- *   not depend on the file's contents or its format - only on the API.
+ * MACROS
+ *   The helpers below are thin wrappers over static inline functions, so an
+ *   argument with side effects is evaluated exactly once. HYDRA_IS_ERROR(f())
+ *   calls f() one time, which a naive macro would not.
  *
  * CRATE NAMES
  *   The engine crates are named hya-core and hya-net (in directories
  *   crates/hydra-core and crates/hydra-net). That prefix is deliberate and is
  *   not a typo where it appears below.
- *
- * VERSIONING
- *   HYDRA_FFI_ABI_VERSION is independent of the library version. Within one
- *   ABI version: fields are only ever added to the END of versioned structs,
- *   existing fields never move, enum values never change meaning, and
- *   ownership rules never change. Compare the macro below against
- *   hydra_ffi_abi_version() at startup and refuse to continue on a mismatch.
  *
  * STABILITY
  *   Everything here is STABLE except hydra_job_get_sources,

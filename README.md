@@ -294,14 +294,19 @@ hydra --checksum sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b
 
 ## Embedding HYDRA — `libhydra`
 
-The engine is not only a CLI. `hya-ffi` exposes `hya-core` and `hya-net`
-through a stable **C ABI**, so a desktop application, an Android app, an iOS
-app, or a program in Go, Swift, Kotlin, Dart, C# or Python can run the same
-download engine without taking the CLI or the GUI with it.
+`hydra` is the application. **`libhydra` is the engine**, and it is a product
+in its own right: a stable **C ABI** over `hya-core` and `hya-net`, with its own
+version, its own release archives, its own compatibility promise, and a
+permissive MIT-or-Apache licence rather than the CLI's GPL. A desktop
+application, an Android app, an iOS app, or a program in Go, Swift, Kotlin,
+Dart, C# or Python can run the same download engine without taking the CLI or
+the GUI with it.
 
 ```bash
-make ffi        # libhydra.a, libhydra.so/.dylib, and include/hydra.h
-make ffi-test   # the ABI suite plus a C conformance program
+make ffi          # libhydra.a, libhydra.so/.dylib, and include/hydra.h
+make ffi-compat   # the ABI 1 stability gate
+make ffi-test     # the ABI suite, a C conformance program, and every
+                  # published header against the current library
 ```
 
 ```c
@@ -329,6 +334,13 @@ asynchronous interface, so it becomes a Go channel, a Kotlin `Flow`, a Swift
 `AsyncStream` or a Dart `Stream`; and file bytes never cross the boundary, so
 resident memory stays independent of object size.
 
+The ABI is frozen and mechanically enforced. Within ABI 1 no field moves, no
+enumerator is renumbered and no symbol disappears; CI checks the whole layout
+against a committed manifest and compiles every header this project has ever
+published against the library built from the current branch.
+[**docs/ffi/ABI.md**](docs/ffi/ABI.md) is the specification — design
+principles, the stability policy, and what the guarantees actually cover.
+
 Every release publishes a prebuilt archive — static library, shared library,
 header, pkg-config metadata and these guides — for Linux (glibc and musl),
 macOS, Windows, Android and iOS. Any other target builds from source with
@@ -338,6 +350,7 @@ macOS, Windows, Android and iOS. Any other target builds from source with
 
 | | |
 |---|---|
+| [**The ABI specification**](docs/ffi/ABI.md) | Design principles, the ABI 1 stability policy, ownership, events, enforcement |
 | [Getting started](docs/ffi/README.md) | The contract, the archive layout, sixty seconds of C |
 | [Linux](docs/ffi/linux.md) | glibc vs musl, pkg-config, CMake, containers, systemd |
 | [macOS](docs/ffi/macos.md) | universal binaries, Xcode, App Sandbox, notarisation |
@@ -347,8 +360,8 @@ macOS, Windows, Android and iOS. Any other target builds from source with
 | [Any other platform](docs/ffi/other-platforms.md) | building for a triple outside the release matrix |
 | [Language bindings](docs/ffi/bindings.md) | Go, Python, C#, Dart, C++, Zig, and writing your own |
 
-See also [`crates/hydra-ffi/README.md`](crates/hydra-ffi/README.md) for the full
-contract, [`include/hydra.h`](include/hydra.h) for the published ABI, and
+See also [`docs/ffi/ABI.md`](docs/ffi/ABI.md) for the specification,
+[`include/hydra.h`](include/hydra.h) for the published declarations, and
 [`examples/ffi-c/download.c`](examples/ffi-c/download.c) for a complete C
 client with mirrors, pause and resume.
 

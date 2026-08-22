@@ -10,6 +10,18 @@ Kotlin → JNI            Dart   → dart:ffi
 C++    → thin wrapper   Zig    → @cImport
 ```
 
+Read [**ABI.md**](ABI.md) first. It is the specification this page assumes:
+what is frozen and what may change, who owns which allocation, and exactly what
+the event queue guarantees. Section 7 is a checklist you can work through.
+
+A binding does not need this repository. It needs the published `hydra.h`, a
+prebuilt archive from a [release](https://github.com/ja7ad/hydra/releases), and
+the ABI version it targets — no Rust toolchain, no knowledge of `hya-core`, and
+no coupling to hydra's release cadence. That is deliberate: a binding that has
+to be rebuilt in lockstep with the engine is a binding only this project can
+maintain. Bindings are expected to live as independent projects, and the ABI
+version they support belongs in their README.
+
 ## The five things every binding must get right
 
 **1. Free with the matching function.** Never `free()` anything hydra returned.

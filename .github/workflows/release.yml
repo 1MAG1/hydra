@@ -287,6 +287,13 @@ jobs:
       - name: Check include/hydra.h is current
         run: scripts/gen-ffi-header.sh --check
 
+      # And that the release is still ABI 1. Every archive below states an ABI
+      # version in its NOTICE, and somebody will link an old binding against
+      # it; a layout that moved since ABI 1 was published must not reach a
+      # release without the version bump that announces it. See docs/ffi/ABI.md.
+      - name: Check the ABI 1 stability contract
+        run: scripts/ffi-abi-compat.sh
+
   build-ffi:
     name: libhydra ${{ matrix.target }}
     needs: [verify-version, ffi-header]

@@ -266,10 +266,15 @@ application. Third-party dependency terms are in \`THIRD-PARTY-NOTICES.md\`.
 
 - \`include/hydra.h\` — the published ABI. Generated from the Rust definitions
   and carrying static assertions that check the layout against your compiler.
+- \`docs/ABI.md\` — the specification: design principles, the ABI stability
+  policy, ownership, the event queue's guarantees. Read it before writing a
+  binding.
 - \`lib/\` — the libraries. See \`native-static-libs.txt\` for the system
   libraries the static archive must be linked against.
-- \`docs/\` — per-platform integration guides and the language binding guide.
-- \`examples/\` — a complete C client, plus the ABI conformance program.
+- \`docs/\` — the ABI specification, the per-platform integration guides, and
+  the language binding guide.
+- \`examples/\` — a complete C client, the ABI conformance program, and the
+  forward-compatibility probe CI runs against every published header.
 
 ## ABI version
 
