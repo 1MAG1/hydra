@@ -60,12 +60,44 @@ png = "0.18"
 # System tray icon + native menus. `tray-icon` re-exports muda as
 # `tray_icon::menu`; using that everywhere (tray AND the macOS menu bar)
 # keeps one muda instance and therefore one global menu-event channel.
-# Linux tray support needs a GTK event loop and is deferred. Default
-# features (`gtk`, `libxdo`) only feed that unused Linux backend, yet they
-# drag libappindicator -> gtk -> glib into Cargo.lock for every platform
+# Linux uses ksni instead (see below). Default features (`gtk`, `libxdo`)
+# only feed tray-icon's unused Linux backend, yet they drag
+# libappindicator -> gtk -> glib into Cargo.lock for every platform
 # (RUSTSEC-2024-0429: unsound `glib::VariantStrIter`, unfixable while the
 # discontinued gtk3 bindings pin glib < 0.20), so keep them off.
 tray-icon = { version = "0.24", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux tray: StatusNotifierItem over D-Bus, in pure Rust. Display-server
+# agnostic (X11 and Wayland alike) and hosted natively by KDE Plasma,
+# Cinnamon, Budgie, LXQt and xfce4-panel 4.18+, by GNOME through the
+# AppIndicator extension, and by Wayland bars like waybar. No GTK main loop
+# to reconcile with winit's, and none of the glib stack tray-icon's own
+# Linux backend needs.
+#
+# `async-io` rather than the default `tokio` feature, deliberately: it
+# selects `zbus/tokio`, and zbus picks its socket implementation at COMPILE
+# time for the whole graph — that would move iced_winit's `mundy` (system
+# light/dark detection, also a zbus user) onto tokio sockets it has no
+# runtime for. `blocking` then gives a sync API, so the tray needs no
+# executor of ours at all. See src/tray/sni.rs.
+ksni = { version = "0.3", default-features = false, features = [
+    "async-io",
+    "blocking",
+] }
+# Tray glyph color: white on dark panels, black on light — the same
+# system-theme pick the Windows backend makes, but through the XDG desktop
+# portal (org.freedesktop.appearance color-scheme), plus its change stream
+# so the glyph re-tints live when the theme flips. Default features select
+# zbus/async-io, the same zbus flavor ksni pins — never the tokio one.
+dark-light = "3"
+# "Hide from taskbar" on X11: the _NET_WM_STATE_SKIP_TASKBAR hint, which
+# winit does not expose. Default features only — the pure-Rust connection,
+# no C dependency. Must stay on the major winit itself uses (winit 0.30 ->
+# x11rb 0.13) so cargo unifies the two into one copy: a second, separately
+# featured x11rb ends up linking libxcb, which then has to be installed to
+# build at all. See src/linux_taskbar.rs.
+x11rb = "0.13"
 
 [build-dependencies]
 # Compiles the generated .rc (app icon + VERSIONINFO) into hydra-gui.exe —

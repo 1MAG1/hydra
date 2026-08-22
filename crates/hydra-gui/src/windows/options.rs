@@ -60,9 +60,8 @@ fn general(app: &App) -> El<'_> {
                 .style(theme::check),
         );
     }
-    // Dock/taskbar visibility exists only where the tray can take over:
-    // Linux has neither the tray (deferred, see tray.rs) nor a WM-portable
-    // skip-taskbar control in iced, so the option is not shown there.
+    // Dock/taskbar visibility exists only where the tray can take over the
+    // app while no window is open.
     #[cfg(target_os = "macos")]
     let hide_taskbar: Option<El<'_>> = Some(hinted(
         checkbox(s.hide_from_taskbar)
@@ -83,7 +82,25 @@ fn general(app: &App) -> El<'_> {
             .style(theme::check),
         tr("Hydra windows get no taskbar button; reach the app from the tray icon. Applies to windows opened after the change."),
     ));
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    // Linux: an X11 window-manager hint per window. Wayland has no
+    // skip-taskbar protocol at all — a checkbox that cannot act would only
+    // look broken, so it exists on X11 sessions only. (winit picks Wayland
+    // exactly when WAYLAND_DISPLAY is set, so that is the session test.)
+    #[cfg(target_os = "linux")]
+    let hide_taskbar: Option<El<'_>> = std::env::var_os("WAYLAND_DISPLAY")
+        .is_none()
+        .then(|| {
+            hinted(
+                checkbox(s.hide_from_taskbar)
+                    .label(tr("Hide from taskbar"))
+                    .on_toggle(|b| o(OptField::HideTaskbar(b)))
+                    .size(15.0)
+                    .text_size(theme::FONT_SIZE)
+                    .style(theme::check),
+                tr("Keeps Hydra windows out of the taskbar and the workspace switcher; reach the app from the tray icon. Wayland has no way to hide an open window, so there it applies while Hydra runs in the tray."),
+            )
+        });
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     let hide_taskbar: Option<El<'_>> = None;
     let mut col =
         column![

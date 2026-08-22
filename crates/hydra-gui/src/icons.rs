@@ -39,6 +39,26 @@ pub fn logo_rgba() -> Option<(Vec<u8>, u32, u32)> {
     Some((rgba, info.width, info.height))
 }
 
+/// Monochrome silhouette of the logo, menu-bar style: opaque pixels become
+/// the mark, the white "H" strokes become transparent cutouts so the glyph
+/// stays readable at 16 px. `white` selects the variant for dark panels.
+/// Shared by every tray backend: macOS templates it, Windows and Linux pick
+/// the variant from the system theme.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub fn logo_mono_rgba(white: bool) -> Option<(Vec<u8>, u32, u32)> {
+    let (rgba, w, h) = logo_rgba()?;
+    let v = if white { 255 } else { 0 };
+    let mut out = vec![0u8; rgba.len()];
+    for (src, dst) in rgba.chunks(4).zip(out.chunks_mut(4)) {
+        let whiteish = src[0] > 220 && src[1] > 220 && src[2] > 220;
+        dst[0] = v;
+        dst[1] = v;
+        dst[2] = v;
+        dst[3] = if whiteish { 0 } else { src[3] };
+    }
+    Some((out, w, h))
+}
+
 /// The logo as a window icon: title bar + taskbar on Windows, dock/panel on
 /// Linux. macOS windows carry no icon (the app bundle provides the Dock one).
 pub fn window_icon() -> Option<iced::window::Icon> {

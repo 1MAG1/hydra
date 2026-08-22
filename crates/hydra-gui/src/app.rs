@@ -119,8 +119,9 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    // Only the native menu/tray integrations (macOS/Windows) need string ids.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    // Only the native menu/tray integrations need string ids: the macOS menu
+    // bar, and the tray on every platform that has one.
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub fn id(&self) -> String {
         match self {
             MenuAction::AddNewDownload => "add_new".into(),
@@ -606,8 +607,8 @@ pub enum OptField {
     CheckUpdates(bool),
     BetaChannel(bool),
     StartInTray(bool),
-    /// Only where the Dock/taskbar checkbox exists (macOS/Windows).
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    /// Only where the Dock/taskbar checkbox exists (macOS, Windows, Linux).
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     HideTaskbar(bool),
     PowerSave(bool),
     GpuRender(bool),
@@ -1073,6 +1074,23 @@ impl App {
             return Task::batch([dismissed, opened, window::minimize(id, true)]);
         }
         Task::batch([dismissed, opened])
+    }
+
+    /// Re-assert "Hide from taskbar" on one window. Windows carries the flag
+    /// at creation and macOS hides the whole app through the Dock policy, so
+    /// this only does anything on Linux — where it is an X11 window-manager
+    /// hint (Wayland has no equivalent; see `linux_taskbar`).
+    #[allow(unused_variables)]
+    fn skip_taskbar_task(&self, id: window::Id) -> Task<Message> {
+        #[cfg(target_os = "linux")]
+        {
+            let hide = self.cfg.settings.hide_from_taskbar;
+            window::run(id, move |w| crate::linux_taskbar::apply(w, hide)).map(|_| Message::Noop)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Task::none()
+        }
     }
 
     fn close_window(&mut self, kind: WinKind) -> Task<Message> {
@@ -1984,12 +2002,15 @@ impl App {
                         self.cfg.queues.iter().map(|q| q.name.clone()).collect();
                     crate::macos_menu::install(&state, &queues, &crate::i18n::available());
                 }
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 {
                     let queues: Vec<String> =
                         self.cfg.queues.iter().map(|q| q.name.clone()).collect();
                     crate::tray::install(&queues, self.cfg.settings.power_save);
                 }
+                // "Hide from taskbar" is a per-window creation flag on
+                // Windows; on X11 it is a hint the window manager only takes
+                // once the window exists, so it is applied here instead.
+                let skip_taskbar = self.skip_taskbar_task(id);
                 // Browser-capture dialogs float above everything: at that
                 // moment this app is in the background and a normal-level
                 // window would open behind the browser.
@@ -2001,11 +2022,12 @@ impl App {
                 {
                     self.capture_raise = false;
                     return Task::batch([
+                        skip_taskbar,
                         window::set_level(id, window::Level::AlwaysOnTop),
                         window::gain_focus(id),
                     ]);
                 }
-                window::gain_focus(id)
+                Task::batch([skip_taskbar, window::gain_focus(id)])
             }
             Message::WindowClosed(id) => {
                 let kind = self.windows.remove(&id);
@@ -2021,9 +2043,11 @@ impl App {
                         self.save_state();
                         self.save_config();
                         self.flush_saves();
-                        if cfg!(any(target_os = "macos", target_os = "windows")) {
+                        if crate::tray::is_active() {
                             // Hydra lives on in the system tray; Exit is in
                             // the tray menu (and the app menu on macOS).
+                            // Without a tray there would be no way back to
+                            // the app, so closing quits instead.
                             self.main_id = None;
                             Task::none()
                         } else {
@@ -2987,7 +3011,16 @@ impl App {
                     self.cfg.settings.launch_on_startup,
                     self.cfg.settings.start_in_tray,
                 );
-                self.close_window(WinKind::Options)
+                // X11: the hint is per window and lives on the windows that
+                // are already open, so re-assert it on all of them.
+                let skip_taskbar = Task::batch(
+                    self.windows
+                        .keys()
+                        .copied()
+                        .map(|id| self.skip_taskbar_task(id))
+                        .collect::<Vec<_>>(),
+                );
+                Task::batch([skip_taskbar, self.close_window(WinKind::Options)])
             }
             Message::OptDraft(f) => self.on_opt_field(f),
 
@@ -3181,7 +3214,6 @@ impl App {
                 self.save_state();
                 // Queue submenus in the menu bar and tray carry the old name.
                 self.refresh_native_menu();
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 {
                     let queues: Vec<String> =
                         self.cfg.queues.iter().map(|q| q.name.clone()).collect();
@@ -3800,7 +3832,6 @@ impl App {
                 self.save_config();
                 // Native surfaces captured the old locale at build time.
                 self.refresh_native_menu();
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 {
                     let queues: Vec<String> =
                         self.cfg.queues.iter().map(|q| q.name.clone()).collect();
@@ -3853,7 +3884,6 @@ impl App {
                 engine::set_power_save(self.cfg.settings.power_save);
                 crate::log::info(&format!("power save: {}", self.cfg.settings.power_save));
                 self.save_config();
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 {
                     let queues: Vec<String> =
                         self.cfg.queues.iter().map(|q| q.name.clone()).collect();
@@ -3940,7 +3970,7 @@ impl App {
             OptField::CheckUpdates(b) => s.check_updates_on_startup = b,
             OptField::BetaChannel(b) => s.beta_channel = b,
             OptField::StartInTray(b) => s.start_in_tray = b,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             OptField::HideTaskbar(b) => s.hide_from_taskbar = b,
             OptField::PowerSave(b) => {
                 s.power_save = b;

@@ -239,6 +239,10 @@ build_deb() {
   mkdir -p "$ROOT/DEBIAN"
   # /etc files are conffiles so user edits survive upgrades.
   (cd "$ROOT" && find etc -type f | sed 's|^|/|') > "$ROOT/DEBIAN/conffiles"
+  # The tray speaks StatusNotifierItem over D-Bus, so no appindicator
+  # *library* is needed — only a shell that hosts the protocol. KDE Plasma,
+  # Cinnamon, Budgie, LXQt and xfce4-panel 4.18+ do natively; GNOME needs
+  # the extension recommended below (already present on Ubuntu desktops).
   cat > "$ROOT/DEBIAN/control" <<EOF
 Package: $NAME
 Version: $DEB_VERSION
@@ -249,7 +253,7 @@ Maintainer: Javad Rajabzadeh <ja7ad@live.com>
 Homepage: https://github.com/ja7ad/hydra
 Conflicts: hydra
 Depends: libc6, libgtk-3-0, libasound2t64 | libasound2
-Recommends: libayatana-appindicator3-1 | libappindicator3-1
+Recommends: gnome-shell-extension-appindicator
 Installed-Size: $(du -ks "$ROOT" | cut -f1)
 Description: $SUMMARY
  Hydra downloads files over many parallel connections with integrity
@@ -296,7 +300,7 @@ Summary: $SUMMARY
 License: GPL-3.0-or-later
 URL: https://github.com/ja7ad/hydra
 Conflicts: hydra
-Recommends: libayatana-appindicator-gtk3
+Recommends: gnome-shell-extension-appindicator
 
 %description
 Hydra downloads files over many parallel connections with integrity
