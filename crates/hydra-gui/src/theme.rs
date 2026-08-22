@@ -283,10 +283,7 @@ pub fn band(theme: &Theme) -> container::Style {
     let dark = is_dark(theme);
     let edge = if dark { c(0x4A9EFF) } else { c(0x3399FF) };
     container::Style {
-        background: Some(Background::Color(Color {
-            a: 0.25,
-            ..edge
-        })),
+        background: Some(Background::Color(Color { a: 0.25, ..edge })),
         border: border(edge, 1.0, 0.0),
         ..Default::default()
     }

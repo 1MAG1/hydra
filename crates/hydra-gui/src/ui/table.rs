@@ -62,11 +62,11 @@ fn header(app: &App) -> El<'_> {
                 .size(theme::FONT_SIZE)
                 .wrapping(iced::widget::text::Wrapping::None),
         )
-            .padding([3, 6])
-            .width(w[i])
-            .height(24.0)
-            .clip(true)
-            .style(theme::header_cell(app.hover_col == Some(i)));
+        .padding([3, 6])
+        .width(w[i])
+        .height(24.0)
+        .clip(true)
+        .style(theme::header_cell(app.hover_col == Some(i)));
         // A container under a `mouse_area`, not a `button`: a button forces the
         // hand cursor, and `mouse_area::interaction` can only override a child
         // that asks for none.
