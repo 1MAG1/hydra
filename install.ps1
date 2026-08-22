@@ -142,8 +142,35 @@ try {
     Write-Host "installed $InstallDir\extensions (browser extensions)"
 
     # Register the native-messaging host (per-user registry + manifests).
-    & (Join-Path $InstallDir "scripts\install-native-host.ps1") `
-        -NoBuild -HostBin (Join-Path $InstallDir "hydra-host.exe")
+    #
+    # In its own PowerShell with an explicit policy: the machine may be
+    # Restricted (the default on Windows client), which blocks running a .ps1
+    # from disk — even though this installer itself came from an in-memory
+    # scriptblock, which the policy does not cover. Running the content as a
+    # scriptblock instead is not an option: install-native-host.ps1 resolves
+    # the bundle root from its OWN path, so it has to run as a file.
+    $NativeHost = Join-Path $InstallDir "scripts\install-native-host.ps1"
+    $HostExe = Join-Path $InstallDir "hydra-host.exe"
+    # The PowerShell hosting this script — Windows PowerShell or pwsh, both
+    # accept -ExecutionPolicy. Falls back to the name on PATH if the host
+    # reports no image path.
+    $PsExe = (Get-Process -Id $PID).Path
+    if (-not $PsExe) { $PsExe = "powershell" }
+    $PrevEap = $ErrorActionPreference
+    try {
+      # Browser integration is not worth aborting the install for: without
+      # this the app still works, it just will not catch browser downloads.
+      # A native command's stderr must not become a terminating error here.
+      $ErrorActionPreference = "Continue"
+      & $PsExe -NoProfile -ExecutionPolicy Bypass -File $NativeHost -NoBuild -HostBin $HostExe
+      $Rc = $LASTEXITCODE
+      $ErrorActionPreference = $PrevEap
+      if ($Rc -ne 0) { throw "install-native-host.ps1 exited with $Rc" }
+    } catch {
+      $ErrorActionPreference = $PrevEap
+      Write-Warning "browser integration was not registered: $($_.Exception.Message)"
+      Write-Host "  retry with: powershell -NoProfile -ExecutionPolicy Bypass -File `"$NativeHost`" -NoBuild -HostBin `"$HostExe`""
+    }
 
     # Shortcuts. The GUI exe embeds hydra.ico and a VERSIONINFO block
     # (crates/hydra-gui/build.rs), so the icon and the product name come along
