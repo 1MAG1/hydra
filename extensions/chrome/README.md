@@ -58,6 +58,43 @@ The extension ID is pinned by the `key` field in `manifest.json`
 step 1 stays valid no matter where the unpacked directory lives. The install
 script re-derives the ID from `manifest.json`, so the two can never drift.
 
+### Packaged .zip
+
+```bash
+scripts/build-extensions.sh
+```
+
+writes `target/extensions/hydra-chrome-<version>.zip` — the same files as
+this directory, minus the repository-only ones, with `manifest.json` at the
+archive root — plus `target/extensions/chrome/`, the unpacked copy it was
+made from, the Firefox `.xpi`, and an `INSTALL.txt`.
+
+With a signing key it also writes `hydra-chrome-<version>.crx` (CRX3: the
+zip behind an RSA-SHA256-signed header):
+
+```bash
+scripts/build-extensions.sh --crx-key path/to/key.pem
+scripts/build-extensions.sh --crx        # generate a throwaway key instead
+```
+
+Each shape has one job. The **unpacked directory** is the only one installable
+by hand — Chromium has not accepted a dragged-in `.crx` from outside the Web
+Store for years. The **`.zip`** is what the Web Store consumes (strip `key`
+first; it is only needed for the fixed id of a local install). The **`.crx`**
+is for enterprise policy deployment against a self-hosted update manifest.
+
+The signing key IS the identity: Chromium requires the manifest `key` to be
+the signer's public key, so signing with anything other than the key behind
+the pinned one moves the extension off `jpnonmbbkjdpeebdhkjoliklfhkdcomj`.
+The script rewrites the manifest key to match (a mismatched pair is rejected
+outright by the browser) and warns with the id it produced. Such a build
+still reaches Hydra over the WebSocket — `extbus` accepts any extension
+origin — but not over native messaging, which is allow-listed by id and is
+the only path that can launch the app.
+
+`--out DIR` packs into DIR instead, which is how every installer ships the
+extension inside the installed application.
+
 ## Protocol (extension → GUI)
 
 Two front doors to the same handler:

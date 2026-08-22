@@ -18,6 +18,7 @@ coverage:
 ignore:
   - "crates/*/examples/**"
   - "crates/*/benches/**"
+  - "crates/hydra-gui/**"
 
 comment:
   layout: "reach, diff, flags, files"

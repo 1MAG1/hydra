@@ -178,7 +178,20 @@ jobs:
           # release, runs this binary from a temp dir, exits, and the finisher
           # swaps the installed files and relaunches.
           cp "${BIN}/hydra-gui${EXT}" "${BIN}/hydra${EXT}" "${BIN}/hydra-host${EXT}" "${BIN}/hydra-updater${EXT}" "stage/${GUI_NAME}/"
-          cp -R extensions/chrome extensions/firefox extensions/safari "stage/${GUI_NAME}/extensions/"
+          # Browser extensions: packed (.zip for the Chromium family, .xpi for
+          # Firefox) plus the unpacked directories a developer-mode install
+          # loads, and INSTALL.txt. install.sh / install.ps1 copy the whole
+          # directory into the installed application, so the same files that
+          # are in this archive are what a user ends up loading.
+          EXT_PREFIX="/usr/local/share/hydra/extensions"
+          if [ "${{ matrix.os }}" = windows ]; then
+            EXT_PREFIX='%LOCALAPPDATA%\Programs\Hydra\extensions'
+          fi
+          scripts/build-extensions.sh --out "stage/${GUI_NAME}/extensions" \
+            --quiet --prefix "$EXT_PREFIX"
+          # Safari is unpacked-only: it installs through the wrapper app that
+          # scripts/build-safari-extension.sh builds, not by loading a directory.
+          cp -R extensions/safari "stage/${GUI_NAME}/extensions/"
           if [ "${{ matrix.os }}" = windows ]; then
             cp scripts/install-native-host.ps1 "stage/${GUI_NAME}/scripts/"
             # install.ps1 registers an "Apps & features" entry whose

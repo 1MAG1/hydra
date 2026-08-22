@@ -22,6 +22,11 @@
 #       entry when the user turns it off — see hydra-gui/src/autostart.rs)
 #   native-messaging manifests for Chrome/Chromium/Edge/Firefox, so the
 #       browser extension reaches hydra-host with no per-user install step
+#   /usr/share/hydra-download-manager/extensions
+#       the browser extensions themselves — hydra-chrome-<v>.zip and
+#       hydra-firefox-<v>.xpi packed (plus a signed .crx when the build
+#       machine has the key), chrome/ and firefox/ unpacked for a
+#       developer-mode load, and INSTALL.txt with the instructions
 #
 # The package is named hydra-download-manager because plain "hydra" is the THC
 # login cracker in distro repos, and both ship /usr/bin/hydra — hence the
@@ -201,6 +206,15 @@ EOF
 EOF
   done
 
+  # Browser extensions: the packed .xpi/.zip, the unpacked directories a
+  # developer-mode install loads, and INSTALL.txt written with the installed
+  # paths. Same builder every other package uses.
+  install -d "$ROOT/usr/share/$NAME/extensions"
+  scripts/build-extensions.sh --out "$ROOT/usr/share/$NAME/extensions" \
+    --quiet --prefix "/usr/share/$NAME/extensions"
+  find "$ROOT/usr/share/$NAME/extensions" -type f -exec chmod 644 {} +
+  find "$ROOT/usr/share/$NAME/extensions" -type d -exec chmod 755 {} +
+
   install -Dm644 LICENSE       "$ROOT/usr/share/doc/$NAME/LICENSE"
   install -Dm644 LICENSING.md  "$ROOT/usr/share/doc/$NAME/LICENSING.md"
 
@@ -240,8 +254,9 @@ Installed-Size: $(du -ks "$ROOT" | cut -f1)
 Description: $SUMMARY
  Hydra downloads files over many parallel connections with integrity
  verification. This package installs the hydra CLI, the hydra-gui desktop
- app (with menu entry and login autostart), and the hydra-host
- native-messaging bridge plus browser manifests for extension capture.
+ app (with menu entry and login autostart), the hydra-host
+ native-messaging bridge plus browser manifests for extension capture, and
+ the browser extensions under /usr/share/hydra-download-manager/extensions.
 EOF
   for s in postinst postrm; do
     cat > "$ROOT/DEBIAN/$s" <<'EOF'
@@ -286,8 +301,9 @@ Recommends: libayatana-appindicator-gtk3
 %description
 Hydra downloads files over many parallel connections with integrity
 verification. This package installs the hydra CLI, the hydra-gui desktop
-app (with menu entry and login autostart), and the hydra-host
-native-messaging bridge plus browser manifests for extension capture.
+app (with menu entry and login autostart), the hydra-host
+native-messaging bridge plus browser manifests for extension capture, and
+the browser extensions under /usr/share/hydra-download-manager/extensions.
 
 %install
 rm -rf %{buildroot}
@@ -315,6 +331,7 @@ fi
 /usr/bin/hydra-host
 /usr/share/applications/hydra.desktop
 /usr/share/icons/hicolor/*/apps/hydra.png
+/usr/share/$NAME/extensions/
 /usr/share/doc/$NAME/
 /usr/share/man/man1/hydra*.1.gz
 %config(noreplace) /etc/xdg/autostart/hydra.desktop

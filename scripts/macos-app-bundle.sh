@@ -4,6 +4,10 @@
 #
 #   scripts/macos-app-bundle.sh [--install]
 #
+# The bundle carries the GUI, the CLI, the native-messaging host, the update
+# finisher, the man pages, and the browser extensions (packed + unpacked, in
+# Contents/Resources/extensions).
+#
 # --install also copies the result over /Applications/Hydra Download
 # Manager.app. Without it the build only lands in target/release, and an
 # installed copy keeps running the OLD code — which is invisible from the
@@ -56,6 +60,17 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/hydra.icns"
 #   man "/Applications/Hydra Download Manager.app/Contents/Resources/man/man1/hydra.1"
 mkdir -p "$APP/Contents/Resources/man/man1"
 cp docs/man/*.1 "$APP/Contents/Resources/man/man1/"
+
+# Browser extensions ride inside the bundle too: the packed .xpi/.zip, the
+# unpacked directories a developer-mode install loads, and INSTALL.txt with
+# the instructions spelled for the installed location. A drag-installed app
+# is then everything a user needs — no repository checkout to load the
+# extension from.
+EXT_DIR="$APP/Contents/Resources/extensions"
+rm -rf "$EXT_DIR"
+mkdir -p "$EXT_DIR"
+scripts/build-extensions.sh --out "$EXT_DIR" --quiet \
+  --prefix "/Applications/Hydra Download Manager.app/Contents/Resources/extensions"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
