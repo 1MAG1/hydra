@@ -73,7 +73,11 @@ if [ "$TARGET" = firefox ] && ! grep -q '"gecko"' "$DST/manifest.json"; then
   exit 1
 fi
 
-"$PY" -c "import json,sys; json.load(open('$DST/manifest.json'))" ||
+# The path travels as an ARGUMENT, never interpolated into the -c source:
+# git bash rewrites path-shaped arguments to Windows form (C:\...) when it
+# invokes native Windows python, but it cannot see a path buried inside a
+# code string, and python would be handed an unusable /c/... path.
+"$PY" -c "import json,sys; json.load(open(sys.argv[1]))" "$DST/manifest.json" ||
   { echo "error: $TARGET manifest is not valid JSON" >&2; exit 1; }
 
 echo "synced -> ${DST#"$REPO/"}"
