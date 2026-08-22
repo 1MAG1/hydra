@@ -73,6 +73,34 @@ impl Probe {
     pub fn is_redirect(&self) -> bool {
         matches!(self.status, 301 | 302 | 303 | 307 | 308) && self.location.is_some()
     }
+
+    /// This response could be a redirector PAGE — a forward expressed in HTML
+    /// instead of in a `Location` header (see [`crate::redirect`]).
+    ///
+    /// A cheap pre-filter, not an answer: it says only that fetching the body
+    /// to look for a redirect directive is worth one small request. The three
+    /// conditions are what separate a forwarding page from a download:
+    ///
+    /// * **HTML.** An object with any other type is the object.
+    /// * **No `Content-Disposition`.** A server that names a file to save is
+    ///   serving that file, whatever its type.
+    /// * **Small, or of unstated length.** Redirector pages are under a
+    ///   kilobyte; HEAD against one commonly omits `Content-Length` entirely
+    ///   (chunked, or `Vary`-driven), which is why an unknown size qualifies.
+    ///
+    /// Deliberately permissive about ordinary web pages: one that really does
+    /// carry a meta refresh is one a browser would follow too, so following it
+    /// is the answer the user expects rather than a false positive.
+    pub fn maybe_redirector(&self) -> bool {
+        (200..300).contains(&self.status)
+            && self.disposition.is_none()
+            && self.size <= crate::redirect::MAX_REDIRECTOR_PAGE
+            && self
+                .content_type
+                .as_deref()
+                .map(|c| c.trim_start().to_ascii_lowercase().starts_with("text/html"))
+                .unwrap_or(false)
+    }
 }
 
 impl Probe {
