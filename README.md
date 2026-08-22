@@ -30,6 +30,7 @@
   - [Homebrew (macOS / Linux)](#homebrew-macos--linux)
   - [Quick Install (prebuilt binaries)](#quick-install-prebuilt-binaries)
   - [From Source](#from-source)
+  - [Browser Extension](#browser-extension)
 - [Uninstall](#uninstall)
   - [Quick Uninstall (prebuilt installs)](#quick-uninstall-prebuilt-installs)
 - [Usage](#usage)
@@ -171,6 +172,51 @@ cargo build --release
 ```
 
 The compiled binary will be located at `target/release/hydra`. To build the GUI and native-messaging host as well, run `make build`.
+
+### Browser Extension
+
+Every installer ships the extension with the app, in both shapes — packed and unpacked:
+
+| Install | Extensions directory |
+| --- | --- |
+| Windows (setup.exe) | `%LOCALAPPDATA%\Programs\Hydra\extensions` |
+| macOS (.app / DMG) | `Hydra Download Manager.app/Contents/Resources/extensions` |
+| macOS (.pkg) | `/Library/Application Support/Hydra/extensions` |
+| Linux (.deb / .rpm) | `/usr/share/hydra-download-manager/extensions` |
+| Archive / `install.sh` | `<prefix>/share/hydra/extensions` |
+
+Each of those holds `hydra-chrome-<version>.zip` and `hydra-firefox-<version>.xpi` (packed), the
+same builds unpacked as `chrome/` and `firefox/`, and an `INSTALL.txt` with the steps below
+written for that machine's paths. Builds made with the extension signing key also carry a
+signed `hydra-chrome-<version>.crx`.
+
+The published builds are **unsigned**, so each browser needs its developer mode:
+
+- **Chrome, Edge, Opera, Brave, Vivaldi, Arc, Chromium** — open `chrome://extensions`
+  (`edge://extensions`, `opera://extensions`, …), turn on **Developer mode**, choose
+  **Load unpacked**, and pick the `chrome/` directory. The manifest `key` pins the id to
+  `jpnonmbbkjdpeebdhkjoliklfhkdcomj` in every one of them, which is the id the native-messaging
+  host allow-lists. The two packed shapes are for distribution rather than hand-installing: the
+  `.zip` is the Web Store upload format, and the signed `.crx` is for enterprise policy
+  deployment (`ExtensionSettings` / `ExtensionInstallForcelist` against an update manifest you
+  host) — Chromium refuses a `.crx` dragged in from outside the Web Store.
+- **Firefox** — open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…** and pick
+  the `.xpi` (removed at the next restart). Developer Edition, Nightly and ESR can install it
+  permanently after setting `xpinstall.signatures.required` to `false` in `about:config`; release
+  and Beta Firefox always require a signed add-on.
+
+To build them from a checkout:
+
+```bash
+make extensions                                   # -> target/extensions
+make extensions ARGS="--crx-key path/to/key.pem"  # also sign a .crx
+```
+
+A `.crx` is packed whenever a signing key is available (`--crx-key`, `$HYDRA_CRX_KEY`, or
+`target/hydra-chrome-crx.pem`); `--crx` generates one if there is none. Sign with the key behind
+the pinned manifest `key` — any other key changes the extension id, and the script says so.
+`ARGS=--sign` additionally fetches an addons.mozilla.org-signed `.xpi` (needs `web-ext` and AMO
+API keys).
 
 ---
 

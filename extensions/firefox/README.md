@@ -60,12 +60,19 @@ latter is regenerated on every sync.
 ### Packaged .xpi
 
 ```bash
-scripts/build-firefox-xpi.sh
+scripts/build-firefox-xpi.sh      # Firefox only
+scripts/build-extensions.sh       # Firefox .xpi + Chromium .zip + INSTALL.txt
 ```
 
-writes `target/hydra-firefox-<version>.xpi` (and verifies `manifest.json`
-sits at the archive root, which Firefox requires). Load that file the same
-way — **Load Temporary Add-on** accepts an `.xpi` directly.
+Both write `target/extensions/hydra-firefox-<version>.xpi` (and verify that
+`manifest.json` sits at the archive root, which Firefox requires) alongside
+`target/extensions/firefox/`, the unpacked copy the archive was made from.
+Load either — **Load Temporary Add-on** accepts an `.xpi` directly, or the
+directory's `manifest.json`.
+
+`build-extensions.sh --out DIR` packs into DIR instead; that is how the DMG,
+PKG, deb, rpm and Windows installers put the extension inside the installed
+application, next to an `INSTALL.txt` written with that machine's paths.
 
 Temporary add-ons are cleared when Firefox restarts. For a **permanent**
 install the package must be signed by Mozilla:

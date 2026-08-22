@@ -11,8 +11,10 @@
 #   /Applications/Hydra Download Manager.app   GUI + hydra CLI + hydra-host
 #       (the ad-hoc-signed bundle from scripts/macos-app-bundle.sh)
 #   /Library/Application Support/Hydra/extensions
-#       chrome/, firefox/, safari/ — unpacked extensions ready for
-#       "Load unpacked" / temporary add-on install
+#       hydra-chrome-<v>.zip and hydra-firefox-<v>.xpi (packed, plus a
+#       signed .crx when the build machine has the key), chrome/,
+#       firefox/ and safari/ (unpacked, ready for "Load unpacked" / a
+#       temporary add-on install), and INSTALL.txt with the instructions
 #   /usr/local/share/man/man1/hydra*.1
 #       CLI man pages, on the default man path ("man hydra" just works)
 #   postinstall:
@@ -64,8 +66,14 @@ SCRIPTS="$TMP/scripts"
 mkdir -p "$STAGE/Applications" "$STAGE/Library/Application Support/Hydra/extensions" "$SCRIPTS"
 
 ditto "$APP" "$STAGE/Applications/Hydra Download Manager.app"
-cp -R extensions/chrome extensions/firefox extensions/safari \
-  "$STAGE/Library/Application Support/Hydra/extensions/"
+# Packed .xpi/.zip, unpacked chrome/ and firefox/, and INSTALL.txt written
+# with the installed paths. Same builder the app bundle and every other
+# package use, so all of them ship byte-identical extensions.
+EXT_INSTALLED="/Library/Application Support/Hydra/extensions"
+scripts/build-extensions.sh --out "$STAGE$EXT_INSTALLED" --quiet --prefix "$EXT_INSTALLED"
+# Safari is unpacked-only: it is installed by the wrapper app that
+# scripts/build-safari-extension.sh builds, not by loading a directory.
+cp -R extensions/safari "$STAGE$EXT_INSTALLED/"
 
 # CLI man pages onto the default man path.
 mkdir -p "$STAGE/usr/local/share/man/man1"

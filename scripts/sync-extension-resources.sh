@@ -30,6 +30,11 @@ esac
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$REPO/extensions/chrome"
 
+# git bash on Windows (where the NSIS installer is packed) ships `python` but
+# not always `python3`.
+PY=$(command -v python3 || command -v python || true)
+[ -n "$PY" ] || { echo "error: python3 is required to validate the manifest" >&2; exit 1; }
+
 # Firefox loads a plain directory (or a zipped .xpi of it), so the shared
 # files land NEXT TO its manifest and `extensions/firefox` is loadable as-is
 # — the same shape as extensions/chrome. Safari's converter wants a clean
@@ -68,7 +73,7 @@ if [ "$TARGET" = firefox ] && ! grep -q '"gecko"' "$DST/manifest.json"; then
   exit 1
 fi
 
-python3 -c "import json,sys; json.load(open('$DST/manifest.json'))" ||
+"$PY" -c "import json,sys; json.load(open('$DST/manifest.json'))" ||
   { echo "error: $TARGET manifest is not valid JSON" >&2; exit 1; }
 
 echo "synced -> ${DST#"$REPO/"}"

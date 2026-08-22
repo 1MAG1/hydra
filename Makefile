@@ -8,6 +8,10 @@
 #   make linux      both deb and rpm
 #   make package    the right artifact(s) for the OS make runs on
 #
+#   make extensions  browser extensions: packed .xpi + .zip (+ .crx with a
+#                    signing key), unpacked dirs and install instructions
+#                    -> target/extensions
+#
 #   make ffi        the embeddable C library (static + shared) -> target/<profile>
 #   make header     regenerate include/hydra.h from the Rust definitions
 #   make header-check  fail if include/hydra.h is out of date
@@ -28,6 +32,7 @@ PROFILE ?= release
 CARGO   ?= cargo
 
 .PHONY: all build cli gui host app dmg deb rpm linux windows package clean \
+        extensions \
         require-macos require-linux ffi header header-check ffi-compat \
         ffi-test ffi-dist ffi-android ffi-apple
 
@@ -44,6 +49,17 @@ gui:
 
 host:
 	$(CARGO) build --profile $(PROFILE) -p hya-host
+
+# The browser extensions, in both shapes every packaging target ships: a packed
+# .zip for the Chromium family and a packed .xpi for Firefox, next to the
+# unpacked directories a developer-mode install loads. The package targets call
+# the same script with --out pointing into their staging tree, so what a user
+# installs is what this produces.
+#
+#   make extensions ARGS="--crx-key key.pem"   sign the Chromium .crx
+#   make extensions ARGS=--sign                also fetch an AMO-signed .xpi
+extensions:
+	scripts/build-extensions.sh $(ARGS)
 
 # The embeddable library. Builds every crate-type the manifest declares, so one
 # invocation produces libhydra.a AND the shared library; the same include/hydra.h

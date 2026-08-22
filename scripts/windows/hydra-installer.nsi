@@ -10,7 +10,9 @@
 ;   makensis -DVERSION=0.3.0 -DBUILD_DIR=..\..\target\custom\release hydra-installer.nsi
 ;
 ; Expects hydra-gui.exe, hydra-host.exe, and hydra.exe already built in
-; BUILD_DIR (default: target\<rust-triple>\release for the chosen ARCH).
+; BUILD_DIR (default: target\<rust-triple>\release for the chosen ARCH), and
+; the browser extensions packed into target\extensions by
+; scripts/build-extensions.sh.
 ; Cross-build from macOS with scripts/build-windows-installer.sh, or
 ; natively with `cargo build --release -p hya-gui -p hya-host -p hya-cli`.
 ;
@@ -20,7 +22,8 @@
 ;                               and the HKCU registry keys the browsers read
 ;   * CLI (hydra.exe)         - with $INSTDIR appended to the user PATH so
 ;                               all binaries resolve in cmd/PowerShell
-;   * Browser extensions      - unpacked chrome/ + firefox/ extension sources
+;   * Browser extensions      - packed .zip/.xpi + unpacked chrome/ and
+;                               firefox/, with INSTALL.txt instructions
 ;
 ; Windows has no NativeMessagingHosts directory: each browser reads a
 ; registry value pointing at a manifest file. Chromium browsers key it by
@@ -118,7 +121,7 @@ ${Using:StrFunc} UnStrRep
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\hydra-gui.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Launch ${APP_NAME}"
-!define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\extensions\LOAD-EXTENSIONS.txt"
+!define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\extensions\INSTALL.txt"
 !define MUI_FINISHPAGE_SHOWREADME_TEXT "How to load the browser extension"
 !define MUI_FINISHPAGE_SHOWREADME_NOTCHECKED
 
@@ -236,21 +239,92 @@ path_done:
 SectionEnd
 
 Section "Browser Extensions" SEC_EXT
+  ; Built by scripts/build-extensions.sh, which build-windows-installer.sh
+  ; runs before makensis: the packed .zip/.xpi plus the unpacked directories
+  ; those archives were made from. Both shapes ship because an unsigned
+  ; extension cannot be installed from a file in either browser family --
+  ; Chromium needs "Load unpacked", Firefox takes the .xpi as a TEMPORARY
+  ; add-on. The .zip/.xpi are there for a store upload, for a Firefox
+  ; Developer Edition/ESR install with signature enforcement off, and so the
+  ; files can be copied to another machine as one item each.
   SetOutPath "$INSTDIR\extensions"
-  File /r /x ".gitignore" "..\..\extensions\chrome"
-  File /r /x ".gitignore" "..\..\extensions\firefox"
+  File "..\..\target\extensions\hydra-chrome-*.zip"
+  File "..\..\target\extensions\hydra-firefox-*.xpi"
+  ; The .crx exists only when the build machine had the extension signing
+  ; key (scripts/build-extensions.sh --crx-key), so it is packed
+  ; conditionally rather than being a build-breaking requirement.
+!if /FileExists "..\..\target\extensions\hydra-chrome-*.crx"
+  !define HAVE_CRX
+  File "..\..\target\extensions\hydra-chrome-*.crx"
+!endif
+  File /r "..\..\target\extensions\chrome"
+  File /r "..\..\target\extensions\firefox"
 
-  FileOpen $0 "$INSTDIR\extensions\LOAD-EXTENSIONS.txt" w
-  FileWrite $0 'Loading the Hydra browser extension$\r$\n'
-  FileWrite $0 '===================================$\r$\n$\r$\n'
-  FileWrite $0 'Chromium family (Chrome, Edge, Brave, Vivaldi):$\r$\n'
-  FileWrite $0 '  1. Open chrome://extensions (edge://extensions, brave://extensions, ...)$\r$\n'
-  FileWrite $0 '  2. Enable "Developer mode"$\r$\n'
-  FileWrite $0 '  3. "Load unpacked" -> $INSTDIR\extensions\chrome$\r$\n$\r$\n'
-  FileWrite $0 'Firefox:$\r$\n'
+  ; The same instructions build-extensions.sh writes as INSTALL.txt on macOS
+  ; and Linux, spelled with the real $INSTDIR (which the user may have
+  ; changed on the Directory page, so this is generated here rather than
+  ; packed in). Keep the two texts in step.
+  FileOpen $0 "$INSTDIR\extensions\INSTALL.txt" w
+  FileWrite $0 'Hydra browser extension - installing the unsigned build$\r$\n'
+  FileWrite $0 '=======================================================$\r$\n$\r$\n'
+  FileWrite $0 'These are UNSIGNED builds: they carry no Chrome Web Store or$\r$\n'
+  FileWrite $0 'addons.mozilla.org signature, so each browser needs its developer mode$\r$\n'
+  FileWrite $0 '(or a temporary install) to accept them. The extension itself is$\r$\n'
+  FileWrite $0 'identical to the store build.$\r$\n$\r$\n'
+  FileWrite $0 'In this directory:$\r$\n$\r$\n'
+  FileWrite $0 '  hydra-chrome-${VERSION}.zip   packed build for the Chromium family$\r$\n'
+!ifdef HAVE_CRX
+  FileWrite $0 '  hydra-chrome-${VERSION}.crx   the same build, signed, for policy deployment$\r$\n'
+!endif
+  FileWrite $0 '  hydra-firefox-${VERSION}.xpi  packed build for Firefox$\r$\n'
+  FileWrite $0 '  chrome\           the same Chromium build, already unpacked$\r$\n'
+  FileWrite $0 '  firefox\          the same Firefox build, already unpacked$\r$\n'
+  FileWrite $0 '  INSTALL.txt       this file$\r$\n$\r$\n'
+  FileWrite $0 'Chrome, Edge, Opera, Brave, Vivaldi, Arc, Chromium$\r$\n'
+  FileWrite $0 '--------------------------------------------------$\r$\n'
+  FileWrite $0 'Chromium only installs a .crx that came from the Web Store, so an$\r$\n'
+  FileWrite $0 'unsigned build is loaded from the unpacked directory instead.$\r$\n$\r$\n'
+  FileWrite $0 '  1. Open the extensions page:$\r$\n'
+  FileWrite $0 '         Chrome   chrome://extensions$\r$\n'
+  FileWrite $0 '         Edge     edge://extensions$\r$\n'
+  FileWrite $0 '         Opera    opera://extensions$\r$\n'
+  FileWrite $0 '         Brave    brave://extensions$\r$\n'
+  FileWrite $0 '         Vivaldi  vivaldi://extensions$\r$\n'
+  FileWrite $0 '  2. Turn on "Developer mode" - top right in Chrome, Brave and Vivaldi;$\r$\n'
+  FileWrite $0 '     bottom left in Edge; the sidebar in Opera.$\r$\n'
+  FileWrite $0 '  3. Click "Load unpacked" and select:$\r$\n'
+  FileWrite $0 '         $INSTDIR\extensions\chrome$\r$\n'
+  FileWrite $0 '  4. Leave that folder where it is. The browser re-reads it from disk at$\r$\n'
+  FileWrite $0 '     every start, and moving or deleting it uninstalls the extension.$\r$\n$\r$\n'
+!ifdef HAVE_CRX
+  FileWrite $0 'The signed hydra-chrome-${VERSION}.crx is for deploying by enterprise$\r$\n'
+  FileWrite $0 'policy (ExtensionSettings or ExtensionInstallForcelist, pointing at an$\r$\n'
+  FileWrite $0 'update manifest you host). Dragging it onto the extensions page will not$\r$\n'
+  FileWrite $0 'work: Chromium refuses any .crx that did not come from the Web Store.$\r$\n$\r$\n'
+!endif
+  FileWrite $0 'The extension id is ${CHROME_EXT_ID} in every Chromium$\r$\n'
+  FileWrite $0 'browser - it is pinned by the manifest key, and it is the id this$\r$\n'
+  FileWrite $0 'installer already allow-listed for the native messaging host.$\r$\n$\r$\n'
+  FileWrite $0 'Firefox$\r$\n'
+  FileWrite $0 '-------$\r$\n'
+  FileWrite $0 'Temporary - works in every Firefox, removed at the next restart:$\r$\n$\r$\n'
   FileWrite $0 '  1. Open about:debugging#/runtime/this-firefox$\r$\n'
-  FileWrite $0 '  2. "Load Temporary Add-on" -> $INSTDIR\extensions\firefox\manifest.json$\r$\n$\r$\n'
-  FileWrite $0 'Restart the browser once so it re-reads the native-messaging registry.$\r$\n'
+  FileWrite $0 '  2. Click "Load Temporary Add-on..." and select:$\r$\n'
+  FileWrite $0 '         $INSTDIR\extensions\hydra-firefox-${VERSION}.xpi$\r$\n'
+  FileWrite $0 '     (or $INSTDIR\extensions\firefox\manifest.json)$\r$\n$\r$\n'
+  FileWrite $0 'Permanent - Developer Edition, Nightly and ESR only:$\r$\n$\r$\n'
+  FileWrite $0 '  1. Open about:config and set$\r$\n'
+  FileWrite $0 '         xpinstall.signatures.required = false$\r$\n'
+  FileWrite $0 '     Release and Beta Firefox ignore this setting and keep refusing an$\r$\n'
+  FileWrite $0 '     unsigned add-on; use the temporary install above instead.$\r$\n'
+  FileWrite $0 '  2. Open about:addons, click the gear icon, choose$\r$\n'
+  FileWrite $0 '     "Install Add-on From File..." and select the .xpi above.$\r$\n$\r$\n'
+  FileWrite $0 'After installing$\r$\n'
+  FileWrite $0 '----------------$\r$\n'
+  FileWrite $0 'Restart the browser once so it picks up the native-messaging$\r$\n'
+  FileWrite $0 'registration this installer wrote, then open the Hydra toolbar icon:$\r$\n'
+  FileWrite $0 'the status dot is green when the extension has reached the app$\r$\n'
+  FileWrite $0 '(WebSocket 127.0.0.1:6799).$\r$\n'
   FileClose $0
 SectionEnd
 
@@ -270,7 +344,7 @@ SectionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_GUI}     "The Hydra Download Manager application (required)."
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_HOST}    "Native-messaging host bridging browser extensions to Hydra, plus its registry registration for Chrome, Edge, Brave, Chromium, Vivaldi, and Firefox."
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_CLI}     "The hydra command-line downloader, with the install directory added to your PATH for cmd, PowerShell, and other terminals."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_EXT}     "Unpacked browser-extension sources for Chromium browsers and Firefox (loaded via developer mode)."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_EXT}     "Browser extensions for the Chromium family (Chrome, Edge, Opera, Brave, Vivaldi) and Firefox: packed .zip/.xpi plus the unpacked directories a developer-mode install loads, with instructions."
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_LOGO}    "Hydra logo image installed alongside the application."
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_DESKTOP} "Shortcut to Hydra Download Manager on the desktop."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END

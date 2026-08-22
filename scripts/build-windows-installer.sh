@@ -12,7 +12,8 @@
 # target); the installer is always named -x64- for a single canonical
 # artifact name.
 #
-# Needs: cargo-xwin, Homebrew LLVM (lld-link), makensis (brew install makensis).
+# Needs: cargo-xwin, Homebrew LLVM (lld-link), makensis (brew install makensis),
+# and python3 (or python) for packing the browser extensions.
 #
 # --cross-compiler clang (not the clang-cl default) is required: ring's
 # build.rs force-switches to plain clang on windows-aarch64, which rejects
@@ -59,6 +60,13 @@ command -v makensis >/dev/null || {
   echo "makensis not found - install with: brew install makensis" >&2
   exit 1
 }
+
+# The installer packs target/extensions (packed .zip/.xpi + the unpacked
+# directories). Built here rather than inside the .nsi because makensis
+# cannot zip, and --no-build only skips cargo -- the extensions are web
+# sources and cost nothing to repack.
+echo "packing browser extensions..."
+./scripts/build-extensions.sh --quiet
 
 # makensis resolves File paths against the cwd, and the .nsi is written
 # relative to its own directory.
