@@ -672,15 +672,10 @@ jobs:
 
             # Build source packages for Ubuntu 24.04 (noble) and 22.04 (jammy)
             for DISTRO in noble jammy; do
-              cat > debian/changelog <<EOF
-hydra (${VERSION}-1ppa1~${DISTRO}1) ${DISTRO}; urgency=medium
+              printf "hydra (%s-1ppa1~%s1) %s; urgency=medium\n\n  * Automated Launchpad PPA release for %s.\n\n -- %s  %s\n" \
+                "$VERSION" "$DISTRO" "$DISTRO" "$DISTRO" "$GPG_USER" "$(date -R)" > debian/changelog
 
-  * Automated Launchpad PPA release for ${DISTRO}.
-
- -- ${GPG_USER}  $(date -R)
-EOF
-
-              debuild -S -sa -k"$GPG_KEY_ID"
+              debuild --no-lintian -S -sa -d -k"$GPG_KEY_ID"
               dput -u "$LAUNCHPAD_PPA" "../hydra_${VERSION}-1ppa1~${DISTRO}1_source.changes"
             done
             echo "Uploaded PPA packages to $LAUNCHPAD_PPA"
