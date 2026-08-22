@@ -172,6 +172,44 @@ try {
       Write-Host "  retry with: powershell -NoProfile -ExecutionPolicy Bypass -File `"$NativeHost`" -NoBuild -HostBin `"$HostExe`""
     }
 
+    # How to load the extension. The native-messaging side was just registered
+    # above, but loading an unsigned build into the browser needs its
+    # developer mode and cannot be automated — so spell out the steps here,
+    # with the real installed paths, instead of leaving the user to find
+    # INSTALL.txt.
+    $ExtDir = Join-Path $InstallDir "extensions"
+    $Xpi = Get-ChildItem -Path (Join-Path $ExtDir "hydra-firefox-*.xpi") `
+      -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+    # Releases before 0.3.8 shipped only the unpacked directories; Firefox's
+    # temporary install accepts the manifest just the same.
+    if (-not $Xpi) { $Xpi = Join-Path $ExtDir "firefox\manifest.json" }
+    Write-Host ""
+    Write-Host "Browser extension - the builds in $ExtDir are unsigned,"
+    Write-Host "so each browser loads them through its developer mode:"
+    Write-Host ""
+    Write-Host "  Chrome / Edge / Brave / Opera / Vivaldi / Arc / Chromium"
+    Write-Host "    1. open chrome://extensions (edge://extensions, brave://extensions, ...)"
+    Write-Host "    2. turn on `"Developer mode`" (top right in Chrome; bottom left in Edge)"
+    Write-Host "    3. click `"Load unpacked`" and select:"
+    Write-Host "           $ExtDir\chrome"
+    Write-Host ""
+    Write-Host "  Firefox - temporary (every edition; removed at the next restart)"
+    Write-Host "    1. open about:debugging#/runtime/this-firefox"
+    Write-Host "    2. click `"Load Temporary Add-on...`" and select:"
+    Write-Host "           $Xpi"
+    Write-Host ""
+    Write-Host "  Firefox - permanent (Developer Edition, Nightly and ESR only)"
+    Write-Host "    1. in about:config set xpinstall.signatures.required = false"
+    Write-Host "    2. in about:addons use the gear icon > `"Install Add-on From File...`""
+    Write-Host "       and pick the .xpi in $ExtDir"
+    Write-Host ""
+    Write-Host "Restart the browser once so it picks up Hydra's native-messaging manifest,"
+    Write-Host "then check the Hydra toolbar icon: the status dot turns green when the"
+    Write-Host "extension has reached the app."
+    if (Test-Path (Join-Path $ExtDir "INSTALL.txt")) {
+      Write-Host "Full instructions: $ExtDir\INSTALL.txt"
+    }
+
     # Shortcuts. The GUI exe embeds hydra.ico and a VERSIONINFO block
     # (crates/hydra-gui/build.rs), so the icon and the product name come along
     # for free — IconLocation just makes the source explicit.

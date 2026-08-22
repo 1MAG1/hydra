@@ -481,6 +481,47 @@ EOF
     echo "note: python3 not found; to enable browser integration run:" >&2
     echo "  $SHARE_DIR/scripts/install-native-host.sh --no-build --host-bin $HOST_BIN" >&2
   fi
+
+  # How to load the extension. The native-messaging side was just registered
+  # above, but loading an unsigned build into the browser needs its developer
+  # mode and cannot be automated — so spell out the steps here, with the real
+  # installed paths, instead of leaving the user to find INSTALL.txt.
+  EXT_DIR="$SHARE_DIR/extensions"
+  XPI=""
+  for f in "$EXT_DIR"/hydra-firefox-*.xpi; do
+    if [ -f "$f" ]; then XPI="$f"; break; fi
+  done
+  # Releases before 0.3.8 shipped only the unpacked directories; Firefox's
+  # temporary install accepts the manifest just the same.
+  [ -n "$XPI" ] || XPI="$EXT_DIR/firefox/manifest.json"
+  cat <<EOF
+
+Browser extension — the builds in $EXT_DIR are unsigned,
+so each browser loads them through its developer mode:
+
+  Chrome / Edge / Brave / Opera / Vivaldi / Arc / Chromium
+    1. open chrome://extensions (edge://extensions, brave://extensions, ...)
+    2. turn on "Developer mode" (top right in Chrome; bottom left in Edge)
+    3. click "Load unpacked" and select:
+           $EXT_DIR/chrome
+
+  Firefox — temporary (every edition; removed at the next restart)
+    1. open about:debugging#/runtime/this-firefox
+    2. click "Load Temporary Add-on..." and select:
+           $XPI
+
+  Firefox — permanent (Developer Edition, Nightly and ESR only)
+    1. in about:config set xpinstall.signatures.required = false
+    2. in about:addons use the gear icon > "Install Add-on From File..."
+       and pick the .xpi in $EXT_DIR
+
+Restart the browser once so it picks up Hydra's native-messaging manifest,
+then check the Hydra toolbar icon: the status dot turns green when the
+extension has reached the app.
+EOF
+  if [ -f "$EXT_DIR/INSTALL.txt" ]; then
+    echo "Full instructions: $EXT_DIR/INSTALL.txt"
+  fi
 fi
 
 case ":$PATH:" in
