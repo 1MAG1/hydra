@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Changelog — Hydra</title>
+<meta name="description" content="All notable changes, new features, bug fixes, and improvements across every Hydra release.">
+<link rel="icon" type="image/png" href="logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0e13;
+    --bg-raised: #0f151d;
+    --line: rgba(148, 197, 222, 0.12);
+    --line-strong: rgba(148, 197, 222, 0.22);
+    --text: #e7edf3;
+    --text-dim: #93a4b4;
+    --text-faint: #64778a;
+    --accent: #2dd4d4;
+    --accent-ink: #06282e;
+    --grad: linear-gradient(100deg, #2dd4d4, #2596e8);
+    --radius: 16px;
+    --font-sans: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  a { color: inherit; text-decoration: none; }
+
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+
+  /* Navigation Header */
+  .nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 40;
+    background: rgba(10, 14, 19, 0.85);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-inner {
+    height: 68px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: 0.01em; }
+  .brand img { width: 30px; height: 30px; }
+  .nav-links { display: flex; align-items: center; gap: 24px; font-size: 14.5px; color: var(--text-dim); }
+  .nav-links a { transition: color 0.15s ease; }
+  .nav-links a:hover, .nav-links a.active { color: var(--text); }
+  .nav-links a.active { color: var(--accent); font-weight: 600; }
+  .nav-gh { display: inline-flex; align-items: center; }
+  .nav-gh svg { width: 21px; height: 21px; }
+
+  /* Hero Section */
+  .hero-section {
+    padding: 136px 0 48px;
+    position: relative;
+    text-align: center;
+  }
+  .hero-section::before {
+    content: ""; position: absolute; inset: 0; z-index: -1;
+    background: radial-gradient(600px 320px at 50% 10%, rgba(37, 150, 232, 0.12), transparent 70%);
+  }
+  .hero-section h1 {
+    font-size: clamp(34px, 4vw, 50px); font-weight: 700; letter-spacing: -0.03em; line-height: 1.1;
+  }
+  .hero-section h1 .grad {
+    background: var(--grad);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero-section p {
+    margin-top: 14px; font-size: 17px; color: var(--text-dim); max-width: 54ch; margin-left: auto; margin-right: auto;
+  }
+
+  /* Search & Filter Toolbar */
+  .toolbar {
+    margin: 36px 0 40px; display: flex; flex-direction: column; gap: 16px;
+  }
+  .search-wrap { position: relative; width: 100%; }
+  .search-wrap svg {
+    position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+    width: 18px; height: 18px; color: var(--text-faint); pointer-events: none;
+  }
+  .search-input {
+    width: 100%; background: var(--bg-raised); border: 1px solid var(--line);
+    border-radius: 12px; padding: 13px 16px 13px 46px; font-family: var(--font-sans);
+    font-size: 15px; color: var(--text); outline: none;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  .search-input:focus {
+    border-color: rgba(45, 212, 212, 0.4);
+    box-shadow: 0 0 20px rgba(45, 212, 212, 0.12);
+  }
+  .search-input::placeholder { color: var(--text-faint); }
+
+  .filter-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .filter-label { font-size: 13px; color: var(--text-faint); margin-right: 4px; }
+  .filter-chip {
+    font-family: var(--font-sans); font-size: 13px; font-weight: 500;
+    color: var(--text-dim); background: rgba(148, 197, 222, 0.04);
+    border: 1px solid var(--line); border-radius: 999px; padding: 6px 14px;
+    cursor: pointer; transition: all 0.15s ease;
+  }
+  .filter-chip:hover { color: var(--text); border-color: var(--line-strong); }
+  .filter-chip.active {
+    color: var(--accent); border-color: rgba(45, 212, 212, 0.35);
+    background: rgba(45, 212, 212, 0.08); font-weight: 600;
+  }
+
+  /* Release Cards */
+  .releases-list { display: flex; flex-direction: column; gap: 32px; padding-bottom: 96px; }
+
+  .release-card {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--bg-raised); padding: 32px;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  .release-card:hover { border-color: var(--line-strong); }
+
+  .release-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap; padding-bottom: 20px;
+    border-bottom: 1px solid var(--line);
+  }
+  .release-title-group { display: flex; align-items: center; gap: 12px; }
+  .release-version {
+    font-size: 24px; font-weight: 700; letter-spacing: -0.02em; color: var(--text);
+  }
+  .release-date {
+    font-family: var(--font-mono); font-size: 13px; color: var(--text-faint);
+    background: rgba(148, 197, 222, 0.06); border: 1px solid var(--line);
+    padding: 3px 10px; border-radius: 999px;
+  }
+  .release-actions { display: flex; align-items: center; gap: 10px; }
+  .release-link {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 13px; font-weight: 500; color: var(--accent);
+    background: rgba(45, 212, 212, 0.08); border: 1px solid rgba(45, 212, 212, 0.2);
+    padding: 5px 12px; border-radius: 8px; transition: all 0.15s ease;
+  }
+  .release-link:hover { background: rgba(45, 212, 212, 0.15); border-color: rgba(45, 212, 212, 0.35); }
+  .release-link svg { width: 14px; height: 14px; }
+
+  /* Sections inside a release */
+  .change-section { margin-top: 24px; }
+  .section-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12.5px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em; padding: 4px 10px; border-radius: 6px; margin-bottom: 14px;
+  }
+  .section-badge.added {
+    background: rgba(45, 212, 212, 0.12); color: #2dd4d4; border: 1px solid rgba(45, 212, 212, 0.25);
+  }
+  .section-badge.fixed {
+    background: rgba(245, 158, 11, 0.12); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.25);
+  }
+  .section-badge.changed {
+    background: rgba(168, 85, 247, 0.12); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.25);
+  }
+
+  .change-list { list-style: none; display: flex; flex-direction: column; gap: 12px; padding-left: 4px; }
+  .change-item {
+    position: relative; padding-left: 20px; font-size: 15px; color: var(--text-dim); line-height: 1.6;
+  }
+  .change-item::before {
+    content: "•"; position: absolute; left: 4px; top: 0; color: var(--text-faint); font-size: 18px;
+  }
+  .change-item strong { color: var(--text); font-weight: 600; }
+  .change-item code {
+    font-family: var(--font-mono); font-size: 13px; color: var(--accent);
+    background: rgba(45, 212, 212, 0.06); border: 1px solid rgba(45, 212, 212, 0.15);
+    padding: 1px 6px; border-radius: 4px;
+  }
+
+  /* Empty state */
+  .no-results {
+    display: none; text-align: center; padding: 64px 20px;
+    border: 1px dashed var(--line-strong); border-radius: var(--radius);
+    color: var(--text-dim);
+  }
+  .no-results p { margin-top: 8px; font-size: 14.5px; color: var(--text-faint); }
+
+  /* Footer */
+  footer { border-top: 1px solid var(--line); padding: 40px 0; }
+  .foot {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 20px; flex-wrap: wrap;
+  }
+  .foot-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; }
+  .foot-brand img { width: 24px; height: 24px; }
+  .foot p { font-size: 13.5px; color: var(--text-faint); }
+  .foot p a { color: var(--text-dim); }
+  .foot p a:hover { color: var(--accent); }
+  .foot-social { display: flex; gap: 14px; }
+  .foot-social a { color: var(--text-dim); display: inline-flex; transition: color 0.15s ease; }
+  .foot-social a:hover { color: var(--text); }
+  .foot-social svg { width: 20px; height: 20px; }
+
+  @media (max-width: 768px) {
+    .hero-section { padding: 110px 0 36px; }
+    .release-card { padding: 24px 18px; }
+    .release-header { align-items: flex-start; }
+    .nav-links .nav-hide-sm { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="index.html">
+      <img src="logo.png" alt="Hydra logo" width="30" height="30">
+      HYDRA
+    </a>
+    <div class="nav-links">
+      <a href="index.html#engine" class="nav-hide-sm">Engine</a>
+      <a href="index.html#app" class="nav-hide-sm">Desktop App</a>
+      <a href="index.html#cli" class="nav-hide-sm">CLI</a>
+      <a href="index.html#download">Download</a>
+      <a href="changelog.html" class="active">Changelog</a>
+      <a class="nav-gh" href="https://github.com/ja7ad/hydra" aria-label="Hydra on GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+      </a>
+    </div>
+  </div>
+</nav>
+
+<div class="wrap">
+  <section class="hero-section">
+    <h1>Hydra <span class="grad">Changelog</span></h1>
+    <p>All notable features, bug fixes, performance enhancements, and architectural changes across every Hydra release.</p>
+
+    <div class="toolbar">
+      <div class="filter-row">
+        <span class="filter-label">Filter by type:</span>
+        <button class="filter-chip active" data-type="all">All Changes</button>
+        <button class="filter-chip" data-type="added">Added</button>
+        <button class="filter-chip" data-type="fixed">Fixed</button>
+        <button class="filter-chip" data-type="changed">Changed &amp; Refactored</button>
+      </div>
+    </div>
+  </section>
+
+  <main class="releases-list" id="releases-container">
+    <!-- Version 0.3.7 -->
+    <article class="release-card" id="v0.3.7" data-version="0.3.7">
+      <div class="release-header">
+        <div class="release-title-group">
+          <h2 class="release-version">v0.3.7</h2>
+          <span class="release-date">2026-08-22</span>
+        </div>
+        <div class="release-actions">
+          <a class="release-link" href="https://github.com/ja7ad/hydra/releases/tag/v0.3.7" target="_blank" rel="noopener">
+            View Release on GitHub
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </a>
+        </div>
+      </div>
+
+      <div class="change-section" data-category="added">
+        <span class="section-badge added">Added</span>
+        <ul class="change-list">
+          <li class="change-item"><strong>Browser Extension Bundling &amp; Packaging (<code>scripts/build-extensions.sh</code>)</strong>: Added a unified extension build system (<code>make extensions</code>) producing both packed (<code>.zip</code> for Chrome/Chromium, <code>.xpi</code> for Firefox) and unpacked directory trees with path-tailored <code>INSTALL.txt</code> guides. Bundled extensions across all packaging targets: Windows setup, macOS <code>.app</code> bundle, macOS <code>.pkg</code>, Linux <code>.deb</code>/<code>.rpm</code>, and release archives.</li>
+          <li class="change-item"><strong>CRX Signing &amp; Enterprise Policy Packaging</strong>: Added Chromium <code>.crx</code> generation and signing (<code>--crx-key</code>, <code>HYDRA_CRX_KEY</code>, <code>--crx</code>) with pinned extension ID (<code>jpnonmbbkjdpeebdhkjoliklfhkdcomj</code>) for enterprise policy deployments (<code>ExtensionSettings</code> / <code>ExtensionInstallForcelist</code>).</li>
+          <li class="change-item"><strong>Rubber-Band Drag Selection (<code>hydra-gui</code>)</strong>: Added interactive marquee drag selection to the download table, allowing users to click and drag across rows to select multiple downloads simultaneously.</li>
+          <li class="change-item"><strong>ABI Specification (<code>docs/ffi/ABI.md</code>)</strong>: Added the canonical specification for the <code>libhydra</code> C ABI — FFI design principles, formal ABI 1 stability policy, full ownership/encoding/error/threading contracts, and compatibility matrix.</li>
+          <li class="change-item"><strong>Frozen ABI Baseline (<code>crates/hydra-ffi/abi/abi-1.manifest</code>)</strong>: Added a machine-checkable record of ABI 1 — enumerator values, field offsets, width, struct size, and exported symbols.</li>
+          <li class="change-item"><strong>ABI Stability Gate (<code>scripts/ffi-abi-compat.sh</code>, <code>make ffi-compat</code>)</strong>: Added a CI gate that derives layout from the header with a C probe and enforces ABI 1 rules against the frozen baseline.</li>
+          <li class="change-item"><strong>Forward-Compatibility Probe (<code>examples/ffi-c/compat_probe.c</code>)</strong>: Added old-header/new-library conformance verification program across release tags.</li>
+          <li class="change-item"><strong>Wider ABI CI Matrix</strong>: Expanded FFI conformance testing to Clang on Linux, and stability gates across Linux, macOS, and Windows.</li>
+        </ul>
+      </div>
+
+      <div class="change-section" data-category="fixed">
+        <span class="section-badge fixed">Fixed</span>
+        <ul class="change-list">
+          <li class="change-item"><strong>PowerShell Execution Policy in Windows Installer (<code>install.ps1</code>)</strong>: Fixed native messaging host registration failure on Windows machines with Restricted PowerShell execution policies by invoking <code>install-native-host.ps1</code> with <code>-ExecutionPolicy Bypass</code>.</li>
+          <li class="change-item"><strong>MSVC Guard Index Cast &amp; MSYS2 Legacy Header Checkout</strong>: Fixed unsigned pointer cast in compatibility probe for MSVC and resolved legacy release header checkouts under MSYS2 environments.</li>
+        </ul>
+      </div>
+
+      <div class="change-section" data-category="changed">
+        <span class="section-badge changed">Changed &amp; Refactored</span>
+        <ul class="change-list">
+          <li class="change-item"><strong><code>libhydra</code> as a First-Class Product</strong>: Documentation now draws an explicit boundary between <code>hydra</code> (GPL application) and <code>libhydra</code> (permissively licensed embeddable engine with independent compatibility promises).</li>
+        </ul>
+      </div>
+    </article>
+
+    <!-- Version 0.3.6 -->
+    <article class="release-card" id="v0.3.6" data-version="0.3.6">
+      <div class="release-header">
+        <div class="release-title-group">
+          <h2 class="release-version">v0.3.6</h2>
+          <span class="release-date">2026-08-22</span>
+        </div>
+        <div class="release-actions">
+          <a class="release-link" href="https://github.com/ja7ad/hydra/releases/tag/v0.3.6" target="_blank" rel="noopener">
+            View Release on GitHub
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </a>
+        </div>
+      </div>
+
+      <div class="change-section" data-category="added">
+        <span class="section-badge added">Added</span>
+        <ul class="change-list">
+          <li class="change-item"><strong><code>hydra compat-link</code> CLI Subcommand (<code>hydra-cli</code>)</strong>: Added dedicated subcommand to plan, verify, and install <code>wget</code> and <code>curl</code> dialect symlinks/shims into <code>$PATH</code> or custom directories with shadowing checks.</li>
+          <li class="change-item"><strong>macOS Application Bundle In-Place Updates (<code>hydra-updater</code> / <code>hydra-gui</code>)</strong>: Added full updater support for macOS <code>.app</code> bundles (<code>Hydra Download Manager.app</code>), re-stamping bundle versions and applying ad-hoc signatures.</li>
+          <li class="change-item"><strong>Elevated Self-Updates (<code>hydra-updater</code> / <code>hydra-gui</code>)</strong>: Added native authentication prompts (<code>osascript</code> on macOS, <code>pkexec</code>/<code>sudo</code> on Linux) for updating root-owned system installations in-place.</li>
+          <li class="change-item"><strong>Windows Apps &amp; Features Integration (<code>install.ps1</code> / <code>uninstall.ps1</code>)</strong>: Registered Hydra in Windows <i>Installed apps / Apps &amp; features</i> with display icons, publisher info, and direct uninstaller links.</li>
+          <li class="change-item"><strong>Desktop &amp; Start Menu Shortcuts (<code>install.ps1</code>)</strong>: Added Start Menu and optional Desktop (<code>-Desktop</code>) shortcut generation with embedded high-res icons.</li>
+          <li class="change-item"><strong>Offline Windows Uninstaller Packaging</strong>: Bundled <code>uninstall.ps1</code> into Windows release archives for complete offline uninstallation of files, shortcuts, PATH entries, and registry items.</li>
+        </ul>
+      </div>
+
+      <div class="change-section" data-category="fixed">
+        <span class="section-badge fixed">Fixed</span>
+        <ul class="change-list">
+          <li class="change-item"><strong>Immediate Transport Failure Range Reclaim (<code>hya-net</code> / <code>hya-core</code>)</strong>: Fixed long stalls on closed pooled connections or refused sockets by immediately reclaiming pending byte ranges.</li>
+          <li class="change-item"><strong>Stale In-Flight Range Discard (<code>hya-core</code>)</strong>: Added request start timestamping to prevent discarded or superseded chunks from being credited after a stall.</li>
+          <li class="change-item"><strong>Repeated Boolean Flags in CLI Dialects (<code>hydra-cli</code>)</strong>: Fixed dialect canonicalizer rejecting repeated flags like <code>curl -s -sS</code> or <code>wget -q -q</code>.</li>
+          <li class="change-item"><strong>Sudo User Directory Resolution (<code>install.sh</code> / <code>uninstall.sh</code>)</strong>: Resolved <code>$SUDO_USER</code> when executed via <code>sudo</code> to properly place desktop icons and native messaging manifests in the user's home directory.</li>
+          <li class="change-item"><strong>macOS Application Unregistration &amp; Graceful Quit</strong>: Added Launch Services unregistration (<code>lsregister -u</code>) and graceful AppleScript quit messaging before removing the bundle.</li>
+          <li class="change-item"><strong>Windows Process Locking During Upgrades</strong>: Added graceful window close requests and process termination for running instances before file replacement.</li>
+        </ul>
+      </div>
+
+      <div class="change-section" data-category="changed">
+        <span class="section-badge changed">Changed &amp; Refactored</span>
+        <ul class="change-list">
+          <li class="change-item"><strong>FFI Metric Definition Clarity</strong>: Clarified <code>stall_count</code> in <code>hydra_progress_t</code> and <code>hydra_metrics_t</code> to account for range reclaims from both timeouts and connection failures.</li>
+          <li class="change-item"><strong>Update Dialog Elevation Guidance (<code>hydra-gui</code>)</strong>: Added notices in the update dialog when an update will prompt for administrator privileges across 10 supported languages.</li>
+        </ul>
+      </div>
+    </article>
+
+    <!-- Version 0.3.5 -->
+    <article class="release-card" id="v0.3.5" data-version="0.3.5">
+      <div class="release-header">
+        <div class="release-title-group">
+          <h2 class="release-version">v0.3.5</h2>
+          <span class="release-date">2026-08-21</span>
+        </div>
+        <div class="release-actions">
+          <a class="release-link" href="https://github.com/ja7ad/hydra/releases/tag/v0.3.5" target="_blank" rel="noopener">
+            View Release on GitHub
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </a>
+        </div>
+      </div>
+
+      <div class="change-section" data-category="added">
+        <span class="section-badge added">Added</span>
+        <ul class="change-list">
+          <li class="change-item"><strong>C/C++ Foreign Function Interface (<code>libhydra</code> / <code>hydra-ffi</code>)</strong>: Added stable C ABI bindings and header (<code>include/hydra.h</code>) to embed Hydra's engine in C, C++, Python, Swift, Go, etc.</li>
+          <li class="change-item"><strong>Self-Update Engine &amp; CLI Command (<code>hydra-updater</code> / <code>hydra-cli</code>)</strong>: Added <code>hydra update</code> command with automatic GitHub release discovery and direct asset downloads.</li>
+          <li class="change-item"><strong>GUI In-App Updater (<code>hydra-gui</code>)</strong>: Added automated update checking on launch, interactive update modal dialog with rendered markdown notes, and single-click restart finisher.</li>
+          <li class="change-item"><strong>Periodic Download Quotas &amp; Rollover (<code>hydra-gui</code>)</strong>: Added configurable data usage limits over rolling periods (hourly, daily, weekly, monthly) with visual progress gauges.</li>
+          <li class="change-item"><strong>Homebrew Formula Support</strong>: Added official Homebrew tap distribution for macOS and Linux CLI installations (<code>brew install ja7ad/tap/hydra</code>).</li>
+          <li class="change-item"><strong>Multi-language Localization</strong>: Added full localization across 10 locales (<code>ar</code>, <code>en</code>, <code>es</code>, <code>fa</code>, <code>fr</code>, <code>ja</code>, <code>ko</code>, <code>nl</code>, <code>ru</code>, <code>zh</code>).</li>
+        </ul>
+      </div>
+
+      <div class="change-section" data-category="fixed">
+        <span class="section-badge fixed">Fixed</span>
+        <ul class="change-list">
+          <li class="change-item"><strong>Dynamic Live Speed Limiter</strong>: Fixed rate limit adjustments so speed throttling takes effect immediately mid-flight without connection teardown.</li>
+          <li class="change-item"><strong>Paired Aggregate &amp; Per-Job Rate Limiting</strong>: Enforced both global engine bandwidth ceilings and individual download caps simultaneously.</li>
+          <li class="change-item"><strong>FTP Download Speed Limiting</strong>: Integrated <code>Pace</code> rate limiting into <code>FtpFetcher</code> for unshaped FTP transfers.</li>
+          <li class="change-item"><strong>Linux Application ID &amp; Taskbar Icon</strong>: Fixed window icon grouping on GNOME/KDE/Wayland desktops by registering <code>dev.ja7ad.hydra</code> AppID.</li>
+        </ul>
+      </div>
+    </article>
+
+    <!-- Version 0.2.3 -->
+    <article class="release-card" id="v0.2.3" data-version="0.2.3">
+      <div class="release-header">
+        <div class="release-title-group">
+          <h2 class="release-version">v0.2.3</h2>
+          <span class="release-date">2026-08-19</span>
+        </div>
+        <div class="release-actions">
+          <a class="release-link" href="https://github.com/ja7ad/hydra/releases/tag/v0.2.3" target="_blank" rel="noopener">
+            View Release on GitHub
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </a>
+        </div>
+      </div>
+
+      <div class="change-section" data-category="added">
+        <span class="section-badge added">Added</span>
+        <ul class="change-list">
+          <li class="change-item"><strong>Baseline Public Release</strong>: Core adaptive concurrency retrieval engine, segmented HTTP/HTTPS/FTP download engine, terminal TUI queue manager, native desktop GUI, and browser extension integrations for Chrome, Firefox, Edge, and Safari.</li>
+        </ul>
+      </div>
+    </article>
+
+    <div class="no-results" id="no-results">
+      <h3>No matching changes found</h3>
+      <p>Try adjusting your search query or type filter.</p>
+    </div>
+  </main>
+</div>
+
+<footer>
+  <div class="wrap foot">
+    <a class="foot-brand" href="index.html">
+      <img src="logo.png" alt="" width="24" height="24">
+      HYDRA
+    </a>
+    <p>GPL-3.0-or-later (CLI) with MIT / Apache-2.0 core libraries. See <a href="https://github.com/ja7ad/hydra/blob/main/LICENSING.md">LICENSING.md</a>. · <a href="privacy.html">Privacy Policy</a></p>
+    <div class="foot-social">
+      <a href="https://github.com/ja7ad/hydra" aria-label="Hydra on GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+      </a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // Category Filtering
+  (() => {
+    const filterChips = document.querySelectorAll(".filter-chip");
+    const cards = document.querySelectorAll(".release-card");
+    const noResults = document.getElementById("no-results");
+
+    filterChips.forEach(chip => {
+      chip.addEventListener("click", () => {
+        filterChips.forEach(c => c.classList.remove("active"));
+        chip.classList.add("active");
+        const type = chip.dataset.type;
+        let visibleCount = 0;
+
+        cards.forEach(card => {
+          const sections = card.querySelectorAll(".change-section");
+          let hasVisibleSection = false;
+
+          sections.forEach(s => {
+            if (type === "all" || s.dataset.category === type) {
+              s.style.display = "";
+              hasVisibleSection = true;
+            } else {
+              s.style.display = "none";
+            }
+          });
+
+          if (hasVisibleSection) {
+            card.style.display = "";
+            visibleCount++;
+          } else {
+            card.style.display = "none";
+          }
+        });
+
+        if (noResults) {
+          noResults.style.display = visibleCount === 0 ? "block" : "none";
+        }
+      });
+    });
+  })();
+
+  // Optional: Dynamic Markdown fetch if served over HTTP/HTTPS
+  (async () => {
+    try {
+      const res = await fetch("../CHANGELOG.md");
+      if (!res.ok) return;
+      const text = await res.text();
+    } catch (_) { }
+  })();
+</script>
+
+</body>
+</html>

@@ -184,6 +184,17 @@
   .cell p { margin-top: 8px; font-size: 14.5px; color: var(--text-dim); line-height: 1.55; }
 
   .gui { background: var(--bg-raised); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .gui-screenshot-wrap {
+    margin-bottom: 48px; border-radius: var(--radius);
+    border: 1px solid var(--line-strong); background: #0b1118;
+    overflow: hidden; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+  }
+  .gui-screenshot {
+    width: 100%; height: auto; display: block;
+    transition: transform 0.3s ease;
+  }
+  .gui-screenshot-wrap:hover .gui-screenshot { transform: scale(1.008); }
+
   .gui-grid {
     display: grid; grid-template-columns: 1fr 1fr; gap: 14px 40px;
   }
@@ -228,31 +239,114 @@
   .term .c-accent { color: var(--accent); }
   .term .c-dim { color: var(--text-faint); }
 
+  /* Download Section - VS Code Style Redesign */
   .dl-card {
-    border: 1px solid var(--line-strong); border-radius: 20px;
+    border: 1px solid var(--line-strong); border-radius: 24px;
     background:
-      radial-gradient(760px 380px at 50% -30%, rgba(37, 150, 232, 0.16), transparent 70%),
+      radial-gradient(900px 450px at 50% -20%, rgba(37, 150, 232, 0.14), transparent 70%),
       var(--bg-raised);
     padding: 64px 32px; text-align: center;
   }
-  .dl-card h2 { font-size: clamp(28px, 3.2vw, 40px); letter-spacing: -0.025em; font-weight: 700; }
-  .dl-card > p { margin: 14px auto 0; color: var(--text-dim); max-width: 54ch; }
-  .dl-ctas { margin-top: 32px; display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
-
-  .platforms {
-    margin: 40px auto 0; max-width: 760px;
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
-    text-align: left;
+  .dl-card h2 { font-size: clamp(32px, 3.6vw, 44px); letter-spacing: -0.03em; font-weight: 700; }
+  .dl-card > p.dl-subtitle { margin: 12px auto 0; color: var(--text-dim); max-width: 58ch; font-size: 17px; }
+  .version-tag-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: 14px; padding: 4px 14px; border-radius: 999px;
+    background: rgba(45, 212, 212, 0.1); border: 1px solid rgba(45, 212, 212, 0.25);
+    font-family: var(--font-mono); font-size: 13px; color: var(--accent);
   }
-  .platform {
-    border: 1px solid var(--line); border-radius: 12px;
-    background: rgba(10, 14, 19, 0.5); padding: 16px 18px;
-  }
-  .platform h3 { font-size: 14.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
-  .platform h3 svg { width: 16px; height: 16px; stroke: var(--accent); flex: none; }
-  .platform p { font-size: 13px; color: var(--text-dim); margin-top: 4px; line-height: 1.5; }
 
-  .install-tabs { max-width: 720px; margin: 40px auto 0; text-align: left; }
+  .vscode-dl-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px;
+    margin-top: 40px; text-align: left;
+  }
+  .vscode-dl-card {
+    border: 1px solid var(--line); border-radius: 16px;
+    background: rgba(10, 14, 19, 0.6); padding: 32px 24px 28px;
+    display: flex; flex-direction: column; align-items: center;
+    position: relative; transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+  }
+  .vscode-dl-card:hover {
+    border-color: var(--line-strong);
+    background: rgba(15, 21, 29, 0.85);
+  }
+  .vscode-dl-card.highlighted {
+    border-color: rgba(45, 212, 212, 0.5);
+    box-shadow: 0 0 35px rgba(45, 212, 212, 0.14);
+    background: rgba(15, 25, 36, 0.85);
+  }
+  .os-badge {
+    display: none; position: absolute; top: -13px;
+    background: var(--grad); color: var(--accent-ink);
+    font-size: 11px; font-weight: 700; padding: 3px 12px;
+    border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .vscode-dl-card.highlighted .os-badge { display: block; }
+
+  .platform-icon {
+    width: 68px; height: 68px; display: flex; align-items: center; justify-content: center;
+    margin-bottom: 22px; flex: none;
+  }
+  .platform-icon svg { width: 56px; height: 56px; }
+
+  .primary-dl-group { width: 100%; margin-bottom: 24px; }
+  .vscode-btn-primary {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    background: #007acc; color: #ffffff; width: 100%;
+    padding: 13px 16px; border-radius: 10px; font-weight: 600;
+    text-decoration: none; transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.2s ease;
+  }
+  .vscode-btn-primary:hover {
+    background: #0098ff; box-shadow: 0 6px 20px rgba(0, 122, 204, 0.4);
+    transform: translateY(-1px); color: #ffffff;
+  }
+  .vscode-btn-primary svg { width: 22px; height: 22px; flex: none; stroke: #ffffff; stroke-width: 2.2; }
+  .btn-text { text-align: left; }
+  .btn-title { font-size: 16.5px; font-weight: 700; display: block; line-height: 1.15; }
+  .btn-sub { font-size: 11.5px; opacity: 0.88; font-weight: 400; display: block; margin-top: 1px; }
+
+  .dual-btn { display: flex; gap: 8px; }
+  .dual-btn .vscode-btn-primary { padding: 11px 10px; gap: 6px; }
+  .dual-btn .btn-title { font-size: 14.5px; }
+
+  .dl-matrix {
+    width: 100%; display: flex; flex-direction: column; gap: 11px;
+    margin-top: 4px; border-top: 1px solid var(--line); padding-top: 18px;
+  }
+  .matrix-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .row-label { font-size: 13.5px; color: var(--text-dim); font-weight: 500; }
+  .pill-group { display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+  .pill {
+    display: inline-flex; align-items: center;
+    background: #007acc; color: #ffffff;
+    font-size: 12px; font-weight: 600; padding: 3px 8px; border-radius: 4px;
+    text-decoration: none; transition: background 0.15s ease, transform 0.12s ease;
+    line-height: 1.2;
+  }
+  .pill:hover {
+    background: #0098ff; transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0, 152, 255, 0.35); color: #ffffff;
+  }
+
+  .terminal-opt-wrap { margin-top: 36px; text-align: center; }
+  .terminal-opt-btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: rgba(148, 197, 222, 0.05); border: 1px solid var(--line);
+    color: var(--text-dim); padding: 9px 18px; border-radius: 999px;
+    font-size: 14px; font-weight: 500; cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .terminal-opt-btn:hover { color: var(--text); border-color: var(--line-strong); background: rgba(148, 197, 222, 0.1); }
+  .terminal-opt-btn svg { width: 16px; height: 16px; transition: transform 0.2s ease; }
+  .terminal-opt-btn.open svg { transform: rotate(180deg); }
+
+  .install-tabs {
+    max-width: 720px; margin: 20px auto 0; text-align: left;
+    transition: opacity 0.25s ease, transform 0.25s ease;
+  }
+  .install-tabs.hidden { display: none; }
   .tab-row { display: flex; gap: 8px; margin-bottom: 12px; }
   .tab {
     font-family: var(--font-sans); font-size: 13.5px; font-weight: 600;
@@ -287,7 +381,7 @@
   }
   .copy:hover { color: var(--accent); border-color: rgba(45, 212, 212, 0.35); }
   .copy svg { width: 15px; height: 15px; }
-  .dl-note { margin-top: 18px; font-size: 13.5px; color: var(--text-faint); text-align: center; }
+  .dl-note { margin-top: 24px; font-size: 13.5px; color: var(--text-faint); text-align: center; }
   .dl-note a { color: var(--text-dim); border-bottom: 1px solid var(--line-strong); }
   .dl-note a:hover { color: var(--accent); }
 
@@ -314,7 +408,7 @@
     .cell-wide { grid-column: auto; }
     .gui-grid { grid-template-columns: 1fr; gap: 8px; }
     .cli-grid { grid-template-columns: 1fr; gap: 40px; }
-    .platforms { grid-template-columns: 1fr; }
+    .vscode-dl-grid { grid-template-columns: 1fr; }
     .nav-links { gap: 18px; }
     .nav-links .nav-hide-sm { display: none; }
     .dl-card { padding: 48px 20px; }
@@ -336,6 +430,7 @@
       <a href="#app" class="nav-hide-sm">Desktop App</a>
       <a href="#cli" class="nav-hide-sm">CLI</a>
       <a href="#download">Download</a>
+      <a href="changelog.html" class="nav-hide-sm">Changelog</a>
       <a class="nav-gh" href="https://github.com/ja7ad/hydra" aria-label="Hydra on GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
       </a>
@@ -410,6 +505,9 @@
     <div class="sec-head">
       <h2>A full download manager on the desktop</h2>
       <p>The Hydra app wraps the engine in a native, localized interface for Windows, macOS, and Linux, with the workflow you expect from a classic download manager.</p>
+    </div>
+    <div class="gui-screenshot-wrap">
+      <img src="img/screenshot.jpg" alt="Hydra Desktop Download Manager Screenshot" class="gui-screenshot" loading="lazy">
     </div>
     <div class="gui-grid">
       <div class="gui-item">
@@ -524,54 +622,212 @@
 <section id="download">
   <div class="wrap">
     <div class="dl-card">
-      <h2>Get Hydra</h2>
-      <p>One command installs the CLI, the desktop app, and the browser integration for your OS and architecture.</p>
-      <div class="dl-ctas">
-        <a class="btn btn-primary" href="https://github.com/ja7ad/hydra/releases/latest">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
-          Download
-        </a>
+      <h2>Download Hydra</h2>
+      <p class="dl-subtitle">Free, open source, and high-performance. CLI, TUI, desktop app, and browser integration included.</p>
+      <div class="version-tag-pill" id="latest-ver-badge">Latest release: <span id="ver-tag">v0.3.6</span></div>
+
+      <div class="vscode-dl-grid">
+        <!-- Windows Card -->
+        <div class="vscode-dl-card" id="card-win">
+          <div class="os-badge">Recommended for Windows</div>
+          <div class="platform-icon">
+            <svg viewBox="0 0 88 88" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M0 12.4L35.6 7.5V41.3H0V12.4ZM0 45.7H35.6V79.5L0 74.6V45.7ZM39.6 6.9L88 0V41.3H39.6V6.9ZM39.6 45.7H88V87L39.6 80.1V45.7Z" fill="#00ADEF"/>
+            </svg>
+          </div>
+          <div class="primary-dl-group">
+            <a class="vscode-btn-primary" id="btn-primary-win" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-windows-x64-setup.exe">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
+              <div class="btn-text">
+                <span class="btn-title">Windows</span>
+                <span class="btn-sub">Windows 10, 11</span>
+              </div>
+            </a>
+          </div>
+          <div class="dl-matrix">
+            <div class="matrix-row">
+              <span class="row-label">User Installer</span>
+              <div class="pill-group">
+                <a class="pill" data-asset="win-x64-setup" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-windows-x64-setup.exe">x64</a>
+                <a class="pill" data-asset="win-arm64-setup" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-windows-arm64-setup.exe">Arm64</a>
+              </div>
+            </div>
+            <div class="matrix-row">
+              <span class="row-label">System Installer</span>
+              <div class="pill-group">
+                <a class="pill" data-asset="win-x64-setup" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-windows-x64-setup.exe">x64</a>
+                <a class="pill" data-asset="win-arm64-setup" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-windows-arm64-setup.exe">Arm64</a>
+              </div>
+            </div>
+            <div class="matrix-row">
+              <span class="row-label">.zip</span>
+              <div class="pill-group">
+                <a class="pill" data-asset="win-x64-zip" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-windows-amd64.zip">x64</a>
+                <a class="pill" data-asset="win-arm64-zip" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-windows-arm64.zip">Arm64</a>
+              </div>
+            </div>
+            <div class="matrix-row">
+              <span class="row-label">CLI</span>
+              <div class="pill-group">
+                <a class="pill" data-asset="win-cli-x64" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-cli-0.3.6-windows-amd64.zip">x64</a>
+                <a class="pill" data-asset="win-cli-arm64" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-cli-0.3.6-windows-arm64.zip">Arm64</a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Linux Card -->
+        <div class="vscode-dl-card" id="card-linux">
+          <div class="os-badge">Recommended for Linux</div>
+          <div class="platform-icon">
+            <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M50 6C34 6 22 19 22 36C22 47 18 57 12 67C8 73.5 5 78 5 83C5 92 17 96 30 96C34 96 42 94 50 94C58 94 66 96 70 96C83 96 95 92 95 83C95 78 92 73.5 88 67C82 57 78 47 78 36C78 19 66 6 50 6Z" fill="#1E293B"/>
+              <path d="M50 38C35 38 25 52 25 70C25 83 35 88 50 88C65 88 75 83 75 70C75 52 65 38 50 38Z" fill="#F8FAFC"/>
+              <ellipse cx="43" cy="25" rx="5" ry="7" fill="#FFFFFF"/>
+              <ellipse cx="57" cy="25" rx="5" ry="7" fill="#FFFFFF"/>
+              <ellipse cx="44.5" cy="26" rx="2.5" ry="3.5" fill="#0F172A"/>
+              <ellipse cx="55.5" cy="26" rx="2.5" ry="3.5" fill="#0F172A"/>
+              <circle cx="45.5" cy="24.5" r="1" fill="#FFFFFF"/>
+              <circle cx="56.5" cy="24.5" r="1" fill="#FFFFFF"/>
+              <path d="M40 33C40 33 45 41 50 41C55 41 60 33 60 33C60 33 55 44 50 44C45 44 40 33 40 33Z" fill="#F59E0B"/>
+              <path d="M42 34C42 34 46 39 50 39C54 39 58 34 58 34C58 34 54 42 50 42C46 42 42 34 42 34Z" fill="#D97706"/>
+              <path d="M26 86C20 86 14 91 18 95C22 98 34 97 38 92C40 89.5 32 86 26 86Z" fill="#F59E0B"/>
+              <path d="M74 86C80 86 88 89.5 90 92C94 97 82 98 78 95C74 91 68 86 74 86Z" fill="#F59E0B"/>
+            </svg>
+          </div>
+          <div class="primary-dl-group dual-btn">
+            <a class="vscode-btn-primary" id="btn-primary-deb" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-download-manager_0.3.6_amd64.deb">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
+              <div class="btn-text">
+                <span class="btn-title">.deb</span>
+                <span class="btn-sub">Debian, Ubuntu</span>
+              </div>
+            </a>
+            <a class="vscode-btn-primary" id="btn-primary-rpm" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-download-manager-0.3.6-1.x86_64.rpm">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
+              <div class="btn-text">
+                <span class="btn-title">.rpm</span>
+                <span class="btn-sub">Red Hat, Fedora, SUSE</span>
+              </div>
+            </a>
+          </div>
+          <div class="dl-matrix">
+            <div class="matrix-row">
+              <span class="row-label">.deb</span>
+              <div class="pill-group">
+                <a class="pill" data-asset="linux-x64-deb" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-download-manager_0.3.6_amd64.deb">x64</a>
+                <a class="pill" data-asset="linux-arm64-deb" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-download-manager_0.3.6_arm64.deb">Arm64</a>
+              </div>
+            </div>
+            <div class="matrix-row">
+              <span class="row-label">.rpm</span>
+              <div class="pill-group">
+                <a class="pill" data-asset="linux-x64-rpm" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-download-manager-0.3.6-1.x86_64.rpm">x64</a>
+                <a class="pill" data-asset="linux-arm64-rpm" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-download-manager-0.3.6-1.aarch64.rpm">Arm64</a>
+              </div>
+            </div>
+            <div class="matrix-row">
+              <span class="row-label">.tar.gz</span>
+              <div class="pill-group">
+                <a class="pill" data-asset="linux-x64-tar" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-linux-amd64.tar.gz">x64</a>
+                <a class="pill" data-asset="linux-arm64-tar" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-linux-arm64.tar.gz">Arm64</a>
+              </div>
+            </div>
+            <div class="matrix-row">
+              <span class="row-label">CLI</span>
+              <div class="pill-group">
+                <a class="pill" data-asset="linux-cli-x64" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-cli-0.3.6-linux-amd64.tar.gz">x64</a>
+                <a class="pill" data-asset="linux-cli-arm64" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-cli-0.3.6-linux-arm64.tar.gz">Arm64</a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- macOS Card -->
+        <div class="vscode-dl-card" id="card-mac">
+          <div class="os-badge">Recommended for macOS</div>
+          <div class="platform-icon">
+            <svg viewBox="0 0 24 24" fill="#FFFFFF" xmlns="http://www.w3.org/2000/svg">
+              <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.97 6.84c.67-.82 1.13-1.96.99-3.1-.98.04-2.17.65-2.87 1.47-.63.73-1.18 1.89-1.03 3.01 1.1.09 2.23-.55 2.91-1.38"/>
+            </svg>
+          </div>
+          <div class="primary-dl-group">
+            <a class="vscode-btn-primary" id="btn-primary-mac" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/Hydra-0.3.6-arm64.dmg">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
+              <div class="btn-text">
+                <span class="btn-title">Mac</span>
+                <span class="btn-sub">macOS 11.0+</span>
+              </div>
+            </a>
+          </div>
+          <div class="dl-matrix">
+            <div class="matrix-row">
+              <span class="row-label">.dmg</span>
+              <div class="pill-group">
+                <a class="pill" data-asset="mac-x64-dmg" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/Hydra-0.3.6-x86_64.dmg">Intel chip</a>
+                <a class="pill" data-asset="mac-arm64-dmg" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/Hydra-0.3.6-arm64.dmg">Apple silicon</a>
+              </div>
+            </div>
+            <div class="matrix-row">
+              <span class="row-label">.pkg</span>
+              <div class="pill-group">
+                <a class="pill" data-asset="mac-x64-pkg" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/Hydra-0.3.6-x86_64.pkg">Intel chip</a>
+                <a class="pill" data-asset="mac-arm64-pkg" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/Hydra-0.3.6-arm64.pkg">Apple silicon</a>
+              </div>
+            </div>
+            <div class="matrix-row">
+              <span class="row-label">.tar.gz</span>
+              <div class="pill-group">
+                <a class="pill" data-asset="mac-x64-tar" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-macos-amd64.tar.gz">Intel chip</a>
+                <a class="pill" data-asset="mac-arm64-tar" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-macos-arm64.tar.gz">Apple silicon</a>
+              </div>
+            </div>
+            <div class="matrix-row">
+              <span class="row-label">CLI</span>
+              <div class="pill-group">
+                <a class="pill" data-asset="mac-cli-x64" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-cli-0.3.6-macos-amd64.tar.gz">Intel chip</a>
+                <a class="pill" data-asset="mac-cli-arm64" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-cli-0.3.6-macos-arm64.tar.gz">Apple silicon</a>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="platforms">
-        <div class="platform">
-          <h3><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>Windows</h3>
-          <p>Native x64 and ARM64 builds. Windows on ARM runs Hydra natively, no emulation layer.</p>
-        </div>
-        <div class="platform">
-          <h3><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>macOS</h3>
-          <p>Apple Silicon and Intel, with a bundled app, Dock and menu-bar integration, and Safari support.</p>
-        </div>
-        <div class="platform">
-          <h3><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>Linux</h3>
-          <p>amd64 and arm64 archives, plus deb and rpm packaging with tray and autostart support.</p>
-        </div>
-      </div>
-      <div class="install-tabs">
-        <div class="tab-row" role="tablist" aria-label="Install command by platform">
-          <button class="tab active" role="tab" aria-selected="true" data-target="cmd-unix">macOS / Linux</button>
-          <button class="tab" role="tab" aria-selected="false" data-target="cmd-brew">Homebrew</button>
-          <button class="tab" role="tab" aria-selected="false" data-target="cmd-win">Windows</button>
-        </div>
-        <div class="cmd active" id="cmd-unix">
-          <code><b>curl</b> -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | <b>bash</b></code>
-          <button class="copy" aria-label="Copy install command" data-copy="curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | bash">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
-          </button>
-        </div>
-        <div class="cmd" id="cmd-brew">
-          <code><b>brew</b> install ja7ad/tap/hydra</code>
-          <button class="copy" aria-label="Copy install command" data-copy="brew install ja7ad/tap/hydra">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
-          </button>
-        </div>
-        <div class="cmd" id="cmd-win">
-          <code><b>irm</b> https://raw.githubusercontent.com/ja7ad/hydra/main/install.ps1 | <b>iex</b></code>
-          <button class="copy" aria-label="Copy install command" data-copy="irm https://raw.githubusercontent.com/ja7ad/hydra/main/install.ps1 | iex">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
-          </button>
+
+      <!-- Optional Install via Terminal Section -->
+      <div class="terminal-opt-wrap">
+        <button class="terminal-opt-btn" id="terminal-dl-toggle" aria-expanded="false">
+          <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          <span>Install via Terminal / Package Managers (Optional)</span>
+        </button>
+
+        <div class="install-tabs hidden" id="install-tabs-box">
+          <div class="tab-row" role="tablist" aria-label="Install command by platform">
+            <button class="tab active" role="tab" aria-selected="true" data-target="cmd-unix">macOS / Linux</button>
+            <button class="tab" role="tab" aria-selected="false" data-target="cmd-brew">Homebrew</button>
+            <button class="tab" role="tab" aria-selected="false" data-target="cmd-win">Windows</button>
+          </div>
+          <div class="cmd active" id="cmd-unix">
+            <code><b>curl</b> -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | <b>bash</b></code>
+            <button class="copy" aria-label="Copy install command" data-copy="curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | bash">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
+            </button>
+          </div>
+          <div class="cmd" id="cmd-brew">
+            <code><b>brew</b> install ja7ad/tap/hydra</code>
+            <button class="copy" aria-label="Copy install command" data-copy="brew install ja7ad/tap/hydra">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
+            </button>
+          </div>
+          <div class="cmd" id="cmd-win">
+            <code><b>irm</b> https://raw.githubusercontent.com/ja7ad/hydra/main/install.ps1 | <b>iex</b></code>
+            <button class="copy" aria-label="Copy install command" data-copy="irm https://raw.githubusercontent.com/ja7ad/hydra/main/install.ps1 | iex">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
+            </button>
+          </div>
         </div>
       </div>
-      <p class="dl-note">Prebuilt archives are on the <a href="https://github.com/ja7ad/hydra/releases">releases page</a>, or build from source with Rust 1.80+.</p>
+
+      <p class="dl-note">Looking for source code or earlier releases? View all assets on the <a href="https://github.com/ja7ad/hydra/releases">GitHub Releases page</a>.</p>
     </div>
   </div>
 </section>
@@ -582,7 +838,7 @@
       <img src="logo.png" alt="" width="24" height="24">
       HYDRA
     </a>
-    <p>GPL-3.0-or-later (CLI) with MIT / Apache-2.0 core libraries. See <a href="https://github.com/ja7ad/hydra/blob/main/LICENSING.md">LICENSING.md</a>. · <a href="privacy.html">Privacy Policy</a></p>
+    <p>GPL-3.0-or-later (CLI) with MIT / Apache-2.0 core libraries. See <a href="https://github.com/ja7ad/hydra/blob/main/LICENSING.md">LICENSING.md</a>. · <a href="changelog.html">Changelog</a> · <a href="privacy.html">Privacy Policy</a></p>
     <div class="foot-social">
       <a href="https://github.com/ja7ad/hydra" aria-label="Hydra on GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
@@ -829,6 +1085,108 @@
       } catch (_) {  }
     });
   });
+
+  // OS Auto-Detection & Highlighting
+  (() => {
+    const ua = navigator.userAgent || "";
+    const platform = navigator.platform || "";
+    let os = "linux";
+    if (/mac/i.test(platform) || /macintosh|mac os x/i.test(ua)) os = "mac";
+    else if (/win/i.test(platform) || /windows/i.test(ua)) os = "win";
+
+    const card = document.getElementById(`card-${os}`);
+    if (card) card.classList.add("highlighted");
+  })();
+
+  // Optional Terminal Install Command Toggle
+  (() => {
+    const btn = document.getElementById("terminal-dl-toggle");
+    const box = document.getElementById("install-tabs-box");
+    if (btn && box) {
+      btn.addEventListener("click", () => {
+        const isHidden = box.classList.contains("hidden");
+        if (isHidden) {
+          box.classList.remove("hidden");
+          btn.classList.add("open");
+          btn.setAttribute("aria-expanded", "true");
+        } else {
+          box.classList.add("hidden");
+          btn.classList.remove("open");
+          btn.setAttribute("aria-expanded", "false");
+        }
+      });
+    }
+  })();
+
+  // Live Release & Download Asset Resolver from GitHub API
+  (async () => {
+    try {
+      const res = await fetch("https://api.github.com/repos/ja7ad/hydra/releases/latest");
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || !data.tag_name) return;
+
+      const verTag = data.tag_name;
+      const tagEl = document.getElementById("ver-tag");
+      if (tagEl) tagEl.textContent = verTag;
+
+      if (!Array.isArray(data.assets)) return;
+
+      const assetMap = {};
+      data.assets.forEach(a => {
+        const name = a.name.toLowerCase();
+        const url = a.browser_download_url;
+
+        // Windows
+        if (name.includes("windows-x64-setup.exe")) assetMap["win-x64-setup"] = url;
+        if (name.includes("windows-arm64-setup.exe")) assetMap["win-arm64-setup"] = url;
+        if (name.includes("windows-amd64.zip")) assetMap["win-x64-zip"] = url;
+        if (name.includes("windows-arm64.zip")) assetMap["win-arm64-zip"] = url;
+        if (name.includes("hydra-cli") && name.includes("windows-amd64")) assetMap["win-cli-x64"] = url;
+        if (name.includes("hydra-cli") && name.includes("windows-arm64")) assetMap["win-cli-arm64"] = url;
+
+        // Linux
+        if (name.endsWith("_amd64.deb")) assetMap["linux-x64-deb"] = url;
+        if (name.endsWith("_arm64.deb")) assetMap["linux-arm64-deb"] = url;
+        if (name.includes("x86_64.rpm")) assetMap["linux-x64-rpm"] = url;
+        if (name.includes("aarch64.rpm")) assetMap["linux-arm64-rpm"] = url;
+        if (name.includes("linux-amd64.tar.gz") && !name.includes("cli")) assetMap["linux-x64-tar"] = url;
+        if (name.includes("linux-arm64.tar.gz") && !name.includes("cli")) assetMap["linux-arm64-tar"] = url;
+        if (name.includes("hydra-cli") && name.includes("linux-amd64")) assetMap["linux-cli-x64"] = url;
+        if (name.includes("hydra-cli") && name.includes("linux-arm64")) assetMap["linux-cli-arm64"] = url;
+
+        // macOS
+        if (name.includes("x86_64.dmg")) assetMap["mac-x64-dmg"] = url;
+        if (name.includes("arm64.dmg")) assetMap["mac-arm64-dmg"] = url;
+        if (name.includes("x86_64.pkg")) assetMap["mac-x64-pkg"] = url;
+        if (name.includes("arm64.pkg")) assetMap["mac-arm64-pkg"] = url;
+        if (name.includes("macos-amd64.tar.gz") && !name.includes("cli")) assetMap["mac-x64-tar"] = url;
+        if (name.includes("macos-arm64.tar.gz") && !name.includes("cli")) assetMap["mac-arm64-tar"] = url;
+        if (name.includes("hydra-cli") && name.includes("macos-amd64")) assetMap["mac-cli-x64"] = url;
+        if (name.includes("hydra-cli") && name.includes("macos-arm64")) assetMap["mac-cli-arm64"] = url;
+      });
+
+      document.querySelectorAll("[data-asset]").forEach(pill => {
+        const key = pill.dataset.asset;
+        if (assetMap[key]) pill.href = assetMap[key];
+      });
+
+      const btnWin = document.getElementById("btn-primary-win");
+      if (btnWin && assetMap["win-x64-setup"]) btnWin.href = assetMap["win-x64-setup"];
+      
+      const btnDeb = document.getElementById("btn-primary-deb");
+      if (btnDeb && assetMap["linux-x64-deb"]) btnDeb.href = assetMap["linux-x64-deb"];
+      
+      const btnRpm = document.getElementById("btn-primary-rpm");
+      if (btnRpm && assetMap["linux-x64-rpm"]) btnRpm.href = assetMap["linux-x64-rpm"];
+
+      const btnMac = document.getElementById("btn-primary-mac");
+      if (btnMac && assetMap["mac-arm64-dmg"]) btnMac.href = assetMap["mac-arm64-dmg"];
+
+    } catch (e) {
+      console.warn("Release asset resolution notice:", e);
+    }
+  })();
 </script>
 
 </body>
