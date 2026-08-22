@@ -5,17 +5,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
-## [Unreleased]
+## [0.3.7] - 2026-08-22
 
 ### Added
 
+- **Browser Extension Bundling & Packaging (`scripts/build-extensions.sh`, packaging targets)**: Added a unified extension build system (`make extensions`) producing both packed (`.zip` for Chrome/Chromium, `.xpi` for Firefox) and unpacked directory trees with path-tailored `INSTALL.txt` guides. Bundled extensions across all packaging targets: Windows setup (`%LOCALAPPDATA%\Programs\Hydra\extensions`), macOS `.app` bundle (`Contents/Resources/extensions`), macOS `.pkg` (`/Library/Application Support/Hydra/extensions`), Linux `.deb`/`.rpm` (`/usr/share/hydra-download-manager/extensions`), and release archives (`<prefix>/share/hydra/extensions`).
+- **CRX Signing & Enterprise Policy Packaging**: Added Chromium `.crx` generation and signing (`--crx-key`, `HYDRA_CRX_KEY`, `--crx`) with pinned extension ID (`jpnonmbbkjdpeebdhkjoliklfhkdcomj`) for enterprise policy deployments (`ExtensionSettings` / `ExtensionInstallForcelist`).
+- **Rubber-Band Drag Selection (`hydra-gui`)**: Added interactive marquee drag selection to the download table, allowing users to click and drag across rows to select multiple downloads simultaneously, with accompanying theme and bounding-box styling.
 - **ABI Specification (`docs/ffi/ABI.md`)**: Added the canonical human-readable specification for the `libhydra` C ABI — FFI design principles, the formal ABI 1 stability policy (what is frozen, what may be appended, what forces ABI 2), the full ownership/encoding/error/threading contract, the event-queue rationale and its ordering and drop guarantees, and the compatibility-testing matrix. `include/hydra.h` now carries a concise summary and points at it.
 - **Frozen ABI Baseline (`crates/hydra-ffi/abi/abi-1.manifest`)**: Added a machine-checkable record of ABI 1 — every enumerator value, field offset and width, struct size and exported symbol.
 - **ABI Stability Gate (`scripts/ffi-abi-compat.sh`, `make ffi-compat`)**: Added a CI gate that derives the current layout from the header with a generated C probe and enforces the ABI 1 rules against the frozen baseline: fields may not move or change width, enumerators may not be renumbered, symbols may not disappear, and only the two size-prefixed configuration structs may grow. Additions the contract permits pass.
 - **Forward-Compatibility Probe (`examples/ffi-c/compat_probe.c`)**: Added an old-header/new-library conformance program. `scripts/ffi-c-example.sh` now builds it against `include/hydra.h` as published by *every* release tag and links each against the library from the current branch, with a guard wall after each caller-allocated struct so a byte written past an older header's extent is caught at test time.
 - **Wider ABI CI Matrix**: The FFI conformance job now also runs under Clang on Linux (in addition to GCC), and the stability gate runs on Linux, macOS and Windows.
 
-### Changed
+### Fixed
+
+- **PowerShell Execution Policy in Windows Installer (`install.ps1`)**: Fixed native messaging host registration failure on Windows machines with Restricted PowerShell execution policies by invoking `install-native-host.ps1` in its own PowerShell process with `-ExecutionPolicy Bypass` and non-fatal warning recovery.
+- **MSVC Guard Index Cast & MSYS2 Legacy Header Checkout (`scripts/ffi-c-example.sh` / `compat_probe.c`)**: Fixed unsigned pointer cast in compatibility probe for MSVC and resolved legacy release header checkouts when running under MSYS2 environments.
+
+### Changed & Refactored
 
 - **`libhydra` as a First-Class Product**: Documentation now draws an explicit line between `hydra` (the GPL application — CLI, GUI, host) and `libhydra` (the permissively licensed embeddable engine, with its own version, release archives and compatibility promise). Language bindings are documented as independent downstream projects that need only the published header and a release archive.
 
