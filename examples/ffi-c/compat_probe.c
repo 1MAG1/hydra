@@ -67,7 +67,9 @@ static int failures = 0;
 static int wall_intact(const unsigned char *base, size_t used, const char *what)
 {
     size_t i;
-    for (i = 0; i < GUARD; i++) {
+    /* (size_t)GUARD, not GUARD: MSVC at /W3 /WX rejects a size_t compared
+     * against a plain int, and this file is compiled by cl as well as cc. */
+    for (i = 0; i < (size_t)GUARD; i++) {
         if (base[used + i] != GUARD_BYTE) {
             fprintf(stderr,
                     "FAIL: the library wrote %zu byte(s) past the end of the "

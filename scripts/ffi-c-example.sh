@@ -582,27 +582,52 @@ legacy_root="$out/legacy"
 rm -rf "$legacy_root"
 mkdir -p "$legacy_root"
 
+# `cd` rather than `git -C "$root"`, and that is not a style choice. This
+# script runs with MSYS path conversion switched off - MSYS2_ARG_CONV_EXCL='*',
+# which is what stops a bash on Windows from mangling every MSVC flag it passes
+# to cl. The same switch means a POSIX path handed to git.exe is no longer
+# rewritten either, and Git for Windows resolves a leading `/` against its own
+# installation root: `git -C /d/a/hydra/hydra` goes looking inside the Git
+# installation and fails, silently taking the whole check with it. cd is a bash
+# builtin, so no argument crosses that boundary at all. The revision arguments
+# below are fine unconverted - `v0.3.6:include/hydra.h` is not a path and has
+# to reach git verbatim.
 legacy_tags=""
-if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
-    for tag in $(git -C "$root" tag --sort=version:refname); do
-        git -C "$root" cat-file -e "$tag:include/hydra.h" 2>/dev/null || continue
+legacy_all_tags=""
+legacy_git_ok=0
+legacy_pwd="$PWD"
+cd "$root"
+if git rev-parse --git-dir >/dev/null 2>&1; then
+    legacy_git_ok=1
+    legacy_all_tags="$(git tag --sort=version:refname)"
+    for tag in $legacy_all_tags; do
+        git cat-file -e "$tag:include/hydra.h" 2>/dev/null || continue
         mkdir -p "$legacy_root/$tag"
-        git -C "$root" show "$tag:include/hydra.h" > "$legacy_root/$tag/hydra.h"
+        git show "$tag:include/hydra.h" > "$legacy_root/$tag/hydra.h"
         legacy_tags="$legacy_tags $tag"
     done
 fi
+cd "$legacy_pwd"
 
 if [ -z "$legacy_tags" ]; then
-    # A shallow CI checkout has no tags, and a fresh clone of a fork may have
-    # none either. That is a missing input rather than a passing check, so CI
-    # sets HYDRA_REQUIRE_LEGACY_HEADERS=1 (with fetch-depth: 0) and this becomes
-    # an error there instead of a note.
+    # Say WHICH input was missing. The three causes need three different fixes,
+    # and a single "no published header found" sent somebody looking at the
+    # wrong one.
+    if [ "$legacy_git_ok" != "1" ]; then
+        legacy_why="git could not read a repository at $root"
+    elif [ -z "$legacy_all_tags" ]; then
+        legacy_why="this checkout has no tags (a shallow clone fetches none - check out with fetch-depth: 0)"
+    else
+        legacy_why="no tag in this checkout published an include/hydra.h"
+    fi
+    # A missing input is not a passing check, so CI sets
+    # HYDRA_REQUIRE_LEGACY_HEADERS=1 and this becomes an error there rather
+    # than a note.
     if [ "${HYDRA_REQUIRE_LEGACY_HEADERS:-0}" = "1" ]; then
-        echo "error: no published header found in git history - this checkout has" \
-             "no tags, so the old-header check could not run" >&2
+        echo "error: the old-header check could not run: $legacy_why" >&2
         exit 1
     fi
-    echo "    skipped: no tagged include/hydra.h in this checkout"
+    echo "    skipped: $legacy_why"
 else
     for tag in $legacy_tags; do
         echo "    $tag"
