@@ -660,7 +660,9 @@ jobs:
 
             # Import GPG private signing key
             echo "$LAUNCHPAD_GPG_KEY" | gpg --import --batch --yes
-            GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | grep '^sec' | head -1 | cut -d: -f5)
+            GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG --with-colons | awk -F: '/^sec:/ { print $5; exit }')
+            GPG_USER=$(gpg --list-secret-keys --with-colons | awk -F: '/^uid:/ { print $10; exit }')
+            [ -n "$GPG_USER" ] || GPG_USER="Hydra Maintainers <dev@hydra.app>"
 
             # Vendor dependencies for offline building in Launchpad builders
             cargo vendor vendor/
@@ -670,8 +672,13 @@ jobs:
 
             # Build source packages for Ubuntu 24.04 (noble) and 22.04 (jammy)
             for DISTRO in noble jammy; do
-              dch --create --package hydra -v "${VERSION}-1ppa1~${DISTRO}1" \
-                --distribution "$DISTRO" "Automated Launchpad PPA release for ${DISTRO}"
+              cat > debian/changelog <<EOF
+hydra (${VERSION}-1ppa1~${DISTRO}1) ${DISTRO}; urgency=medium
+
+  * Automated Launchpad PPA release for ${DISTRO}.
+
+ -- ${GPG_USER}  $(date -R)
+EOF
 
               debuild -S -sa -k"$GPG_KEY_ID"
               dput -u "$LAUNCHPAD_PPA" "../hydra_${VERSION}-1ppa1~${DISTRO}1_source.changes"

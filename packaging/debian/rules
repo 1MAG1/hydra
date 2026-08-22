@@ -14,8 +14,8 @@ override_dh_auto_install:
 	install -Dm755 target/release/hydra-gui debian/hydra/usr/bin/hydra-gui
 	install -Dm755 target/release/hydra-host debian/hydra/usr/bin/hydra-host
 
-	install -Dm644 packaging/debian/hydra.desktop debian/hydra/usr/share/applications/hydra.desktop
-	install -Dm644 packaging/debian/hydra-autostart.desktop debian/hydra/etc/xdg/autostart/hydra.desktop
+	install -Dm644 debian/hydra.desktop debian/hydra/usr/share/applications/hydra.desktop || install -Dm644 packaging/debian/hydra.desktop debian/hydra/usr/share/applications/hydra.desktop
+	install -Dm644 debian/hydra-autostart.desktop debian/hydra/etc/xdg/autostart/hydra.desktop || install -Dm644 packaging/debian/hydra-autostart.desktop debian/hydra/etc/xdg/autostart/hydra.desktop
 
 	install -Dm644 docs/logo.png debian/hydra/usr/share/icons/hicolor/512x512/apps/hydra.png
 
