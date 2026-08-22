@@ -646,3 +646,38 @@ jobs:
             echo "note: COPR_CONFIG not set; skipping automated Copr build"
           fi
 
+      - name: Build and Publish to Launchpad PPA
+        if: needs.verify-version.outputs.prerelease != 'true'
+        env:
+          LAUNCHPAD_GPG_KEY: ${{ secrets.LAUNCHPAD_GPG_KEY }}
+          LAUNCHPAD_PPA: ${{ secrets.LAUNCHPAD_PPA }}
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${LAUNCHPAD_GPG_KEY:-}" ] && [ -n "${LAUNCHPAD_PPA:-}" ]; then
+            sudo apt-get update
+            sudo apt-get install -y devscripts debhelper dput
+
+            # Import GPG private signing key
+            echo "$LAUNCHPAD_GPG_KEY" | gpg --import --batch --yes
+            GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | grep '^sec' | head -1 | cut -d: -f5)
+
+            # Vendor dependencies for offline building in Launchpad builders
+            cargo vendor vendor/
+
+            # Copy packaging directory into place
+            cp -r packaging/debian debian
+
+            # Build source packages for Ubuntu 24.04 (noble) and 22.04 (jammy)
+            for DISTRO in noble jammy; do
+              dch --create --package hydra -v "${VERSION}-1ppa1~${DISTRO}1" \
+                --distribution "$DISTRO" "Automated Launchpad PPA release for ${DISTRO}"
+
+              debuild -S -sa -k"$GPG_KEY_ID"
+              dput -u "$LAUNCHPAD_PPA" "../hydra_${VERSION}-1ppa1~${DISTRO}1_source.changes"
+            done
+            echo "Uploaded PPA packages to $LAUNCHPAD_PPA"
+          else
+            echo "note: LAUNCHPAD_GPG_KEY or LAUNCHPAD_PPA not set; skipping Launchpad release"
+          fi
+

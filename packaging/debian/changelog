@@ -1,0 +1,5 @@
+hydra (0.3.8-1) unstable; urgency=medium
+
+  * Initial Debian package release.
+
+ -- Javad Rajabzadeh <ja7ad@live.com>  Sat, 22 Aug 2026 18:00:00 +0000
