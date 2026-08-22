@@ -4,6 +4,9 @@ export DH_VERBOSE = 1
 %:
 	dh $@
 
+override_dh_auto_clean:
+	rm -rf target/ dist/ debian/hydra/ debian/.debhelper/ debian/files
+
 override_dh_auto_build:
 	mkdir -p .cargo
 	printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
@@ -29,26 +32,10 @@ override_dh_auto_install:
 
 	for d in etc/opt/chrome etc/chromium etc/opt/edge; do \
 		install -d debian/hydra/$$d/native-messaging-hosts; \
-		cat > debian/hydra/$$d/native-messaging-hosts/com.hydra.host.json <<'EOF'; \
-{ \
-  "name": "com.hydra.host", \
-  "description": "Hydra Download Manager native host", \
-  "path": "/usr/bin/hydra-host", \
-  "type": "stdio", \
-  "allowed_origins": ["chrome-extension://jpnonmbbkjdpeebdhkjoliklfhkdcomj/"] \
-} \
-EOF \
+		install -m644 debian/com.hydra.host.chrome.json debian/hydra/$$d/native-messaging-hosts/com.hydra.host.json || install -m644 packaging/debian/com.hydra.host.chrome.json debian/hydra/$$d/native-messaging-hosts/com.hydra.host.json; \
 	done
 	install -d debian/hydra/usr/lib/mozilla/native-messaging-hosts
-	cat > debian/hydra/usr/lib/mozilla/native-messaging-hosts/com.hydra.host.json <<'EOF'
-{
-  "name": "com.hydra.host",
-  "description": "Hydra Download Manager native host",
-  "path": "/usr/bin/hydra-host",
-  "type": "stdio",
-  "allowed_extensions": ["hydra@ja7ad.github.io"]
-}
-EOF
+	install -m644 debian/com.hydra.host.mozilla.json debian/hydra/usr/lib/mozilla/native-messaging-hosts/com.hydra.host.json || install -m644 packaging/debian/com.hydra.host.mozilla.json debian/hydra/usr/lib/mozilla/native-messaging-hosts/com.hydra.host.json
 
 override_dh_auto_test:
 	# Skip test suite during Debian packaging build

@@ -664,6 +664,9 @@ jobs:
             GPG_USER=$(gpg --list-secret-keys --with-colons | awk -F: '/^uid:/ { print $10; exit }')
             [ -n "$GPG_USER" ] || GPG_USER="Hydra Maintainers <dev@hydra.app>"
 
+            # Enable passive FTP for dput globally without overriding default PPA handler
+            printf '[DEFAULT]\npassive_ftp = 1\n' > ~/.dput.cf
+
             # Vendor dependencies for offline building in Launchpad builders
             cargo vendor vendor/
 
