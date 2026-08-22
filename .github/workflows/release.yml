@@ -588,7 +588,7 @@ jobs:
           make_latest: ${{ needs.verify-version.outputs.prerelease != 'true' }}
 
       - name: Update Homebrew Tap
-        if: needs.verify-version.outputs.prerelease != 'true'
+        if: needs.verify-version.outputs.prerelease == 'false'
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
@@ -609,7 +609,7 @@ jobs:
           fi
 
       - name: Trigger Fedora Copr Build
-        if: needs.verify-version.outputs.prerelease != 'true'
+        if: needs.verify-version.outputs.prerelease == 'false'
         env:
           COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
           COPR_PROJECT: ${{ secrets.COPR_PROJECT }}
@@ -647,7 +647,7 @@ jobs:
           fi
 
       - name: Build and Publish to Launchpad PPA
-        if: needs.verify-version.outputs.prerelease != 'true'
+        if: needs.verify-version.outputs.prerelease == 'false'
         env:
           LAUNCHPAD_GPG_KEY: ${{ secrets.LAUNCHPAD_GPG_KEY }}
           LAUNCHPAD_PPA: ${{ secrets.LAUNCHPAD_PPA }}
