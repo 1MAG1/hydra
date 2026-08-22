@@ -113,8 +113,14 @@ CRX_KEY="${CRX_KEY:-$REPO/target/hydra-chrome-crx.pem}"
 PY=$(command -v python3 || command -v python || true)
 [ -n "$PY" ] || { echo "error: python3 is required to read the manifests" >&2; exit 1; }
 
+# Python on Windows writes CRLF on stdout, and command substitution strips
+# only the trailing newline - the \r stays glued to the value, where it
+# corrupts file names ("hydra-chrome-0.2.2\r.zip") and silently breaks every
+# exact string comparison. Everything read back from python goes through here.
+py() { "$PY" "$@" | tr -d '\r'; }
+
 manifest_version() { # <manifest.json>
-  "$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$1"
+  py -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$1"
 }
 
 # zip via whatever the host has. Info-ZIP is absent from git bash, so python's
@@ -123,7 +129,7 @@ manifest_version() { # <manifest.json>
 make_zip() { # <archive> <source-dir>
   local archive=$1 dir=$2
   rm -f "$archive"
-  "$PY" - "$archive" "$dir" <<'EOF'
+  py - "$archive" "$dir" <<'EOF'
 import os, sys, zipfile
 
 archive, root = sys.argv[1], sys.argv[2]
@@ -148,6 +154,11 @@ copy_unpacked() { # <src-dir> <dst-dir>
   # -mindepth 1 so a dot in the destination's own path can never match, and
   # -prune so a dot-directory is removed whole rather than descended into.
   find "$dst" -mindepth 1 \( -name '.*' -o -name '__MACOSX' \) -prune -exec rm -rf {} +
+  # Cheap tripwire: every later step (packing, verification, "Load unpacked")
+  # depends on this copy having landed, and a platform that quietly copied
+  # nothing should say so here rather than three steps downstream.
+  [ -f "$dst/manifest.json" ] ||
+    { echo "error: copying $src to $dst produced no manifest.json" >&2; exit 1; }
 }
 
 # manifest.json has to be a FIRST-LEVEL entry (Firefox rejects the add-on
@@ -155,7 +166,7 @@ copy_unpacked() { # <src-dir> <dst-dir>
 # a sync step that silently did nothing would otherwise ship an empty shell.
 verify_archive() { # <archive>
   local archive=$1 entries required
-  entries=$("$PY" -c "
+  entries=$(py -c "
 import sys, zipfile
 print('\n'.join(zipfile.ZipFile(sys.argv[1]).namelist()))" "$archive")
   for required in manifest.json background.js content.js popup.html popup.js \
@@ -185,11 +196,11 @@ print('\n'.join(zipfile.ZipFile(sys.argv[1]).namelist()))" "$archive")
 # Base64 of the signing key's public key in DER — the exact form the manifest
 # `key` field takes, so it can be compared with the pinned one directly.
 crx_public_key() { # <key.pem>
-  openssl rsa -in "$1" -pubout -outform DER 2>/dev/null | openssl base64 -A
+  openssl rsa -in "$1" -pubout -outform DER 2>/dev/null | openssl base64 -A | tr -d '\r'
 }
 
 pack_crx() { # <key.pem> <zip> <out.crx>
-  "$PY" - "$1" "$2" "$3" <<'EOF'
+  py - "$1" "$2" "$3" <<'EOF'
 import hashlib, struct, subprocess, sys
 
 key, zip_path, out = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -241,7 +252,7 @@ EOF
 # Chromium spells an extension id as the first 16 bytes of the SHA-256 of the
 # public key, each nibble mapped 0-f -> a-p.
 crx_id() { # <base64 public key>
-  "$PY" -c "
+  py -c "
 import base64, hashlib, sys
 d = hashlib.sha256(base64.b64decode(sys.argv[1])).hexdigest()[:32]
 print(''.join(chr(ord('a') + int(c, 16)) for c in d))" "$1"
@@ -401,7 +412,7 @@ if [ "$TARGETS" = all ] || [ "$TARGETS" = chrome ]; then
     SIGNER_KEY=$(crx_public_key "$CRX_KEY")
     [ -n "$SIGNER_KEY" ] || { echo "error: $CRX_KEY is not an RSA private key" >&2; exit 1; }
     SIGNER_ID=$(crx_id "$SIGNER_KEY")
-    PINNED_KEY=$("$PY" -c "
+    PINNED_KEY=$(py -c "
 import json,sys;print(json.load(open(sys.argv[1])).get('key',''))" "$CHROME_SRC/manifest.json")
     [ -n "$PINNED_KEY" ] ||
       { echo "error: extensions/chrome/manifest.json has no pinned 'key'" >&2; exit 1; }
@@ -411,7 +422,7 @@ import json,sys;print(json.load(open(sys.argv[1])).get('key',''))" "$CHROME_SRC/
     if [ "$SIGNER_KEY" != "$PINNED_KEY" ]; then
       # Chromium rejects a .crx whose manifest key is not the signer's, so
       # the manifest has to follow the key it was actually signed with.
-      "$PY" -c "
+      py -c "
 import json,sys
 path = sys.argv[1]
 m = json.load(open(path))
