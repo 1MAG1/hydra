@@ -133,6 +133,7 @@
   "Hydra must write into your download folders. macOS asks the first time; if it was denied, allow Hydra under Files & Folders — or pick the folder once through the system dialog, which grants it automatically.": "يحتاج Hydra للكتابة في مجلدات التنزيل. يطلب macOS الإذن في المرة الأولى؛ إذا رُفض، اسمح لـ Hydra تحت الملفات والمجلدات — أو اختر المجلد عبر مربع حوار النظام.",
   "Hydra will now restart to finish the update.": "Hydra will now restart to finish the update.",
   "Hydra windows get no taskbar button; reach the app from the tray icon. Applies to windows opened after the change.": "لن تظهر لنوافذ Hydra أزرار في شريط المهام؛ يمكن الوصول إلى التطبيق عبر أيقونة صينية النظام. يسري على النوافذ المفتوحة بعد التغيير.",
+  "Keeps Hydra windows out of the taskbar and the workspace switcher; reach the app from the tray icon. Wayland has no way to hide an open window, so there it applies while Hydra runs in the tray.": "Keeps Hydra windows out of the taskbar and the workspace switcher; reach the app from the tray icon. Wayland has no way to hide an open window, so there it applies while Hydra runs in the tray.",
   "If Windows Security's ransomware protection blocks Hydra from Documents/Downloads, allow Hydra under \"Allow an app through Controlled folder access\".": "إذا قامت حماية الفدية في أمان Windows بحظر Hydra في المستندات/التنزيلات، فاسمح لـ Hydra تحت \"السماح لتطبيق عبر الوصول المتحكم به إلى المجلدات\".",
   "Import": "استيراد",
   "Info": "معلومات",

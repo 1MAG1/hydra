@@ -16,6 +16,8 @@ mod extbus;
 mod fmt;
 mod i18n;
 mod icons;
+#[cfg(target_os = "linux")]
+mod linux_taskbar;
 mod log;
 #[cfg(target_os = "macos")]
 mod macos_dock;
@@ -25,7 +27,6 @@ mod menubus;
 mod model;
 mod sounds;
 mod theme;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod tray;
 mod ui;
 mod update;
@@ -174,26 +175,37 @@ fn boot() -> (App, Task<Message>) {
     // keeps the outgoing exe locked through teardown) get swept now.
     update::sweep_leftovers();
 
-    // Autostart hands us --minimized: live in the tray, no window. (The tray
-    // exists on macOS/Windows; elsewhere the window always opens.)
-    let start_hidden = std::env::args().any(|a| a == "--minimized")
-        && cfg!(any(target_os = "macos", target_os = "windows"));
+    // Autostart hands us --minimized: live in the tray, no window. Whether
+    // the tray really materialises is only knowable on Linux after the D-Bus
+    // registration below, so this is the intent, not yet the outcome.
+    let mut start_hidden = std::env::args().any(|a| a == "--minimized")
+        && cfg!(any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux"
+        ));
 
+    if start_hidden {
+        // There is no window to install from, so the tray goes up here. On
+        // Linux registration is a D-Bus round trip that can also find no
+        // watcher at all (a session without status-notifier support, or a
+        // login that outran the shell): wait briefly, and open the window
+        // after all rather than leave an invisible process behind.
+        let queues: Vec<String> = app.cfg.queues.iter().map(|q| q.name.clone()).collect();
+        tray::install(&queues, app.cfg.settings.power_save);
+        if tray::wait_ready(std::time::Duration::from_secs(5)) {
+            log::info("started minimized to tray");
+        } else {
+            log::warn("no system tray available; opening the main window instead");
+            start_hidden = false;
+        }
+    }
     // Dock visibility before any window opens, so a tray-only launch never
     // flashes a Dock tile. A window about to open forces Regular: Accessory
     // apps get no menu bar, and on macOS every Hydra menu lives there.
     #[cfg(target_os = "macos")]
     macos_dock::sync(app.cfg.settings.hide_from_taskbar, !start_hidden);
     if start_hidden {
-        log::info("started minimized to tray");
-        // The tray needs one WindowOpened to install; open the main window
-        // hidden-equivalent: we simply skip opening and install the tray on
-        // the first user-driven open instead.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            let queues: Vec<String> = app.cfg.queues.iter().map(|q| q.name.clone()).collect();
-            tray::install(&queues, app.cfg.settings.power_save);
-        }
         (app, Task::none())
     } else {
         let open_main = app.open_window(WinKind::Main);
