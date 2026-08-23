@@ -69,6 +69,7 @@
   }
   .callout p:last-child { margin-bottom: 0; }
   table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.92rem; }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 16px 0; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { color: var(--text); font-weight: 600; }
   footer {
@@ -77,6 +78,12 @@
     text-align: center;
     color: var(--text-faint);
     font-size: 0.85rem;
+  }
+  @media (max-width: 540px) {
+    header { padding: 14px 16px; }
+    main { padding: 32px 16px 64px; }
+    h1 { font-size: 1.4rem; }
+    .updated { margin-bottom: 24px; }
   }
 </style>
 </head>
@@ -106,6 +113,7 @@
 
   <h2>What the extension processes, and where it goes</h2>
   <p>To do its job, the extension reads certain data locally in your browser. None of it is sent anywhere except to the Hydra app on your own machine, reached at <code>127.0.0.1</code> (WebSocket) or via a native-messaging helper process — both are local to your device and never traverse the network.</p>
+  <div class="table-wrap">
   <table>
     <tr><th>Data</th><th>Why it's read</th><th>Where it goes</th></tr>
     <tr><td>Download URL, filename, MIME type, size</td><td>To decide whether a download matches your configured auto-capture rules and to hand it to Hydra</td><td>Local Hydra app only</td></tr>
@@ -114,6 +122,7 @@
     <tr><td>Response headers of in-page network requests (Content-Type/Length)</td><td>To detect playable media on the page for the popup's media list</td><td>Kept in the browser's local session storage; sent to Hydra only if you click Download</td></tr>
     <tr><td>Extension settings (enabled toggle, auto-capture file types, skip-site list)</td><td>To remember your preferences</td><td>Stored locally in your browser only</td></tr>
   </table>
+  </div>
 
   <h2>Permissions</h2>
   <p>The extension requests <code>downloads</code>, <code>cookies</code>, <code>contextMenus</code>, <code>storage</code>, <code>tabs</code>, <code>nativeMessaging</code>, <code>webRequest</code>, and host access to all sites. Each is used strictly for the local hand-off described above — capturing downloads, offering the right-click menu, remembering settings, and reaching the local Hydra app. None is used to track browsing activity, build a profile, or serve ads.</p>

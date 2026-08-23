@@ -62,6 +62,24 @@
   .nav-gh { display: inline-flex; align-items: center; }
   .nav-gh svg { width: 21px; height: 21px; }
 
+  .nav-toggle {
+    display: none;
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 6px;
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .nav-toggle:hover {
+    background: rgba(148, 197, 222, 0.08);
+    border-color: var(--line-strong);
+  }
+  .nav-toggle svg { width: 22px; height: 22px; }
+
   /* Hero Section */
   .hero-section {
     padding: 136px 0 48px;
@@ -208,10 +226,53 @@
   .foot-social svg { width: 20px; height: 20px; }
 
   @media (max-width: 768px) {
+    .nav-toggle { display: flex; }
+    .nav-links {
+      display: none;
+      position: absolute;
+      top: 68px;
+      left: 0;
+      right: 0;
+      background: rgba(10, 14, 19, 0.96);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--line-strong);
+      flex-direction: column;
+      align-items: stretch;
+      padding: 16px 24px 24px;
+      gap: 12px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+    }
+    .nav-links.open { display: flex; }
+    .nav-links a {
+      font-size: 15.5px;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(148, 197, 222, 0.08);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .nav-links a:last-child { border-bottom: none; }
+    .nav-gh { justify-content: flex-start; gap: 8px; }
+    .nav-gh::after { content: "GitHub Repository"; font-weight: 500; font-size: 15px; }
+
     .hero-section { padding: 110px 0 36px; }
+    .hero-section h1 { font-size: clamp(28px, 7vw, 42px); }
     .release-card { padding: 24px 18px; }
-    .release-header { align-items: flex-start; }
-    .nav-links .nav-hide-sm { display: none; }
+    .release-header { flex-direction: column; align-items: flex-start; gap: 12px; }
+    .release-actions { width: 100%; }
+    .release-link { width: 100%; justify-content: center; padding: 8px 14px; }
+    .change-item { font-size: 14px; word-break: break-word; overflow-wrap: anywhere; }
+    .change-item code { word-break: break-all; }
+  }
+
+  @media (max-width: 540px) {
+    .wrap { padding: 0 16px; }
+    .toolbar { margin: 24px 0 28px; }
+    .filter-row { gap: 6px; }
+    .filter-chip { padding: 5px 10px; font-size: 12px; }
+    .release-version { font-size: 20px; }
+    .release-date { font-size: 12px; }
   }
 </style>
 </head>
@@ -223,16 +284,22 @@
       <img src="logo.png" alt="Hydra logo" width="30" height="30">
       HYDRA
     </a>
-    <div class="nav-links">
-      <a href="index.html#engine" class="nav-hide-sm">Engine</a>
-      <a href="index.html#app" class="nav-hide-sm">Desktop App</a>
-      <a href="index.html#cli" class="nav-hide-sm">CLI</a>
+    <div class="nav-links" id="nav-links">
+      <a href="index.html#engine">Engine</a>
+      <a href="index.html#app">Desktop App</a>
+      <a href="index.html#cli">CLI</a>
       <a href="index.html#download">Download</a>
       <a href="changelog.html" class="active">Changelog</a>
       <a class="nav-gh" href="https://github.com/ja7ad/hydra" aria-label="Hydra on GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
       </a>
     </div>
+    <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation menu" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path id="nav-toggle-icon-open" d="M4 6h16M4 12h16M4 18h16"/>
+        <path id="nav-toggle-icon-close" d="M18 6L6 18M6 6l12 12" style="display:none;"/>
+      </svg>
+    </button>
   </div>
 </nav>
 
@@ -430,54 +497,237 @@
 </footer>
 
 <script>
-  // Category Filtering
-  (() => {
-    const filterChips = document.querySelectorAll(".filter-chip");
-    const cards = document.querySelectorAll(".release-card");
-    const noResults = document.getElementById("no-results");
+  // Mobile Navigation Toggle
+  const navLinks = document.getElementById("nav-links");
+  const navToggle = document.getElementById("nav-toggle");
+  const iconOpen = document.getElementById("nav-toggle-icon-open");
+  const iconClose = document.getElementById("nav-toggle-icon-close");
 
-    filterChips.forEach(chip => {
-      chip.addEventListener("click", () => {
-        filterChips.forEach(c => c.classList.remove("active"));
-        chip.classList.add("active");
-        const type = chip.dataset.type;
-        let visibleCount = 0;
+  if (navToggle && navLinks) {
+    navToggle.addEventListener("click", () => {
+      const isOpen = navLinks.classList.toggle("open");
+      navToggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+      if (iconOpen && iconClose) {
+        iconOpen.style.display = isOpen ? "none" : "block";
+        iconClose.style.display = isOpen ? "block" : "none";
+      }
+    });
 
-        cards.forEach(card => {
-          const sections = card.querySelectorAll(".change-section");
-          let hasVisibleSection = false;
-
-          sections.forEach(s => {
-            if (type === "all" || s.dataset.category === type) {
-              s.style.display = "";
-              hasVisibleSection = true;
-            } else {
-              s.style.display = "none";
-            }
-          });
-
-          if (hasVisibleSection) {
-            card.style.display = "";
-            visibleCount++;
-          } else {
-            card.style.display = "none";
-          }
-        });
-
-        if (noResults) {
-          noResults.style.display = visibleCount === 0 ? "block" : "none";
+    navLinks.querySelectorAll("a").forEach((link) => {
+      link.addEventListener("click", () => {
+        navLinks.classList.remove("open");
+        navToggle.setAttribute("aria-expanded", "false");
+        if (iconOpen && iconClose) {
+          iconOpen.style.display = "block";
+          iconClose.style.display = "none";
         }
       });
     });
-  })();
+  }
 
-  // Optional: Dynamic Markdown fetch if served over HTTP/HTTPS
+  // Active Category Filter State & Filter Logic
+  let activeFilterType = "all";
+
+  function applyCategoryFilter(type) {
+    activeFilterType = type;
+    const cards = document.querySelectorAll(".release-card");
+    const noResults = document.getElementById("no-results");
+    let visibleCount = 0;
+
+    cards.forEach(card => {
+      const sections = card.querySelectorAll(".change-section");
+      let hasVisibleSection = false;
+
+      sections.forEach(s => {
+        if (type === "all" || s.dataset.category === type) {
+          s.style.display = "";
+          hasVisibleSection = true;
+        } else {
+          s.style.display = "none";
+        }
+      });
+
+      if (hasVisibleSection) {
+        card.style.display = "";
+        visibleCount++;
+      } else {
+        card.style.display = "none";
+      }
+    });
+
+    if (noResults) {
+      noResults.style.display = visibleCount === 0 ? "block" : "none";
+    }
+  }
+
+  // Bind Filter Chips
+  document.querySelectorAll(".filter-chip").forEach(chip => {
+    chip.addEventListener("click", () => {
+      document.querySelectorAll(".filter-chip").forEach(c => c.classList.remove("active"));
+      chip.classList.add("active");
+      applyCategoryFilter(chip.dataset.type || "all");
+    });
+  });
+
+  // Markdown Parser for GitHub CHANGELOG.md
+  function parseMarkdownChangelog(mdText) {
+    const releases = [];
+    const lines = mdText.split(/\r?\n/);
+
+    let currentRelease = null;
+    let currentSection = null;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+
+      // Version header: ## [0.3.7] - 2026-08-22
+      const verMatch = line.match(/^##\s+\[(.*?)\](?:\s*-\s*(.*))?$/);
+      if (verMatch) {
+        if (currentRelease) {
+          if (currentSection && currentSection.items.length > 0) {
+            currentRelease.sections.push(currentSection);
+            currentSection = null;
+          }
+          releases.push(currentRelease);
+        }
+        currentRelease = {
+          version: verMatch[1],
+          date: verMatch[2] ? verMatch[2].trim() : "",
+          sections: []
+        };
+        continue;
+      }
+
+      // Section header: ### Added / ### Fixed / ### Changed & Refactored
+      const secMatch = line.match(/^###\s+(.*)$/);
+      if (secMatch && currentRelease) {
+        if (currentSection && currentSection.items.length > 0) {
+          currentRelease.sections.push(currentSection);
+        }
+        const rawTitle = secMatch[1].trim();
+        let category = "changed";
+        if (/added/i.test(rawTitle)) category = "added";
+        else if (/fixed/i.test(rawTitle)) category = "fixed";
+        else if (/changed|refactored|removed|deprecated|security/i.test(rawTitle)) category = "changed";
+
+        currentSection = {
+          title: rawTitle,
+          category: category,
+          items: []
+        };
+        continue;
+      }
+
+      // List item bullet
+      if ((line.startsWith("- ") || line.startsWith("* ")) && currentRelease && currentSection) {
+        const rawContent = line.replace(/^[-*]\s+/, "");
+        currentSection.items.push(rawContent);
+      } else if (currentRelease && currentSection && currentSection.items.length > 0 && !line.startsWith("##") && !line.startsWith("---")) {
+        // Multi-line bullet text continuation
+        currentSection.items[currentSection.items.length - 1] += " " + line;
+      }
+    }
+
+    if (currentRelease) {
+      if (currentSection && currentSection.items.length > 0) {
+        currentRelease.sections.push(currentSection);
+      }
+      releases.push(currentRelease);
+    }
+
+    return releases;
+  }
+
+  function formatMarkdownText(text) {
+    if (!text) return "";
+    let html = text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+
+    // Inline code: `code`
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Bold: **text**
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // Links: [text](url)
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+    return html;
+  }
+
+  function renderReleasesHTML(releases) {
+    if (!releases || releases.length === 0) return "";
+
+    return releases.map(rel => {
+      const verTag = rel.version.startsWith("v") ? rel.version : `v${rel.version}`;
+      const cleanVer = rel.version.replace(/^v/, "");
+      const dateBadge = rel.date ? `<span class="release-date">${rel.date}</span>` : "";
+      const releaseUrl = `https://github.com/ja7ad/hydra/releases/tag/${verTag}`;
+
+      const sectionsHTML = rel.sections.map(sec => {
+        const itemsHTML = sec.items.map(item => `<li class="change-item">${formatMarkdownText(item)}</li>`).join("");
+        const badgeLabel = sec.category === "added" ? "Added" : sec.category === "fixed" ? "Fixed" : "Changed & Refactored";
+
+        return `
+          <div class="change-section" data-category="${sec.category}">
+            <span class="section-badge ${sec.category}">${badgeLabel}</span>
+            <ul class="change-list">
+              ${itemsHTML}
+            </ul>
+          </div>
+        `;
+      }).join("");
+
+      return `
+        <article class="release-card" id="${verTag}" data-version="${cleanVer}">
+          <div class="release-header">
+            <div class="release-title-group">
+              <h2 class="release-version">${verTag}</h2>
+              ${dateBadge}
+            </div>
+            <div class="release-actions">
+              <a class="release-link" href="${releaseUrl}" target="_blank" rel="noopener">
+                View Release on GitHub
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              </a>
+            </div>
+          </div>
+          ${sectionsHTML}
+        </article>
+      `;
+    }).join("") + `
+      <div class="no-results" id="no-results">
+        <h3>No matching changes found</h3>
+        <p>Try adjusting your search query or type filter.</p>
+      </div>
+    `;
+  }
+
+  // Load and Parse CHANGELOG.md dynamically
   (async () => {
+    const container = document.getElementById("releases-container");
+    if (!container) return;
+
+    const REMOTE_URL = "https://raw.githubusercontent.com/ja7ad/hydra/refs/heads/main/CHANGELOG.md";
+    const LOCAL_URL = "../CHANGELOG.md";
+
     try {
-      const res = await fetch("../CHANGELOG.md");
-      if (!res.ok) return;
+      let res = await fetch(REMOTE_URL);
+      if (!res.ok) {
+        res = await fetch(LOCAL_URL);
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
       const text = await res.text();
-    } catch (_) { }
+      const parsedReleases = parseMarkdownChangelog(text);
+      if (parsedReleases && parsedReleases.length > 0) {
+        container.innerHTML = renderReleasesHTML(parsedReleases);
+        applyCategoryFilter(activeFilterType);
+      }
+    } catch (err) {
+      console.warn("Could not fetch raw CHANGELOG.md dynamically, rendering fallback static content:", err);
+    }
   })();
 </script>
 

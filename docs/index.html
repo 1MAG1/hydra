@@ -74,6 +74,24 @@
   .nav-gh { display: inline-flex; align-items: center; }
   .nav-gh svg { width: 21px; height: 21px; }
 
+  .nav-toggle {
+    display: none;
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 6px;
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .nav-toggle:hover {
+    background: rgba(148, 197, 222, 0.08);
+    border-color: var(--line-strong);
+  }
+  .nav-toggle svg { width: 22px; height: 22px; }
+
   .btn {
     display: inline-flex; align-items: center; gap: 9px;
     font-weight: 600; font-size: 15px; white-space: nowrap;
@@ -400,6 +418,12 @@
   .foot-social a:hover { color: var(--text); }
   .foot-social svg { width: 20px; height: 20px; }
 
+  .tab-repo-links {
+    margin-top: 14px; font-size: 13px; color: var(--text-dim); text-align: center;
+  }
+  .tab-repo-links a { color: var(--accent); text-decoration: none; font-weight: 500; }
+  .tab-repo-links a:hover { text-decoration: underline; }
+
   @media (max-width: 900px) {
     section { padding: 64px 0; }
     .hero { padding: 116px 0 64px; }
@@ -409,9 +433,75 @@
     .gui-grid { grid-template-columns: 1fr; gap: 8px; }
     .cli-grid { grid-template-columns: 1fr; gap: 40px; }
     .vscode-dl-grid { grid-template-columns: 1fr; }
-    .nav-links { gap: 18px; }
-    .nav-links .nav-hide-sm { display: none; }
     .dl-card { padding: 48px 20px; }
+  }
+
+  @media (max-width: 768px) {
+    .nav-toggle { display: flex; }
+    .nav-links {
+      display: none;
+      position: absolute;
+      top: 68px;
+      left: 0;
+      right: 0;
+      background: rgba(10, 14, 19, 0.96);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--line-strong);
+      flex-direction: column;
+      align-items: stretch;
+      padding: 16px 24px 24px;
+      gap: 12px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+    }
+    .nav-links.open { display: flex; }
+    .nav-links a {
+      font-size: 15.5px;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(148, 197, 222, 0.08);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .nav-links a:last-child { border-bottom: none; }
+    .nav-gh { justify-content: flex-start; gap: 8px; }
+    .nav-gh::after { content: "GitHub Repository"; font-weight: 500; font-size: 15px; }
+
+    .sec-head h2 { font-size: 26px; }
+    .sec-head p { font-size: 15px; }
+  }
+
+  @media (max-width: 540px) {
+    .wrap { padding: 0 16px; }
+    .hero { padding: 92px 0 44px; }
+    .hero h1 { font-size: clamp(28px, 8.5vw, 36px); }
+    .hero p { font-size: 15.5px; margin-top: 14px; }
+    .hero-ctas { flex-direction: column; width: 100%; gap: 10px; }
+    .hero-ctas .btn { width: 100%; justify-content: center; padding: 13px 20px; }
+
+    .dual-btn { flex-direction: column; width: 100%; gap: 10px; }
+    .vscode-btn-primary { width: 100%; justify-content: center; }
+
+    .matrix-row { flex-direction: column; align-items: flex-start; gap: 6px; }
+    .pill-group { justify-content: flex-start; width: 100%; flex-wrap: wrap; }
+    .row-label { font-size: 13px; font-weight: 600; color: var(--text); }
+
+    .cell { padding: 20px 16px; }
+    .gui-item { padding: 14px 10px; gap: 12px; }
+    .gui-item .ico { width: 34px; height: 34px; }
+    .gui-item h3 { font-size: 15px; }
+    .gui-item p { font-size: 13.5px; }
+
+    .dl-card { padding: 32px 14px; border-radius: 18px; }
+    .dl-card h2 { font-size: 26px; }
+    .dl-card > p.dl-subtitle { font-size: 15px; }
+
+    .terminal-opt-btn { width: 100%; justify-content: center; font-size: 13px; padding: 10px 14px; }
+    .tab-row { flex-wrap: wrap; gap: 6px; justify-content: flex-start; }
+    .tab { padding: 6px 12px; font-size: 12.5px; }
+    .cmd { padding: 12px 14px; gap: 8px; }
+    .cmd code { font-size: 11.5px; }
+    .term pre { font-size: 12px; padding: 16px 14px; }
   }
 </style>
 </head>
@@ -425,16 +515,22 @@
       <img src="logo.png" alt="Hydra logo" width="30" height="30">
       HYDRA
     </a>
-    <div class="nav-links">
-      <a href="#engine" class="nav-hide-sm">Engine</a>
-      <a href="#app" class="nav-hide-sm">Desktop App</a>
-      <a href="#cli" class="nav-hide-sm">CLI</a>
+    <div class="nav-links" id="nav-links">
+      <a href="#engine">Engine</a>
+      <a href="#app">Desktop App</a>
+      <a href="#cli">CLI</a>
       <a href="#download">Download</a>
-      <a href="changelog.html" class="nav-hide-sm">Changelog</a>
+      <a href="changelog.html">Changelog</a>
       <a class="nav-gh" href="https://github.com/ja7ad/hydra" aria-label="Hydra on GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
       </a>
     </div>
+    <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation menu" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path id="nav-toggle-icon-open" d="M4 6h16M4 12h16M4 18h16"/>
+        <path id="nav-toggle-icon-close" d="M18 6L6 18M6 6l12 12" style="display:none;"/>
+      </svg>
+    </button>
   </div>
 </nav>
 
@@ -727,6 +823,18 @@
               </div>
             </div>
             <div class="matrix-row">
+              <span class="row-label">Ubuntu PPA</span>
+              <div class="pill-group">
+                <a class="pill" href="https://launchpad.net/~sonycore/+archive/ubuntu/hydra" target="_blank" rel="noopener">Launchpad PPA</a>
+              </div>
+            </div>
+            <div class="matrix-row">
+              <span class="row-label">Fedora COPR</span>
+              <div class="pill-group">
+                <a class="pill" href="https://copr.fedorainfracloud.org/coprs/sonycore/hydra/" target="_blank" rel="noopener">Fedora COPR</a>
+              </div>
+            </div>
+            <div class="matrix-row">
               <span class="row-label">.tar.gz</span>
               <div class="pill-group">
                 <a class="pill" data-asset="linux-x64-tar" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-linux-amd64.tar.gz">x64</a>
@@ -803,12 +911,26 @@
         <div class="install-tabs hidden" id="install-tabs-box">
           <div class="tab-row" role="tablist" aria-label="Install command by platform">
             <button class="tab active" role="tab" aria-selected="true" data-target="cmd-unix">macOS / Linux</button>
+            <button class="tab" role="tab" aria-selected="false" data-target="cmd-ppa">Ubuntu PPA</button>
+            <button class="tab" role="tab" aria-selected="false" data-target="cmd-copr">Fedora COPR</button>
             <button class="tab" role="tab" aria-selected="false" data-target="cmd-brew">Homebrew</button>
             <button class="tab" role="tab" aria-selected="false" data-target="cmd-win">Windows</button>
           </div>
           <div class="cmd active" id="cmd-unix">
             <code><b>curl</b> -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | <b>bash</b></code>
             <button class="copy" aria-label="Copy install command" data-copy="curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | bash">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
+            </button>
+          </div>
+          <div class="cmd" id="cmd-ppa">
+            <code><b>sudo add-apt-repository</b> ppa:sonycore/hydra &amp;&amp; <b>sudo apt update</b> &amp;&amp; <b>sudo apt install</b> hydra</code>
+            <button class="copy" aria-label="Copy install command" data-copy="sudo add-apt-repository ppa:sonycore/hydra &amp;&amp; sudo apt update &amp;&amp; sudo apt install hydra">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
+            </button>
+          </div>
+          <div class="cmd" id="cmd-copr">
+            <code><b>sudo dnf copr enable</b> sonycore/hydra &amp;&amp; <b>sudo dnf install</b> hydra</code>
+            <button class="copy" aria-label="Copy install command" data-copy="sudo dnf copr enable sonycore/hydra &amp;&amp; sudo dnf install hydra">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
             </button>
           </div>
@@ -824,6 +946,11 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
             </button>
           </div>
+          <p class="tab-repo-links">
+            Repositories: 
+            <a href="https://launchpad.net/~sonycore/+archive/ubuntu/hydra" target="_blank" rel="noopener">Launchpad Ubuntu PPA</a> · 
+            <a href="https://copr.fedorainfracloud.org/coprs/sonycore/hydra/" target="_blank" rel="noopener">Fedora COPR</a>
+          </p>
         </div>
       </div>
 
@@ -848,17 +975,76 @@
 </footer>
 
 <script>
+  // Scroll Sentinel and Mobile Menu Navigation Toggle
   const nav = document.getElementById("nav");
+  const navLinks = document.getElementById("nav-links");
+  const navToggle = document.getElementById("nav-toggle");
+  const iconOpen = document.getElementById("nav-toggle-icon-open");
+  const iconClose = document.getElementById("nav-toggle-icon-close");
+
   new IntersectionObserver(([e]) => nav.classList.toggle("scrolled", !e.isIntersecting))
     .observe(document.getElementById("top-sentinel"));
 
+  if (navToggle && navLinks) {
+    navToggle.addEventListener("click", () => {
+      const isOpen = navLinks.classList.toggle("open");
+      navToggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+      if (iconOpen && iconClose) {
+        iconOpen.style.display = isOpen ? "none" : "block";
+        iconClose.style.display = isOpen ? "block" : "none";
+      }
+    });
+
+    navLinks.querySelectorAll("a").forEach((link) => {
+      link.addEventListener("click", () => {
+        navLinks.classList.remove("open");
+        navToggle.setAttribute("aria-expanded", "false");
+        if (iconOpen && iconClose) {
+          iconOpen.style.display = "block";
+          iconClose.style.display = "none";
+        }
+      });
+    });
+  }
+
+  // Terminal Download Section Toggle
+  const terminalDlToggle = document.getElementById("terminal-dl-toggle");
+  const installTabsBox = document.getElementById("install-tabs-box");
+  if (terminalDlToggle && installTabsBox) {
+    terminalDlToggle.addEventListener("click", () => {
+      const isHidden = installTabsBox.classList.toggle("hidden");
+      terminalDlToggle.classList.toggle("open", !isHidden);
+      terminalDlToggle.setAttribute("aria-expanded", isHidden ? "false" : "true");
+    });
+  }
+
+  // Install Command Tabs
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach((t) => { t.classList.remove("active"); t.setAttribute("aria-selected", "false"); });
       document.querySelectorAll(".cmd").forEach((c) => c.classList.remove("active"));
       tab.classList.add("active");
       tab.setAttribute("aria-selected", "true");
-      document.getElementById(tab.dataset.target).classList.add("active");
+      const targetCmd = document.getElementById(tab.dataset.target);
+      if (targetCmd) targetCmd.classList.add("active");
+    });
+  });
+
+  // Copy to Clipboard Buttons with UI feedback
+  document.querySelectorAll(".copy").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const textToCopy = btn.dataset.copy;
+      if (!textToCopy) return;
+      try {
+        await navigator.clipboard.writeText(textToCopy);
+        const originalSVG = btn.innerHTML;
+        btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+        setTimeout(() => {
+          btn.innerHTML = originalSVG;
+        }, 2000);
+      } catch (err) {
+        console.error("Failed to copy:", err);
+      }
     });
   });
 
@@ -1076,16 +1262,6 @@
     }
   })();
 
-  document.querySelectorAll(".copy").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(btn.dataset.copy);
-        btn.style.color = "var(--accent)";
-        setTimeout(() => { btn.style.color = ""; }, 1200);
-      } catch (_) {  }
-    });
-  });
-
   // OS Auto-Detection & Highlighting
   (() => {
     const ua = navigator.userAgent || "";
@@ -1096,26 +1272,6 @@
 
     const card = document.getElementById(`card-${os}`);
     if (card) card.classList.add("highlighted");
-  })();
-
-  // Optional Terminal Install Command Toggle
-  (() => {
-    const btn = document.getElementById("terminal-dl-toggle");
-    const box = document.getElementById("install-tabs-box");
-    if (btn && box) {
-      btn.addEventListener("click", () => {
-        const isHidden = box.classList.contains("hidden");
-        if (isHidden) {
-          box.classList.remove("hidden");
-          btn.classList.add("open");
-          btn.setAttribute("aria-expanded", "true");
-        } else {
-          box.classList.add("hidden");
-          btn.classList.remove("open");
-          btn.setAttribute("aria-expanded", "false");
-        }
-      });
-    }
   })();
 
   // Live Release & Download Asset Resolver from GitHub API
