@@ -598,13 +598,16 @@ fn newest_prerelease(list: Vec<Release>) -> Option<Release> {
         })
 }
 
-/// Release notes with HTML comments stripped.
+/// Release notes with HTML comments stripped and repeated sections dropped.
 ///
 /// GitHub's generated notes open with a `<!-- Release notes generated using
 /// configuration in .github/release.yml at v0.3.4-rc -->` marker. It is
 /// plumbing: the CLI dumps notes as plain text and the GUI renders them as
 /// simple styled lines, so neither hides it the way a markdown renderer
-/// would.
+/// would. A body that carries the generated block more than once (the
+/// release job appends rather than replaces when it runs again over a tag
+/// that already has a release) is collapsed back to one copy by
+/// [`dedupe_sections`].
 pub fn clean_notes(body: &str) -> String {
     let mut out = String::with_capacity(body.len());
     let mut rest = body;
@@ -633,7 +636,67 @@ pub fn clean_notes(body: &str) -> String {
         notes.push_str(line.trim_end());
         notes.push('\n');
     }
-    notes.trim_end().to_string()
+    dedupe_sections(notes.trim_end())
+}
+
+/// Drop repeated copies of the same generated block.
+///
+/// A release job that is re-run (or a release edited by
+/// `generate_release_notes` a second time) appends another copy of the
+/// generated notes to the body instead of replacing it, so v0.3.10 shipped
+/// with its "What's Changed" section five times over. The dialog is 500 px
+/// wide and shows the body verbatim, so the repeats are all the reader sees.
+/// Sections are split at their `#` heading and matched on their content, and
+/// only an exact repeat of one already kept is dropped — notes that genuinely
+/// say different things under the same heading survive.
+fn dedupe_sections(notes: &str) -> String {
+    let mut sections: Vec<Vec<&str>> = Vec::new();
+    for line in notes.lines() {
+        // A top-level (`#`/`##`) heading opens a section; deeper ones
+        // (`### 🚀 Features`) belong to the section they sit under.
+        let heading = line.starts_with("# ") || line.starts_with("## ");
+        if heading || sections.is_empty() {
+            sections.push(Vec::new());
+        }
+        sections
+            .last_mut()
+            .expect("a section exists: one is pushed above when empty")
+            .push(line);
+    }
+    let mut seen: Vec<String> = Vec::new();
+    let mut kept: Vec<&str> = Vec::new();
+    for section in sections {
+        // Compare on the meaningful lines only, so a copy that differs by
+        // the blank line a stripped comment left behind still counts as one.
+        let key = section
+            .iter()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if key.is_empty() || !seen.contains(&key) {
+            if !key.is_empty() {
+                seen.push(key);
+            }
+            kept.extend(section);
+        }
+    }
+    // Dropping a repeat leaves the blank lines that separated it behind.
+    let mut out = String::with_capacity(notes.len());
+    let mut blanks = 0;
+    for line in kept {
+        if line.trim().is_empty() {
+            blanks += 1;
+            if blanks > 1 || out.is_empty() {
+                continue;
+            }
+        } else {
+            blanks = 0;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
 }
 
 // ----------------------------------------------------------------- checksums
@@ -1106,6 +1169,29 @@ mod tests {
         assert_eq!(clean_notes("## Notes\n- one"), "## Notes\n- one");
         // An unterminated comment takes the rest with it.
         assert_eq!(clean_notes("keep\n<!-- dangling"), "keep");
+    }
+
+    #[test]
+    fn notes_lose_repeated_sections() {
+        // The real v0.3.10 body: the release job ran again over the tag and
+        // `generate_release_notes` appended the same block each time.
+        let once = "<!-- Release notes generated using configuration in \
+            .github/release.yml at v0.3.10 -->\n\n## What's Changed\n\
+            ### 🚀 Features\n* Add Firefox extension store link and update \
+            localization strings by @ja7ad in https://github.com/ja7ad/hydra/pull/27\
+            \n\n\n**Full Changelog**: \
+            https://github.com/ja7ad/hydra/compare/v0.3.9...v0.3.10";
+        let body = [once; 5].join("\n\n");
+        let out = clean_notes(&body);
+        assert_eq!(out, clean_notes(once));
+        assert_eq!(out.matches("What's Changed").count(), 1);
+        assert_eq!(out.matches("Full Changelog").count(), 1);
+        assert!(out.starts_with("## What's Changed"));
+        // Sections that only share a heading are both kept.
+        let two = "## What's Changed\n- one\n\n## What's Changed\n- two";
+        assert_eq!(clean_notes(two), two);
+        // Notes without any heading are left alone, repeats and all.
+        assert_eq!(clean_notes("- one\n- one"), "- one\n- one");
     }
 
     #[test]
