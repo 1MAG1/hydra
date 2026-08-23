@@ -668,7 +668,7 @@ const CHROME_STORE: &str =
 
 /// The Firefox build is not signed by addons.mozilla.org yet, so its row
 /// links to the manual-install walkthrough instead of a store listing.
-const FIREFOX_GUIDE: &str = "https://github.com/ja7ad/hydra/blob/main/extensions/firefox/README.md";
+const FIREFOX_STORE: &str = "https://addons.mozilla.org/en-US/firefox/addon/hdm-integration/";
 
 /// One extension row: brand mark on the left, what the extension does in the
 /// middle, the link button on the right. `link` is `None` for a browser with
@@ -732,9 +732,9 @@ fn extensions(_app: &App) -> El<'_> {
         ext_row(
             crate::icons::browser_firefox(),
             "Mozilla Firefox",
-            tr("Not on addons.mozilla.org yet: install the bundled build by hand from Hydra's extensions folder."),
-            tr("Manual install guide"),
-            Some(FIREFOX_GUIDE),
+            tr("Automatic download capture, right-click downloads and media sniffing. Published on the Firefox Addons."),
+            tr("Open Firefox Addons"),
+            Some(FIREFOX_STORE),
         ),
         ext_row(
             crate::icons::browser_safari(),
