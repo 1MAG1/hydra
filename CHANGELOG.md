@@ -5,6 +5,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [0.3.10] - 2026-08-23
+
+### Added
+
+- **Firefox Add-ons Store Publication (`hydra-gui`, `extensions/firefox`)**: Added direct store link to the official Firefox Add-ons listing (`addons.mozilla.org/en-US/firefox/addon/hdm-integration/`) in *Options → Extensions*, replacing manual installation guides with one-click store installation.
+- **Multi-Language Localization**: Updated Firefox extension translation strings across all 10 supported locales (`ar`, `en`, `es`, `fa`, `fr`, `ja`, `ko`, `nl`, `ru`, `zh`).
+
+---
+
 ## [0.3.9] - 2026-08-23
 
 ### Added
