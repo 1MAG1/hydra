@@ -12,7 +12,32 @@
 use iced::widget::{button, checkbox, container, pick_list, progress_bar, text_input};
 use iced::{Background, Border, Color, Theme};
 
+/// The text size the whole layout is written against: every `.size(...)` in
+/// the UI, and every padding, row height and column width sitting next to
+/// one, assumes this. View > Font moves the interface off it by scaling
+/// everything at once (see [`ui_scale`]) rather than by resizing text inside
+/// boxes that would then be the wrong height for it.
 pub const FONT_SIZE: f32 = 13.0;
+
+/// The View > Font entries: the label and the text size it stands for. Both
+/// menu surfaces (`ui::menu` in-window, `macos_menu` native) build their Font
+/// group from this, so the tick lines up with the setting on either.
+pub const FONT_CHOICES: [(&str, u16); 3] = [("Small", 12), ("Medium", 13), ("Large", 15)];
+
+/// The window scale factor for a View > Font choice: the ratio of the chosen
+/// size to the [`FONT_SIZE`] the layout was drawn at (12 -> 0.92, 13 -> 1.0,
+/// 15 -> 1.15). iced multiplies the whole interface by it, so text, the rows
+/// and buttons around it and the dialogs those sit in all grow together.
+///
+/// Clamped either side of a factor of two, and a config missing the field
+/// (`font_size` 0) reads as the base size, so a hand-edited config.toml
+/// cannot leave the app unreadable or the windows off-screen.
+pub fn ui_scale(font_size: u16) -> f32 {
+    if font_size == 0 {
+        return 1.0;
+    }
+    (f32::from(font_size) / FONT_SIZE).clamp(0.5, 2.0)
+}
 
 pub fn is_dark(theme: &Theme) -> bool {
     theme.extended_palette().background.base.text.r > 0.5
@@ -459,5 +484,23 @@ pub fn picker(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
             1.0,
             2.0,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_choices_scale_by_their_ratio() {
+        // The View > Font entries (ui/menu.rs, macos_menu.rs).
+        assert_eq!(ui_scale(13), 1.0);
+        assert!((ui_scale(12) - 12.0 / 13.0).abs() < f32::EPSILON);
+        assert!((ui_scale(15) - 15.0 / 13.0).abs() < f32::EPSILON);
+        // A config written before the field existed, and hand-edited
+        // nonsense, both stay usable.
+        assert_eq!(ui_scale(0), 1.0);
+        assert_eq!(ui_scale(2), 0.5);
+        assert_eq!(ui_scale(400), 2.0);
     }
 }

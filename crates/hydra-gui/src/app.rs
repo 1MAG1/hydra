@@ -830,7 +830,31 @@ impl App {
     /// Rebuild the native macOS menu bar so its check marks match state.
     #[cfg(target_os = "macos")]
     pub fn refresh_native_menu(&self) {
-        let state = crate::macos_menu::MenuState {
+        let state = self.native_menu_state();
+        let queues: Vec<String> = self.cfg.queues.iter().map(|q| q.name.clone()).collect();
+        crate::macos_menu::reinstall(&state, &queues, &i18n::available());
+    }
+
+    /// Re-tick the menu bar for a setting it displays, without rebuilding it.
+    ///
+    /// muda ticks a check item on click, whatever the app then does with the
+    /// activation, so the menu has to be set back to what the settings say —
+    /// see `macos_menu::sync`. Only the language and the queue submenus need
+    /// a rebuild; a toggle does not, and rebuilding for one used to leave
+    /// View > Font showing two sizes ticked at once.
+    #[cfg(target_os = "macos")]
+    pub fn sync_native_menu(&self) {
+        if !crate::macos_menu::sync(&self.native_menu_state()) {
+            self.refresh_native_menu();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn sync_native_menu(&self) {}
+
+    #[cfg(target_os = "macos")]
+    fn native_menu_state(&self) -> crate::macos_menu::MenuState {
+        crate::macos_menu::MenuState {
             dark_mode: self.cfg.settings.dark_mode,
             show_categories: self.cfg.settings.show_categories,
             font_size: self.cfg.settings.font_size,
@@ -843,9 +867,7 @@ impl App {
                 }
             },
             speed_limiter: self.cfg.settings.speed_limiter_on,
-        };
-        let queues: Vec<String> = self.cfg.queues.iter().map(|q| q.name.clone()).collect();
-        crate::macos_menu::reinstall(&state, &queues, &i18n::available());
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -985,6 +1007,68 @@ impl App {
         self.open_window(WinKind::Options)
     }
 
+    /// The View > Font ratio the windows are laid out at.
+    fn ui_scale(&self) -> f32 {
+        crate::theme::ui_scale(self.cfg.settings.font_size)
+    }
+
+    /// The size a window opens at, in OS points.
+    ///
+    /// Dialogs are laid out against `theme::FONT_SIZE`, and View > Font
+    /// scales the interface by the ratio to it (`scale_of` in main.rs), so
+    /// the window has to grow by the same ratio or a larger font just loses
+    /// the bottom row of the dialog. The main window is the exception: it is
+    /// resizable and reopens at whatever size it was left at.
+    fn window_size(&self, kind: WinKind) -> (f32, f32) {
+        if kind == WinKind::Main {
+            // Restore the last size when it is still sane for a screen;
+            // first run (or nonsense values) derives from the display. The
+            // floor only rejects nonsense: `min_size` below holds the window
+            // to a full toolbar row whatever the saved size says, and that
+            // floor moves with the font ratio while this range does not.
+            let saved = self
+                .cfg
+                .settings
+                .window_size
+                .filter(|(w, h)| (400.0..=4000.0).contains(w) && (300.0..=2500.0).contains(h));
+            let s = saved
+                .map(|(w, h)| iced::Size::new(w, h))
+                .unwrap_or_else(main_window_size);
+            return (s.width, s.height);
+        }
+        let (w, h) = match kind {
+            WinKind::Main => unreachable!("handled above"),
+            WinKind::AddUrl => (760.0, 168.0),
+            // New-download layout is short; Properties adds status/size/
+            // login/cookies/history rows. Size the window to the mode so
+            // neither shows dead space.
+            WinKind::FileInfo(_) => {
+                if self.file_info.is_new {
+                    (720.0, 356.0)
+                } else {
+                    (720.0, 560.0)
+                }
+            }
+            // Matches ProgToggleDetails: a box whose details are hidden
+            // must not spring back open when the font ratio resizes it.
+            WinKind::Progress(id) => {
+                let details = self.prog.get(&id).map(|p| p.details).unwrap_or(true);
+                (680.0, if details { 582.0 } else { 352.0 })
+            }
+            WinKind::Complete(_) => (600.0, 230.0),
+            WinKind::Options => (760.0, 700.0),
+            WinKind::Scheduler => (950.0, 660.0),
+            WinKind::Batch => (950.0, 700.0),
+            WinKind::About => (460.0, 300.0),
+            WinKind::Shortcuts => (520.0, 460.0),
+            WinKind::Confirm => (500.0, 200.0),
+            WinKind::Permissions => (640.0, 580.0),
+            WinKind::Update => (560.0, 520.0),
+        };
+        let s = self.ui_scale();
+        (w * s, h * s)
+    }
+
     pub fn open_window(&mut self, kind: WinKind) -> Task<Message> {
         if let Some(id) = self.win_of(kind) {
             return window::gain_focus(id);
@@ -1005,44 +1089,12 @@ impl App {
         } else {
             Task::none()
         };
-        // Dialogs are fixed-size and cannot minimize; only the
-        // download-progress box may minimize to the dock on its own.
-        let (size, resizable) = match kind {
-            WinKind::Main => {
-                // Restore the last size when it is still sane for a screen;
-                // first run (or nonsense values) derives from the display.
-                let saved =
-                    self.cfg.settings.window_size.filter(|(w, h)| {
-                        (900.0..=4000.0).contains(w) && (600.0..=2500.0).contains(h)
-                    });
-                let s = saved
-                    .map(|(w, h)| iced::Size::new(w, h))
-                    .unwrap_or_else(main_window_size);
-                ((s.width, s.height), true)
-            }
-            WinKind::AddUrl => ((760.0, 168.0), false),
-            // New-download layout is short; Properties adds status/size/
-            // login/cookies/history rows. Size the window to the mode so
-            // neither shows dead space.
-            WinKind::FileInfo(_) => {
-                if self.file_info.is_new {
-                    ((720.0, 356.0), false)
-                } else {
-                    ((720.0, 560.0), false)
-                }
-            }
-            WinKind::Progress(_) => ((680.0, 582.0), true),
-            WinKind::Complete(_) => ((600.0, 230.0), false),
-            WinKind::Options => ((760.0, 700.0), false),
-            WinKind::Scheduler => ((950.0, 660.0), false),
-            WinKind::Batch => ((950.0, 700.0), false),
-            WinKind::About => ((460.0, 300.0), false),
-            WinKind::Shortcuts => ((520.0, 460.0), false),
-            WinKind::Confirm => ((500.0, 200.0), false),
-            WinKind::Permissions => ((640.0, 580.0), false),
-            WinKind::Update => ((560.0, 520.0), false),
-        };
-        let minimizable = matches!(kind, WinKind::Main | WinKind::Progress(_));
+        // Dialogs are fixed-size and cannot minimize; only the main window
+        // and the download-progress box resize, and only they minimize to
+        // the dock on their own.
+        let size = self.window_size(kind);
+        let resizable = matches!(kind, WinKind::Main | WinKind::Progress(_));
+        let minimizable = resizable;
         // Centre sub-windows over the main window when its bounds are known.
         let position = match (kind, self.main_pos) {
             (WinKind::Main, _) | (_, None) => window::Position::Centered,
@@ -1079,7 +1131,10 @@ impl App {
             size: iced::Size::new(size.0, size.1),
             // Floor: just enough for the full toolbar row; the default
             // stays proportional to the display.
-            min_size: (kind == WinKind::Main).then_some(iced::Size::new(900.0, 600.0)),
+            min_size: (kind == WinKind::Main).then(|| {
+                let s = self.ui_scale();
+                iced::Size::new(900.0 * s, 600.0 * s)
+            }),
             resizable,
             minimizable,
             position,
@@ -2119,18 +2174,26 @@ impl App {
                 // Bookkeeping happens in WindowClosed once it's gone.
                 window::close(id)
             }
+            // Window geometry reaches us divided by the View > Font scale
+            // factor, because that is the space the interface is laid out
+            // in; `window::open` and `window::resize` speak OS points. Undo
+            // the ratio here so everything stored is in OS points and the
+            // two agree at any font size.
             Message::WinMoved(id, p) => {
                 if self.main_id == Some(id) {
-                    self.main_pos = Some(p);
+                    let s = self.ui_scale();
+                    self.main_pos = Some(Point::new(p.x * s, p.y * s));
                 }
                 Task::none()
             }
             Message::WinResized(id, size) => {
                 if self.main_id == Some(id) {
-                    self.main_size = size;
+                    let s = self.ui_scale();
+                    self.main_size = iced::Size::new(size.width * s, size.height * s);
                     // Remember it (written with the next config save).
                     if size.width >= 900.0 && size.height >= 600.0 {
-                        self.cfg.settings.window_size = Some((size.width, size.height));
+                        self.cfg.settings.window_size =
+                            Some((self.main_size.width, self.main_size.height));
                     }
                 }
                 Task::none()
@@ -2928,8 +2991,11 @@ impl App {
                 // Collapse the dialog itself: no dead space below the
                 // buttons when the details are hidden.
                 if let Some(win) = self.win_of(WinKind::Progress(id)) {
+                    // In OS points, so the collapsed box tracks View > Font
+                    // the same way the dialog it opened at does.
+                    let scale = self.ui_scale();
                     let h = if details { 582.0 } else { 352.0 };
-                    window::resize(win, iced::Size::new(680.0, h))
+                    window::resize(win, iced::Size::new(680.0 * scale, h * scale))
                 } else {
                     Task::none()
                 }
@@ -3808,7 +3874,7 @@ impl App {
                     engine::send(Cmd::SetLimit(id, lim));
                 }
                 self.save_config();
-                self.refresh_native_menu();
+                self.sync_native_menu();
                 Task::none()
             }
             MenuAction::Options => self.open_options(None),
@@ -3828,21 +3894,40 @@ impl App {
             MenuAction::HideCategories => {
                 self.cfg.settings.show_categories = !self.cfg.settings.show_categories;
                 self.save_config();
-                self.refresh_native_menu();
+                self.sync_native_menu();
                 Task::none()
             }
             MenuAction::ArrangeBy(key) => self.update(Message::SortBy(key)),
             MenuAction::ToggleDark => {
                 self.cfg.settings.dark_mode = !self.cfg.settings.dark_mode;
                 self.save_config();
-                self.refresh_native_menu();
+                self.sync_native_menu();
                 Task::none()
             }
-            MenuAction::FontSize(s) => {
-                self.cfg.settings.font_size = s;
+            MenuAction::FontSize(size) => {
+                let changed = self.cfg.settings.font_size != size;
+                self.cfg.settings.font_size = size;
+                // Even a click on the size already in use has to be written
+                // back to the menu: muda unticked it on the way in.
+                self.sync_native_menu();
+                if !changed {
+                    return Task::none();
+                }
                 self.save_config();
-                self.refresh_native_menu();
-                Task::none()
+                // The new ratio reaches the interface on the next redraw,
+                // but a dialog is sized for the ratio it opened at: resize
+                // the fixed ones now, or the extra rows a larger font needs
+                // have nowhere to go until the dialog is reopened.
+                let resizes: Vec<Task<Message>> = self
+                    .windows
+                    .iter()
+                    .filter(|(_, k)| **k != WinKind::Main)
+                    .map(|(id, kind)| {
+                        let (w, h) = self.window_size(*kind);
+                        window::resize(*id, iced::Size::new(w, h))
+                    })
+                    .collect();
+                Task::batch(resizes)
             }
             MenuAction::Language(l) => {
                 i18n::set_locale(&l);
