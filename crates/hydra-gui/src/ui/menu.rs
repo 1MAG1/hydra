@@ -185,7 +185,7 @@ pub fn entries(kind: MenuBarKind, app: &App) -> Vec<Entry> {
                 .sep(),
             Entry::sub(
                 tr("Font"),
-                [("Small", 12u16), ("Medium", 13), ("Large", 15)]
+                crate::theme::FONT_CHOICES
                     .into_iter()
                     .map(|(l, s)| {
                         Entry::item(tr(l), MenuAction::FontSize(s))

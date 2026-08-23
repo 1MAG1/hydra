@@ -26,10 +26,22 @@ pub struct MenuState {
     pub speed_limiter: bool,
 }
 
+/// The installed menu, plus the check items whose tick has to track the
+/// settings behind them.
+struct Installed {
+    /// Kept alive: AppKit retains the NSMenu, muda routes callbacks through
+    /// these wrappers, and a language switch rebuilds from here.
+    _menu: Menu,
+    hide_categories: CheckMenuItem,
+    dark_mode: CheckMenuItem,
+    speed_limiter: CheckMenuItem,
+    fonts: Vec<(u16, CheckMenuItem)>,
+    languages: Vec<(String, CheckMenuItem)>,
+}
+
 thread_local! {
-    /// The installed NSMenu's Rust wrappers (main thread only). Kept so a
-    /// language switch can rebuild and re-install a translated menu.
-    static CURRENT: RefCell<Option<Menu>> = const { RefCell::new(None) };
+    /// The installed NSMenu's Rust wrappers (main thread only).
+    static CURRENT: RefCell<Option<Installed>> = const { RefCell::new(None) };
 }
 
 fn item(label: &str, action: MenuAction) -> MenuItem {
@@ -113,23 +125,25 @@ pub fn reinstall(state: &MenuState, queues: &[String], languages: &[String]) {
     }
     let _ = downloads.append(&start_q);
     let _ = downloads.append(&stop_q);
+    let speed_limiter = check(
+        "Speed Limiter",
+        MenuAction::SpeedLimiterToggle,
+        state.speed_limiter,
+    );
     let _ = downloads.append_items(&[
-        &check(
-            "Speed Limiter",
-            MenuAction::SpeedLimiterToggle,
-            state.speed_limiter,
-        ),
+        &speed_limiter,
         &PredefinedMenuItem::separator(),
         &item("Options", MenuAction::Options),
     ]);
     let _ = menu.append(&downloads);
 
     let view = Submenu::new(tr("View"), true);
-    let _ = view.append(&check(
+    let hide_categories = check(
         "Hide categories",
         MenuAction::HideCategories,
         !state.show_categories,
-    ));
+    );
+    let _ = view.append(&hide_categories);
     let arrange = Submenu::new(tr("Arrange files"), true);
     for (label, key) in [
         ("File Name", SortKey::Name),
@@ -143,29 +157,28 @@ pub fn reinstall(state: &MenuState, queues: &[String], languages: &[String]) {
         let _ = arrange.append(&item(label, MenuAction::ArrangeBy(key)));
     }
     let _ = view.append(&arrange);
-    let _ = view.append(&check(
-        "Dark Mode support",
-        MenuAction::ToggleDark,
-        state.dark_mode,
-    ));
+    let dark_mode = check("Dark Mode support", MenuAction::ToggleDark, state.dark_mode);
+    let _ = view.append(&dark_mode);
     let font = Submenu::new(tr("Font"), true);
-    for (label, size) in [("Small", 12u16), ("Medium", 13), ("Large", 15)] {
-        let _ = font.append(&check(
-            label,
-            MenuAction::FontSize(size),
-            state.font_size == size,
-        ));
+    let mut fonts = Vec::new();
+    for (label, size) in crate::theme::FONT_CHOICES {
+        let it = check(label, MenuAction::FontSize(size), state.font_size == size);
+        let _ = font.append(&it);
+        fonts.push((size, it));
     }
     let _ = view.append(&font);
     let lang = Submenu::new(tr("Language"), true);
+    let mut langs = Vec::new();
     for l in languages {
-        let _ = lang.append(&CheckMenuItem::with_id(
+        let it = CheckMenuItem::with_id(
             MenuAction::Language(l.clone()).id(),
             crate::i18n::display_name(l),
             true,
             state.language == *l,
             None,
-        ));
+        );
+        let _ = lang.append(&it);
+        langs.push((l.clone(), it));
     }
     let _ = view.append(&lang);
     let _ = menu.append(&view);
@@ -181,7 +194,46 @@ pub fn reinstall(state: &MenuState, queues: &[String], languages: &[String]) {
     let _ = menu.append(&help);
 
     menu.init_for_nsapp();
-    // Keep the Rust wrappers alive (AppKit retains the NSMenu, muda routes
-    // callbacks through them) and drop the previous generation.
-    CURRENT.with(|c| *c.borrow_mut() = Some(menu));
+    // Keep the Rust wrappers alive and drop the previous generation.
+    CURRENT.with(|c| {
+        *c.borrow_mut() = Some(Installed {
+            _menu: menu,
+            hide_categories,
+            dark_mode,
+            speed_limiter,
+            fonts,
+            languages: langs,
+        });
+    });
+}
+
+/// Re-tick the installed menu from `state`, in place. `false` when no menu is
+/// installed yet (nothing to sync; the caller reinstalls).
+///
+/// AppKit flips a check item the moment it is clicked — muda does it in its
+/// own item handler, before the app sees the activation — so the tick a menu
+/// is left with is "whatever was clicked last", not what the setting says.
+/// Left alone, View > Font showed both the old and the new size ticked, and
+/// clicking the size already in use unticked it. The groups here are radio
+/// sets and toggles over settings the app owns, so every one of them is set
+/// from the settings rather than trusted to have toggled itself.
+pub fn sync(state: &MenuState) -> bool {
+    CURRENT.with(|c| {
+        let borrow = c.borrow();
+        let Some(installed) = borrow.as_ref() else {
+            return false;
+        };
+        installed
+            .hide_categories
+            .set_checked(!state.show_categories);
+        installed.dark_mode.set_checked(state.dark_mode);
+        installed.speed_limiter.set_checked(state.speed_limiter);
+        for (size, item) in &installed.fonts {
+            item.set_checked(*size == state.font_size);
+        }
+        for (lang, item) in &installed.languages {
+            item.set_checked(*lang == state.language);
+        }
+        true
+    })
 }

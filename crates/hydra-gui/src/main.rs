@@ -63,6 +63,10 @@ fn main() -> iced::Result {
         .title(title)
         .theme(theme_of)
         .style(style_of)
+        // View > Font is a scale factor, not a text size: iced grows the
+        // whole interface by the ratio, so the rows, buttons and dialog
+        // chrome keep the proportions the layout was drawn with.
+        .scale_factor(scale_of)
         .subscription(subscription)
         .font(include_bytes!("../assets/fonts/Vazirmatn-Regular.ttf").as_slice())
         .default_font(iced::Font::with_name("Vazirmatn"))
@@ -276,6 +280,11 @@ fn theme_of(app: &App, _id: window::Id) -> Theme {
 
 /// Paint every window surface explicitly: unpainted regions otherwise show
 /// through as black bands during resize/tab switches.
+/// The View > Font ratio, applied to every window (see `theme::ui_scale`).
+fn scale_of(app: &App, _id: window::Id) -> f32 {
+    theme::ui_scale(app.cfg.settings.font_size)
+}
+
 fn style_of(_app: &App, t: &Theme) -> iced::theme::Style {
     iced::theme::Style {
         background_color: theme::window_bg(t),
