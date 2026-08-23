@@ -712,7 +712,29 @@ jobs:
                 sleep $((attempt * 30))
               done
               sleep 30
-            done
+        for entry in "noble:24.04" "jammy:22.04"; do
+  DISTRO="${entry%%:*}"; SERIES="${entry##*:}"
+  DEB_VERSION="${VERSION}ppa1~ubuntu${SERIES}.1"
+
+  printf "hydra (%s) %s; urgency=medium\n\n  * Automated Launchpad PPA release for %s.\n\n -- %s  %s\n" \
+    "$DEB_VERSION" "$DISTRO" "$DISTRO" "$GPG_USER" "$(date -R -u)" > debian/changelog
+
+  debuild --no-lintian -S -d -k"$GPG_KEY_ID"
+
+  CHANGES="../hydra_${DEB_VERSION}_source.changes"
+  [ -f "$CHANGES" ] || { echo "::error::$CHANGES not produced"; ls -1 ../*.changes >&2 || true; exit 1; }
+
+  for attempt in 1 2 3 4 5; do
+    if timeout 600 dput -u -f "$LAUNCHPAD_PPA" "$CHANGES"; then
+      echo "queued $DISTRO on attempt $attempt (acceptance is reported by Launchpad via email)"
+      break
+    fi
+    [ "$attempt" -lt 5 ] || { echo "::error::dput failed 5 times for $DISTRO"; exit 1; }
+    echo "dput failed for $DISTRO (attempt $attempt); retrying in $((attempt * 30))s"
+    sleep $((attempt * 30))
+  done
+  [ "$DISTRO" = jammy ] || sleep 30
+done
             echo "Uploaded PPA packages to $LAUNCHPAD_PPA"
           else
             echo "note: LAUNCHPAD_GPG_KEY or LAUNCHPAD_PPA not set; skipping Launchpad release"
