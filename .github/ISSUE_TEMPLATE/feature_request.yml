@@ -1,0 +1,109 @@
+name: 💡 Feature Request
+description: Suggest a new capability or an improvement to an existing one.
+title: "feat: "
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement to HYDRA.
+
+        For large features or anything that changes engine behavior (scheduling, range
+        stealing, stall detection, integrity), this issue is exactly the right place to
+        start — please discuss the design here **before** writing code, as described in
+        [CONTRIBUTING.md](https://github.com/ja7ad/hydra/blob/main/CONTRIBUTING.md#pull-request-process).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checklist
+      options:
+        - label: I searched [existing issues](https://github.com/ja7ad/hydra/issues?q=is%3Aissue) and this has not been proposed already.
+          required: true
+        - label: I checked the [README](https://github.com/ja7ad/hydra/blob/main/README.md) and this is not already supported.
+          required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Where would this feature live?
+      options:
+        - CLI (`hydra`)
+        - Interactive TUI (`hydra interactive`)
+        - Desktop GUI (Hydra Download Manager)
+        - Engine / scheduling (`hya-core`)
+        - Transport / protocols (`hya-net` — HTTP, FTP, proxies, TLS)
+        - Embeddable library (`libhydra` / C ABI)
+        - Browser extension (Chrome / Edge / Firefox / Safari)
+        - Native messaging host (`hydra-host`)
+        - Updater
+        - Installer / packaging (install script, Homebrew, PPA, COPR, MSI)
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: |
+        What are you trying to do that HYDRA makes hard or impossible today? Describe the
+        situation rather than the fix — a concrete case ("I mirror 40 GB nightly builds
+        over a flaky link and …") is worth more than a general wish.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        What should HYDRA do instead? If it's a CLI flag, a GUI control or a C ABI entry
+        point, sketch the shape you have in mind.
+      placeholder: |
+        e.g. `hydra --mirror-timeout 30s URL` — drop a mirror that hasn't delivered a
+        range within the timeout instead of waiting on the global stall detector.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing flags, other tools, or workarounds you tried, and why they fall short.
+
+  - type: checkboxes
+    id: platforms
+    attributes:
+      label: Platforms this should cover
+      options:
+        - label: Linux
+        - label: macOS
+        - label: Windows
+        - label: Android / iOS (via `libhydra`)
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: |
+        Links to RFCs or protocol specs, prior art in other download managers (aria2,
+        wget2, IDM, …), screenshots or mockups for GUI ideas — anything that helps.
+
+  - type: checkboxes
+    id: compat
+    attributes:
+      label: Compatibility
+      options:
+        - label: This changes existing behavior (flags, defaults, output format, or the C ABI).
+          required: false
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I'm willing to open a pull request implementing this.
+          required: false
