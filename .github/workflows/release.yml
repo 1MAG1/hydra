@@ -588,7 +588,7 @@ jobs:
           make_latest: ${{ needs.verify-version.outputs.prerelease != 'true' }}
 
       - name: Update Homebrew Tap
-        if: needs.verify-version.outputs.prerelease != 'true'
+        if: needs.verify-version.outputs.prerelease == 'false'
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
@@ -609,7 +609,7 @@ jobs:
           fi
 
       - name: Trigger Fedora Copr Build
-        if: needs.verify-version.outputs.prerelease != 'true'
+        if: needs.verify-version.outputs.prerelease == 'false'
         env:
           COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
           COPR_PROJECT: ${{ secrets.COPR_PROJECT }}
@@ -647,7 +647,7 @@ jobs:
           fi
 
       - name: Build and Publish to Launchpad PPA
-        if: needs.verify-version.outputs.prerelease != 'true'
+        if: needs.verify-version.outputs.prerelease == 'false'
         env:
           LAUNCHPAD_GPG_KEY: ${{ secrets.LAUNCHPAD_GPG_KEY }}
           LAUNCHPAD_PPA: ${{ secrets.LAUNCHPAD_PPA }}
@@ -660,20 +660,37 @@ jobs:
 
             # Import GPG private signing key
             echo "$LAUNCHPAD_GPG_KEY" | gpg --import --batch --yes
-            GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG --with-colons | awk -F: '/^sec:/ { print $5; exit }')
+
+            # Fingerprint of the first *secret* key
+            GPG_KEY_ID=$(gpg --list-secret-keys --with-colons \
+              | awk -F: '/^sec:/ { want = 1; next } want && /^fpr:/ { print $10; exit }')
+            if [ -z "$GPG_KEY_ID" ]; then
+              echo "error: LAUNCHPAD_GPG_KEY imported no secret key; there is nothing to sign with." >&2
+              echo "hint: the secret must be an ASCII-armored *private* key," >&2
+              echo "      i.e. gpg --export-secret-keys --armor <keyid>, not gpg --export." >&2
+              echo "keys currently in the keyring:" >&2
+              gpg --list-keys --keyid-format LONG >&2 || true
+              exit 1
+            fi
+            echo "Signing PPA uploads with GPG key $GPG_KEY_ID"
             GPG_USER=$(gpg --list-secret-keys --with-colons | awk -F: '/^uid:/ { print $10; exit }')
             [ -n "$GPG_USER" ] || GPG_USER="Hydra Maintainers <dev@hydra.app>"
 
-            # Enable passive FTP for dput globally without overriding default PPA handler
+            # Enable passive FTP for dput globally
             printf '[DEFAULT]\npassive_ftp = 1\n' > ~/.dput.cf
 
-            # Vendor dependencies for offline building in Launchpad builders
+            # Vendor dependencies for offline building
             cargo vendor vendor/
 
-            # Copy packaging directory into place
+            # Remove per-crate checksum manifests (they list paths that dpkg-source
+            # omits and cargo would reject)
+            find vendor -name .cargo-checksum.json -print0 \
+              | xargs -0 perl -pi -e 's/"files":\{[^}]*\}/"files":{}/'
+
+            # Copy Debian packaging files to debian/ directory
             cp -r packaging/debian debian
 
-            # Build source packages for Ubuntu 24.04 (noble) and 22.04 (jammy)
+            # Update changelog and build source packages for each distribution
             for DISTRO in noble jammy; do
               printf "hydra (%s-1ppa1~%s1) %s; urgency=medium\n\n  * Automated Launchpad PPA release for %s.\n\n -- %s  %s\n" \
                 "$VERSION" "$DISTRO" "$DISTRO" "$DISTRO" "$GPG_USER" "$(date -R)" > debian/changelog
