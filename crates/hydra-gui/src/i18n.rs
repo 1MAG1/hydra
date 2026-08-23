@@ -7,7 +7,7 @@
 //! the English text itself — a missing key can never render as an identifier.
 //!
 //! Catalogues are flat JSON maps. Built-in languages ship inside the binary
-//! from `src/locale/<tag>.json` (`en.json` is the identity template
+//! from `assets/locale/<tag>.json` (`en.json` is the identity template
 //! translators copy); users can add or override with
 //! `<app_dir>/locales/<tag>.json` on disk — disk entries win over built-ins
 //! for the same tag.
@@ -21,16 +21,16 @@ use std::sync::RwLock;
 
 /// Languages compiled into the binary: (tag, native display name, catalogue).
 static BUILTIN: &[(&str, &str, &str)] = &[
-    ("en", "English", include_str!("locale/en.json")),
-    ("fa", "فارسی", include_str!("locale/fa.json")),
-    ("zh", "简体中文", include_str!("locale/zh.json")),
-    ("ru", "Русский", include_str!("locale/ru.json")),
-    ("fr", "Français", include_str!("locale/fr.json")),
-    ("nl", "Nederlands", include_str!("locale/nl.json")),
-    ("ar", "العربية", include_str!("locale/ar.json")),
-    ("ja", "日本語", include_str!("locale/ja.json")),
-    ("es", "Español", include_str!("locale/es.json")),
-    ("ko", "한국어", include_str!("locale/ko.json")),
+    ("en", "English", include_str!("../assets/locale/en.json")),
+    ("fa", "فارسی", include_str!("../assets/locale/fa.json")),
+    ("zh", "简体中文", include_str!("../assets/locale/zh.json")),
+    ("ru", "Русский", include_str!("../assets/locale/ru.json")),
+    ("fr", "Français", include_str!("../assets/locale/fr.json")),
+    ("nl", "Nederlands", include_str!("../assets/locale/nl.json")),
+    ("ar", "العربية", include_str!("../assets/locale/ar.json")),
+    ("ja", "日本語", include_str!("../assets/locale/ja.json")),
+    ("es", "Español", include_str!("../assets/locale/es.json")),
+    ("ko", "한국어", include_str!("../assets/locale/ko.json")),
 ];
 
 static CATALOGUE: RwLock<Option<HashMap<String, String>>> = RwLock::new(None);
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn test_builtin_locales_valid_and_complete() {
-        let en_raw = include_str!("locale/en.json");
+        let en_raw = include_str!("../assets/locale/en.json");
         let en_map: HashMap<String, String> =
             serde_json::from_str(en_raw).expect("en.json should be valid JSON");
 

@@ -661,13 +661,17 @@ fn sites(app: &App) -> El<'_> {
     .into()
 }
 
-/// The Chrome Web Store listing — the one published store today. Chromium
-/// browsers (Edge, Brave, Vivaldi, Opera, Arc) install the same item from it.
+/// The Chrome Web Store listing. Edge has a store of its own (below); the
+/// remaining Chromium browsers install the same item from here.
 const CHROME_STORE: &str =
     "https://chromewebstore.google.com/detail/hydra-download-manager-in/oieelfilllghmbnhofajpgpmmilfihmo";
 
 /// The Firefox Add-ons listing.
 const FIREFOX_STORE: &str = "https://addons.mozilla.org/en-US/firefox/addon/hdm-integration/";
+
+/// The Microsoft Edge Add-ons listing: same extension, Edge's own store.
+const EDGE_STORE: &str =
+    "https://microsoftedge.microsoft.com/addons/detail/hydra-download-manager-in/obemipfpeenmhkdpkobdkeedhdakaoai";
 
 /// One extension row: brand mark on the left, what the extension does in the
 /// middle, the link button on the right. `link` is `None` for a browser with
@@ -722,18 +726,25 @@ fn extensions(_app: &App) -> El<'_> {
             Some(CHROME_STORE),
         ),
         ext_row(
-            crate::icons::browser_edge(),
-            "Microsoft Edge / Brave / Vivaldi / Opera",
-            tr("Chromium browsers install the very same extension from the Chrome Web Store."),
-            tr("Open Chrome Web Store"),
-            Some(CHROME_STORE),
-        ),
-        ext_row(
             crate::icons::browser_firefox(),
             "Mozilla Firefox",
             tr("Automatic download capture, right-click downloads and media sniffing. Published on the Firefox Addons."),
             tr("Open Firefox Addons"),
             Some(FIREFOX_STORE),
+        ),
+        ext_row(
+            crate::icons::browser_edge(),
+            "Microsoft Edge",
+            tr("Automatic download capture, right-click downloads and media sniffing. Published on Microsoft Edge Add-ons."),
+            tr("Open Edge Add-ons"),
+            Some(EDGE_STORE),
+        ),
+        ext_row(
+            crate::icons::browser_chromium(),
+            "Brave / Vivaldi / Opera / Arc / Chromium",
+            tr("Chromium browsers install the very same extension from the Chrome Web Store."),
+            tr("Open Chrome Web Store"),
+            Some(CHROME_STORE),
         ),
         ext_row(
             crate::icons::browser_safari(),
