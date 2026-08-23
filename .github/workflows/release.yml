@@ -574,6 +574,15 @@ jobs:
           sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="${GITHUB_REF_NAME}" --jq .body > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
       # A pre-release tag (v0.3.0-rc) is published as a GitHub pre-release and
       # is never marked latest, so `releases/latest` — what the in-app updater
       # polls — keeps pointing at the last stable release. A plain tag
@@ -583,7 +592,7 @@ jobs:
         with:
           name: hydra ${{ needs.verify-version.outputs.tag_version }}
           files: dist/*
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           prerelease: ${{ needs.verify-version.outputs.prerelease == 'true' }}
           make_latest: ${{ needs.verify-version.outputs.prerelease != 'true' }}
 
