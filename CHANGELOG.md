@@ -5,6 +5,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [0.3.11] - 2026-08-23
+
+### Added
+
+- **Microsoft Edge Add-ons Store Publication (`hydra-gui`, `README.md`)**: Added direct store link to the official Microsoft Edge Add-ons listing (`microsoftedge.microsoft.com/addons/detail/hydra-download-manager-in/obemipfpeenmhkdpkobdkeedhdakaoai`) in *Options → Extensions*, with dedicated Microsoft Edge brand artwork and separated rows for other Chromium-based browsers (Brave, Vivaldi, Opera, Arc, Chromium).
+- **GitHub Issue Templates (`.github/ISSUE_TEMPLATE`)**: Added standardized issue form templates for bug reports and feature requests with platform/component selectors, reproduction guidance, and security disclosure links.
+
+### Fixed
+
+- **UI Scaling by Font Size Setting (`hydra-gui`)**: Fixed font size setting by scaling the entire GUI window interface proportionately (`theme::ui_scale`), keeping layouts, buttons, and dialogs balanced rather than resizing text within fixed-size containers.
+- **macOS Native Menu State Synchronization (`hydra-gui`)**: Added in-place menu synchronization (`macos_menu::sync`) to prevent radio and checkbox menu items (Dark Mode, Speed Limiter, Font Size, Language) from becoming desynchronized or dual-ticked on click.
+- **Release Notes Deduplication (`hydra-updater`)**: Fixed duplicate release note sections appearing in in-app update dialogs when release workflows or notes generators run multiple times over the same tag.
+- **Launchpad PPA Build Toolchain & Vendoring (`packaging/debian`, CI)**: Fixed Launchpad PPA source builds on Ubuntu 24.04 (noble) and 22.04 (jammy) by targeting versioned `rustc-1.91` / `cargo-1.91` packages, configuring `CARGO_HOME` for sbuild sandboxes, and clearing per-crate `.cargo-checksum.json` paths during packaging.
+- **Release CI GPG Key Validation (`.github/workflows/release.yml`)**: Added fail-fast validation in release automation to verify secret signing keys are present in `LAUNCHPAD_GPG_KEY` before attempting PPA uploads.
+
+### Changed & Refactored
+
+- **Korean Localization**: Updated and completed Korean (`ko`) translation strings for dialogs, settings, updater prompts, and extension options.
+- **GUI Asset Organization (`hydra-gui`)**: Reorganized built-in localization catalogues into `crates/hydra-gui/assets/locale/` alongside visual brand assets.
+- **Release Automation Prerelease Filtering (`.github/workflows/release.yml`)**: Prevented automated publishing of pre-release builds to Homebrew tap, Fedora Copr, and Launchpad PPA repositories.
+
+---
+
 ## [0.3.10] - 2026-08-23
 
 ### Added
