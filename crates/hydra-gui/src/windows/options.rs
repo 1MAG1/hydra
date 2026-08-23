@@ -666,8 +666,7 @@ fn sites(app: &App) -> El<'_> {
 const CHROME_STORE: &str =
     "https://chromewebstore.google.com/detail/hydra-download-manager-in/oieelfilllghmbnhofajpgpmmilfihmo";
 
-/// The Firefox build is not signed by addons.mozilla.org yet, so its row
-/// links to the manual-install walkthrough instead of a store listing.
+/// The Firefox Add-ons listing.
 const FIREFOX_STORE: &str = "https://addons.mozilla.org/en-US/firefox/addon/hdm-integration/";
 
 /// One extension row: brand mark on the left, what the extension does in the
