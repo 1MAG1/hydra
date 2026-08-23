@@ -661,12 +661,7 @@ jobs:
             # Import GPG private signing key
             echo "$LAUNCHPAD_GPG_KEY" | gpg --import --batch --yes
 
-            # Fingerprint of the first *secret* key. gpg exits 0 and prints
-            # nothing when the imported material held only a public key, so an
-            # unchecked empty value here reaches debuild as a bare "-k":
-            # debsign's getopt then swallows the .changes filename as -k's
-            # argument and dies with "Must be run from top of source dir or a
-            # .changes file given as arg".
+            # Fingerprint of the first *secret* key
             GPG_KEY_ID=$(gpg --list-secret-keys --with-colons \
               | awk -F: '/^sec:/ { want = 1; next } want && /^fpr:/ { print $10; exit }')
             if [ -z "$GPG_KEY_ID" ]; then
@@ -681,16 +676,21 @@ jobs:
             GPG_USER=$(gpg --list-secret-keys --with-colons | awk -F: '/^uid:/ { print $10; exit }')
             [ -n "$GPG_USER" ] || GPG_USER="Hydra Maintainers <dev@hydra.app>"
 
-            # Enable passive FTP for dput globally without overriding default PPA handler
+            # Enable passive FTP for dput globally
             printf '[DEFAULT]\npassive_ftp = 1\n' > ~/.dput.cf
 
-            # Vendor dependencies for offline building in Launchpad builders
+            # Vendor dependencies for offline building
             cargo vendor vendor/
 
-            # Copy packaging directory into place
+            # Remove per-crate checksum manifests (they list paths that dpkg-source
+            # omits and cargo would reject)
+            find vendor -name .cargo-checksum.json -print0 \
+              | xargs -0 perl -pi -e 's/"files":\{[^}]*\}/"files":{}/'
+
+            # Copy Debian packaging files to debian/ directory
             cp -r packaging/debian debian
 
-            # Build source packages for Ubuntu 24.04 (noble) and 22.04 (jammy)
+            # Update changelog and build source packages for each distribution
             for DISTRO in noble jammy; do
               printf "hydra (%s-1ppa1~%s1) %s; urgency=medium\n\n  * Automated Launchpad PPA release for %s.\n\n -- %s  %s\n" \
                 "$VERSION" "$DISTRO" "$DISTRO" "$DISTRO" "$GPG_USER" "$(date -R)" > debian/changelog
