@@ -660,7 +660,24 @@ jobs:
 
             # Import GPG private signing key
             echo "$LAUNCHPAD_GPG_KEY" | gpg --import --batch --yes
-            GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG --with-colons | awk -F: '/^sec:/ { print $5; exit }')
+
+            # Fingerprint of the first *secret* key. gpg exits 0 and prints
+            # nothing when the imported material held only a public key, so an
+            # unchecked empty value here reaches debuild as a bare "-k":
+            # debsign's getopt then swallows the .changes filename as -k's
+            # argument and dies with "Must be run from top of source dir or a
+            # .changes file given as arg".
+            GPG_KEY_ID=$(gpg --list-secret-keys --with-colons \
+              | awk -F: '/^sec:/ { want = 1; next } want && /^fpr:/ { print $10; exit }')
+            if [ -z "$GPG_KEY_ID" ]; then
+              echo "error: LAUNCHPAD_GPG_KEY imported no secret key; there is nothing to sign with." >&2
+              echo "hint: the secret must be an ASCII-armored *private* key," >&2
+              echo "      i.e. gpg --export-secret-keys --armor <keyid>, not gpg --export." >&2
+              echo "keys currently in the keyring:" >&2
+              gpg --list-keys --keyid-format LONG >&2 || true
+              exit 1
+            fi
+            echo "Signing PPA uploads with GPG key $GPG_KEY_ID"
             GPG_USER=$(gpg --list-secret-keys --with-colons | awk -F: '/^uid:/ { print $10; exit }')
             [ -n "$GPG_USER" ] || GPG_USER="Hydra Maintainers <dev@hydra.app>"
 
