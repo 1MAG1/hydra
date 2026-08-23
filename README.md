@@ -197,7 +197,28 @@ The compiled binary will be located at `target/release/hydra`. To build the GUI 
 
 ### Browser Extension
 
-Every installer ships the extension with the app, in both shapes — packed and unpacked:
+Hydra integrates directly with web browsers to automatically capture downloads, provide right-click context menu options, and intercept media streams.
+
+#### Official Store Listings (Recommended)
+
+Install the extension directly from the official store for your browser:
+
+- **Chrome Web Store** (for Google Chrome, Microsoft Edge, Brave, Vivaldi, Opera, Arc, and Chromium-based browsers):  
+  [**Chrome Web Store: Hydra Download Manager Integration**](https://chromewebstore.google.com/detail/hydra-download-manager-in/oieelfilllghmbnhofajpgpmmilfihmo)
+- **Firefox Add-ons (AMO)** (for Mozilla Firefox):  
+  [**Firefox Add-ons: HDM Integration**](https://addons.mozilla.org/en-US/firefox/addon/hdm-integration/)
+- **Safari**: Ships inside the macOS desktop application bundle (enable under *Safari → Settings → Extensions*).
+
+> **Tip:** In the desktop GUI, you can also view status and open extension store listings directly from **Options → Extensions** or the **Extensions** toolbar button.
+
+#### Development & Manual Installation
+
+Extension source code and resources are maintained under the [`extensions/`](extensions/) directory:
+- [`extensions/chrome/`](extensions/chrome/) — Chromium MV3 extension source code (shared core).
+- [`extensions/firefox/`](extensions/firefox/) — Firefox MV3 event-page add-on source.
+- [`extensions/safari/`](extensions/safari/) — Safari Web Extension resources.
+
+Every installer also ships pre-built extension packages with the app in both packed (`.zip` / `.xpi`) and unpacked shapes:
 
 | Install | Extensions directory |
 | --- | --- |
@@ -207,27 +228,22 @@ Every installer ships the extension with the app, in both shapes — packed and 
 | Linux (.deb / .rpm) | `/usr/share/hydra-download-manager/extensions` |
 | Archive / `install.sh` | `<prefix>/share/hydra/extensions` |
 
-Each of those holds `hydra-chrome-<version>.zip` and `hydra-firefox-<version>.xpi` (packed), the
-same builds unpacked as `chrome/` and `firefox/`, and an `INSTALL.txt` with the steps below
-written for that machine's paths. Builds made with the extension signing key also carry a
-signed `hydra-chrome-<version>.crx`.
-
-The published builds are **unsigned**, so each browser needs its developer mode:
+##### Sideloading Unpacked / Development Builds
 
 - **Chrome, Edge, Opera, Brave, Vivaldi, Arc, Chromium** — open `chrome://extensions`
   (`edge://extensions`, `opera://extensions`, …), turn on **Developer mode**, choose
-  **Load unpacked**, and pick the `chrome/` directory. The manifest `key` pins the id to
-  `jpnonmbbkjdpeebdhkjoliklfhkdcomj` in every one of them, which is the id the native-messaging
-  host allow-lists. The two packed shapes are for distribution rather than hand-installing: the
-  `.zip` is the Web Store upload format, and the signed `.crx` is for enterprise policy
+  **Load unpacked**, and pick the [`extensions/chrome/`](extensions/chrome/) (or bundled `chrome/`) directory. The manifest `key` pins the id to
+  `jpnonmbbkjdpeebdhkjoliklfhkdcomj` across all Chromium browsers, matching the native-messaging
+  host allow-list. The packed `.zip` is the Web Store upload format, and the signed `.crx` is for enterprise policy
   deployment (`ExtensionSettings` / `ExtensionInstallForcelist` against an update manifest you
-  host) — Chromium refuses a `.crx` dragged in from outside the Web Store.
+  host).
 - **Firefox** — open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…** and pick
-  the `.xpi` (removed at the next restart). Developer Edition, Nightly and ESR can install it
-  permanently after setting `xpinstall.signatures.required` to `false` in `about:config`; release
-  and Beta Firefox always require a signed add-on.
+  [`extensions/firefox/manifest.json`](extensions/firefox/manifest.json) or the packed `.xpi`. Developer Edition, Nightly, and ESR can install it
+  permanently after setting `xpinstall.signatures.required` to `false` in `about:config`.
 
-To build them from a checkout:
+##### Building Extensions from Source
+
+To build and assemble extensions from a repository checkout:
 
 ```bash
 make extensions                                   # -> target/extensions
