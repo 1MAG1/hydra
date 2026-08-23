@@ -254,6 +254,96 @@ pub fn stop_queue(enabled: bool) -> svg::Handle {
         .clone()
 }
 
+pub fn extensions(enabled: bool) -> svg::Handle {
+    // Rasterized-icon handles are cached: rebuilding the SVG string every
+    // frame re-hashed kilobytes per icon per redraw for identical pixels.
+    static C: OnceLock<[svg::Handle; 2]> = OnceLock::new();
+    C.get_or_init(|| {
+        let make = |enabled| gradient_icon(
+        r#"<path d="M13 6.5 h3.4 a2.4 2.4 0 0 1 0 4.8 h3.6 a1.4 1.4 0 0 1 1.4 1.4 v3.6 a2.4 2.4 0 0 1 4.8 0 v3.4 a1.4 1.4 0 0 1 -1.4 1.4 h-3.4 v3.4 a1.4 1.4 0 0 1 -1.4 1.4 H8.4 A1.4 1.4 0 0 1 7 24.5 V13 a1.4 1.4 0 0 1 1.4 -1.4 H12 A2.4 2.4 0 0 1 13 6.5 z"/>"#,
+        "#4F8FE8",
+        "#9A7FE8",
+            enabled,
+        );
+        [make(false), make(true)]
+    })[enabled as usize]
+        .clone()
+}
+
+// ------------------------------------------------------------ browser marks
+
+/// Full-colour brand mark, 32x32, for the Extensions page. Unlike the
+/// toolbar set these are filled shapes rather than gradient outlines: a
+/// browser logo is only recognisable in its own colours.
+fn brand_icon(body: &str) -> svg::Handle {
+    let svg =
+        format!(r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">{body}</svg>"##);
+    svg::Handle::from_memory(svg.into_bytes())
+}
+
+/// Chrome: three 120-degree sectors around the blue hub.
+pub fn browser_chrome() -> svg::Handle {
+    static C: OnceLock<svg::Handle> = OnceLock::new();
+    C.get_or_init(|| {
+        brand_icon(
+            r##"<path d="M16 16 L1 16 A15 15 0 0 1 23.5 3.01 Z" fill="#EA4335"/>
+<path d="M16 16 L23.5 3.01 A15 15 0 0 1 23.5 28.99 Z" fill="#FBBC04"/>
+<path d="M16 16 L23.5 28.99 A15 15 0 0 1 1 16 Z" fill="#34A853"/>
+<circle cx="16" cy="16" r="7.6" fill="#FFFFFF"/><circle cx="16" cy="16" r="6" fill="#4285F4"/>"##,
+        )
+    })
+    .clone()
+}
+
+/// Edge: the blue-to-teal wave inside a dark ring.
+pub fn browser_edge() -> svg::Handle {
+    static C: OnceLock<svg::Handle> = OnceLock::new();
+    C.get_or_init(|| {
+        brand_icon(
+            r##"<defs><linearGradient id="e" x1="0" y1="1" x2="1" y2="0">
+<stop offset="0" stop-color="#0F5FCB"/><stop offset="0.55" stop-color="#1B9DE2"/>
+<stop offset="1" stop-color="#37D0A8"/></linearGradient></defs>
+<circle cx="16" cy="16" r="15" fill="url(#e)"/>
+<path d="M4.6 10.5 A13.5 13.5 0 0 1 28.6 13.2 a9 9 0 0 0 -12.4 3.4 c-2.4 4.2 0.6 8.4 4.6 9.6 A13.5 13.5 0 0 1 4.6 10.5 z" fill="#FFFFFF" opacity="0.92"/>
+<path d="M9.2 9.4 A8.6 8.6 0 0 1 24 12.4 a11 11 0 0 0 -13.6 1.2 c-1.5 1.5 -2 3.2 -1.9 4.6 a9.3 9.3 0 0 1 0.7 -8.8 z" fill="#0B4EA2"/>"##,
+        )
+    })
+    .clone()
+}
+
+/// Firefox: the orange-to-magenta flame wrapped round a violet core.
+pub fn browser_firefox() -> svg::Handle {
+    static C: OnceLock<svg::Handle> = OnceLock::new();
+    C.get_or_init(|| {
+        brand_icon(
+            r##"<defs><radialGradient id="f" cx="0.62" cy="0.28" r="0.85">
+<stop offset="0" stop-color="#FFE03D"/><stop offset="0.35" stop-color="#FF9500"/>
+<stop offset="0.7" stop-color="#F2453D"/><stop offset="1" stop-color="#A0389C"/>
+</radialGradient></defs>
+<path d="M28.4 9.6 a13.5 13.5 0 1 1 -6.2 -6.4 l-1 4 3.9 -1.7 1.3 3.6 z" fill="url(#f)"/>
+<path d="M16 6.4 a8.6 8.6 0 0 1 8.2 5 c-2 -1.6 -4.7 -2.2 -7.4 -1.6 -3.6 0.8 -5.4 3 -5.9 5.4 -0.4 2 0.2 3.8 1.1 5.1 a8.6 8.6 0 0 1 4 -13.9 z" fill="#FFFFFF" opacity="0.32"/>
+<path d="M16 11.6 a6 6 0 1 1 -4.5 9.9 c1.6 1 3.6 1.2 5.4 0.4 2.6 -1.1 3.7 -3.6 3.4 -6 -0.2 -1.9 -1.4 -3.5 -3.1 -4.2 a6 6 0 0 1 -1.2 -0.1 z" fill="#7C2AA0" opacity="0.55"/>"##,
+        )
+    })
+    .clone()
+}
+
+/// Safari: the compass rose.
+pub fn browser_safari() -> svg::Handle {
+    static C: OnceLock<svg::Handle> = OnceLock::new();
+    C.get_or_init(|| {
+        brand_icon(
+            r##"<defs><linearGradient id="s" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#3DB4F2"/><stop offset="1" stop-color="#0F6FD8"/></linearGradient></defs>
+<circle cx="16" cy="16" r="15" fill="url(#s)"/><circle cx="16" cy="16" r="12.2" fill="#F4F7FA"/>
+<path d="M16 4.4 v2 M16 25.6 v2 M4.4 16 h2 M25.6 16 h2" stroke="#7E93A8" stroke-width="1.1" stroke-linecap="round"/>
+<path d="M22.6 9.4 L17.6 17.6 9.4 22.6 14.4 14.4 z" fill="#F04B3C"/>
+<path d="M9.4 22.6 L14.4 14.4 17.6 17.6 z" fill="#E9EEF3"/>"##,
+        )
+    })
+    .clone()
+}
+
 // ----------------------------------------------------------- tree / row set
 
 pub fn folder_all() -> svg::Handle {

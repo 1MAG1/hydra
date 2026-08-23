@@ -83,6 +83,13 @@ pub fn view(app: &App) -> El<'_> {
             tr("Options"),
             Some(Message::Menu(MenuAction::Options)),
         ),
+        // Shortcut into Options > Extensions: the browser add-on is how most
+        // downloads reach Hydra, so it gets a toolbar entry of its own.
+        tool(
+            icons::extensions(true),
+            tr("Extensions"),
+            Some(Message::Menu(MenuAction::Extensions)),
+        ),
         tool(
             icons::scheduler(true),
             tr("Scheduler"),

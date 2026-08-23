@@ -74,6 +74,24 @@
   .nav-gh { display: inline-flex; align-items: center; }
   .nav-gh svg { width: 21px; height: 21px; }
 
+  .nav-toggle {
+    display: none;
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 6px;
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .nav-toggle:hover {
+    background: rgba(148, 197, 222, 0.08);
+    border-color: var(--line-strong);
+  }
+  .nav-toggle svg { width: 22px; height: 22px; }
+
   .btn {
     display: inline-flex; align-items: center; gap: 9px;
     font-weight: 600; font-size: 15px; white-space: nowrap;
@@ -149,39 +167,68 @@
   }
   .sec-head p { margin-top: 14px; color: var(--text-dim); font-size: 16.5px; max-width: 58ch; }
 
-  .bento {
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
-  }
-  .cell {
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    background: var(--bg-raised);
-    padding: 28px;
-    transition: border-color 0.2s ease;
-  }
-  .cell:hover { border-color: var(--line-strong); }
-  .cell-wide { grid-column: span 2; }
-  .cell-full { grid-column: 1 / -1; }
-  .cell-tint-a {
-    background:
-      radial-gradient(500px 260px at 90% -20%, rgba(45, 212, 212, 0.14), transparent 70%),
-      var(--bg-raised);
-  }
-  .cell-tint-b {
-    background:
-      radial-gradient(420px 260px at 0% 120%, rgba(37, 150, 232, 0.13), transparent 70%),
-      var(--bg-raised);
-  }
   .ico {
-    width: 40px; height: 40px; border-radius: 10px;
+    width: 38px; height: 38px; border-radius: 10px;
     display: flex; align-items: center; justify-content: center;
     background: rgba(45, 212, 212, 0.1);
     border: 1px solid rgba(45, 212, 212, 0.18);
-    margin-bottom: 18px; flex: none;
+    margin-bottom: 14px; flex: none;
   }
-  .ico svg { width: 21px; height: 21px; stroke: var(--accent); }
-  .cell h3 { font-size: 17.5px; font-weight: 600; letter-spacing: -0.01em; }
-  .cell p { margin-top: 8px; font-size: 14.5px; color: var(--text-dim); line-height: 1.55; }
+  .ico svg { width: 20px; height: 20px; stroke: var(--accent); }
+
+  /* Engine Showcase - 3 Column Layout with Center Canvas */
+  .engine-showcase {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.32fr) minmax(0, 1fr);
+    gap: 20px;
+    align-items: stretch;
+  }
+  .engine-col {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    justify-content: space-between;
+  }
+  .engine-card {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+    padding: 20px 22px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    flex: 1;
+    transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  .engine-card:hover {
+    border-color: var(--line-strong);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+  .engine-card .ico { margin-bottom: 10px; width: 34px; height: 34px; border-radius: 8px; }
+  .engine-card .ico svg { width: 18px; height: 18px; }
+  .engine-card h3 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); }
+  .engine-card p { margin-top: 5px; font-size: 13.5px; color: var(--text-dim); line-height: 1.5; }
+  .engine-card code {
+    font-family: var(--font-mono); font-size: 12px; color: var(--accent);
+    background: rgba(45, 212, 212, 0.08); padding: 1px 5px; border-radius: 4px;
+  }
+
+  .engine-col-center {
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-height: 520px;
+  }
+  #engine-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+  }
 
   .gui { background: var(--bg-raised); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
   .gui-screenshot-wrap {
@@ -400,18 +447,107 @@
   .foot-social a:hover { color: var(--text); }
   .foot-social svg { width: 20px; height: 20px; }
 
+  .tab-repo-links {
+    margin-top: 14px; font-size: 13px; color: var(--text-dim); text-align: center;
+  }
+  .tab-repo-links a { color: var(--accent); text-decoration: none; font-weight: 500; }
+  .tab-repo-links a:hover { text-decoration: underline; }
+
+  @media (max-width: 1060px) {
+    .engine-showcase {
+      grid-template-columns: 1fr;
+      gap: 20px;
+    }
+    .engine-col-center {
+      display: none !important;
+    }
+    .engine-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+  }
+
   @media (max-width: 900px) {
     section { padding: 64px 0; }
     .hero { padding: 116px 0 64px; }
     .hero-grid { grid-template-columns: 1fr; gap: 48px; }
-    .bento { grid-template-columns: 1fr; }
-    .cell-wide { grid-column: auto; }
     .gui-grid { grid-template-columns: 1fr; gap: 8px; }
     .cli-grid { grid-template-columns: 1fr; gap: 40px; }
     .vscode-dl-grid { grid-template-columns: 1fr; }
-    .nav-links { gap: 18px; }
-    .nav-links .nav-hide-sm { display: none; }
     .dl-card { padding: 48px 20px; }
+  }
+
+  @media (max-width: 768px) {
+    .nav-toggle { display: flex; }
+    .nav-links {
+      display: none;
+      position: absolute;
+      top: 68px;
+      left: 0;
+      right: 0;
+      background: rgba(10, 14, 19, 0.96);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--line-strong);
+      flex-direction: column;
+      align-items: stretch;
+      padding: 16px 24px 24px;
+      gap: 12px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+    }
+    .nav-links.open { display: flex; }
+    .nav-links a {
+      font-size: 15.5px;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(148, 197, 222, 0.08);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .nav-links a:last-child { border-bottom: none; }
+    .nav-gh { justify-content: flex-start; gap: 8px; }
+    .nav-gh::after { content: "GitHub Repository"; font-weight: 500; font-size: 15px; }
+
+    .sec-head h2 { font-size: 26px; }
+    .sec-head p { font-size: 15px; }
+  }
+
+  @media (max-width: 540px) {
+    .wrap { padding: 0 16px; }
+    .hero { padding: 92px 0 44px; }
+    .hero h1 { font-size: clamp(28px, 8.5vw, 36px); }
+    .hero p { font-size: 15.5px; margin-top: 14px; }
+    .hero-ctas { flex-direction: column; width: 100%; gap: 10px; }
+    .hero-ctas .btn { width: 100%; justify-content: center; padding: 13px 20px; }
+
+    .engine-col {
+      grid-template-columns: 1fr;
+    }
+
+    .dual-btn { flex-direction: column; width: 100%; gap: 10px; }
+    .vscode-btn-primary { width: 100%; justify-content: center; }
+
+    .matrix-row { flex-direction: column; align-items: flex-start; gap: 6px; }
+    .pill-group { justify-content: flex-start; width: 100%; flex-wrap: wrap; }
+    .row-label { font-size: 13px; font-weight: 600; color: var(--text); }
+
+    .cell { padding: 20px 16px; }
+    .gui-item { padding: 14px 10px; gap: 12px; }
+    .gui-item .ico { width: 34px; height: 34px; }
+    .gui-item h3 { font-size: 15px; }
+    .gui-item p { font-size: 13.5px; }
+
+    .dl-card { padding: 32px 14px; border-radius: 18px; }
+    .dl-card h2 { font-size: 26px; }
+    .dl-card > p.dl-subtitle { font-size: 15px; }
+
+    .terminal-opt-btn { width: 100%; justify-content: center; font-size: 13px; padding: 10px 14px; }
+    .tab-row { flex-wrap: wrap; gap: 6px; justify-content: flex-start; }
+    .tab { padding: 6px 12px; font-size: 12.5px; }
+    .cmd { padding: 12px 14px; gap: 8px; }
+    .cmd code { font-size: 11.5px; }
+    .term pre { font-size: 12px; padding: 16px 14px; }
   }
 </style>
 </head>
@@ -425,16 +561,22 @@
       <img src="logo.png" alt="Hydra logo" width="30" height="30">
       HYDRA
     </a>
-    <div class="nav-links">
-      <a href="#engine" class="nav-hide-sm">Engine</a>
-      <a href="#app" class="nav-hide-sm">Desktop App</a>
-      <a href="#cli" class="nav-hide-sm">CLI</a>
+    <div class="nav-links" id="nav-links">
+      <a href="#engine">Engine</a>
+      <a href="#app">Desktop App</a>
+      <a href="#cli">CLI</a>
       <a href="#download">Download</a>
-      <a href="changelog.html" class="nav-hide-sm">Changelog</a>
+      <a href="changelog.html">Changelog</a>
       <a class="nav-gh" href="https://github.com/ja7ad/hydra" aria-label="Hydra on GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
       </a>
     </div>
+    <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation menu" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path id="nav-toggle-icon-open" d="M4 6h16M4 12h16M4 18h16"/>
+        <path id="nav-toggle-icon-close" d="M18 6L6 18M6 6l12 12" style="display:none;"/>
+      </svg>
+    </button>
   </div>
 </nav>
 
@@ -462,39 +604,62 @@
 <section id="engine">
   <div class="wrap">
     <div class="sec-head">
-      <h2>An engine built to saturate the link</h2>
-      <p>The core is a statistical scheduler for byte ranges. It measures every connection, predicts stalls before timeouts fire, and keeps the fastest paths busy until the last byte lands.</p>
+      <h2>An engine built to saturate the link &amp; embed anywhere</h2>
+      <p>The core is a statistical scheduler for byte ranges, wrapped with a frozen C ABI (<code>libhydra</code>). Embed multi-source downloads, dynamic range stealing, and sub-timeout stall prediction into any app or platform.</p>
     </div>
-    <div class="bento">
-      <div class="cell cell-wide cell-tint-a">
-        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 17h-8m8-10h-8m-2 0H3m18 5H11m-2 5H3M13 5v4m-4 1v4m8 1v4"/></svg></div>
-        <h3>Multi-source, adaptive concurrency</h3>
-        <p>Byte ranges are distributed across parallel connections and independent mirror origins, with the concurrency level discovered automatically per server. Point Hydra at two mirrors of the same ISO and both are drained at once, so high-bandwidth links stay full instead of waiting on a single stream.</p>
+
+    <div class="engine-showcase">
+      <!-- Left Column: Core Engine Features -->
+      <div class="engine-col engine-col-left">
+        <div class="engine-card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 17h-8m8-10h-8m-2 0H3m18 5H11m-2 5H3M13 5v4m-4 1v4m8 1v4"/></svg></div>
+          <h3>Adaptive Concurrency</h3>
+          <p>Drains multiple mirrors and parallel HTTP/S/FTP streams simultaneously with per-server automatic ramp up.</p>
+        </div>
+        <div class="engine-card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg></div>
+          <h3>Dynamic Range Stealing</h3>
+          <p>Detects lagging connections mid-flight and transparently reclaims remaining byte ranges for faster peers.</p>
+        </div>
+        <div class="engine-card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg></div>
+          <h3>Sub-Timeout Stall Prediction</h3>
+          <p>Statistical CUSUM estimators flag collapsing connections seconds before standard socket timeouts trigger.</p>
+        </div>
+        <div class="engine-card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4v5c0 4.5-3.2 8.2-8 9-4.8-.8-8-4.5-8-9V7l8-4z M9 12l2 2 4-4"/></svg></div>
+          <h3>End-to-End Integrity</h3>
+          <p>Per-chunk checksum manifests, Content-MD5 validation, and local Reed-Solomon erasure coding against bitrot.</p>
+        </div>
       </div>
-      <div class="cell">
-        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg></div>
-        <h3>Dynamic range stealing</h3>
-        <p>Laggard connections are detected mid-flight and their remaining byte ranges are handed to faster peers, with zero server coordination overhead.</p>
+
+      <!-- Center Column: Interactive Canvas Hub -->
+      <div class="engine-col-center">
+        <canvas id="engine-canvas" role="img" aria-label="Interactive architecture diagram of Hydra engine core connected to feature cards"></canvas>
       </div>
-      <div class="cell">
-        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg></div>
-        <h3>Stall detection before timeouts</h3>
-        <p>Two-sided CUSUM and dual-window statistical estimators flag collapsing or degraded connections long before a traditional timeout would expire.</p>
-      </div>
-      <div class="cell">
-        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4v5c0 4.5-3.2 8.2-8 9-4.8-.8-8-4.5-8-9V7l8-4z M9 12l2 2 4-4"/></svg></div>
-        <h3>Integrity end to end</h3>
-        <p>Per-chunk checksum manifests, verification against server-advertised digests like Content-MD5, and local Reed-Solomon erasure coding against bitrot.</p>
-      </div>
-      <div class="cell">
-        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3v5h5M5 21V5a2 2 0 012-2h7l5 5v13a2 2 0 01-2 2H7a2 2 0 01-2-2zM9 14l2 2 4-4"/></svg></div>
-        <h3>Format sniffing &amp; smart sorting</h3>
-        <p>Magic-byte inspection detects the real file type regardless of extension, and downloads can be sorted into category folders automatically.</p>
-      </div>
-      <div class="cell cell-full cell-tint-b">
-        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18M12 3a15 15 0 000 18"/></svg></div>
-        <h3>Protocols, proxies, and a flat memory footprint</h3>
-        <p>HTTP/1.1 and HTTPS via rustls with Mozilla roots, FTP with resume support, HTTP CONNECT tunneling, and SOCKS4 / SOCKS4a / SOCKS5 proxies. Positioned writes stream data straight to disk, so resident memory stays constant whether the file is 10 MB or 100 GB.</p>
+
+      <!-- Right Column: FFI & Cross-Platform Embedding -->
+      <div class="engine-col engine-col-right">
+        <div class="engine-card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 8h10M7 12h10M7 16h6"/></svg></div>
+          <h3>Stable C ABI (<code>libhydra</code>)</h3>
+          <p>One static/shared library and header (<code>hydra.h</code>) with strict ABI 1 forward-compatibility CI gates.</p>
+        </div>
+        <div class="engine-card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="3"/><path d="M12 18h.01"/></svg></div>
+          <h3>Android &amp; iOS Mobile</h3>
+          <p>Pre-packaged Android <code>jniLibs</code> and Apple <code>Hydra.xcframework</code> with background execution policy support.</p>
+        </div>
+        <div class="engine-card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg></div>
+          <h3>Polyglot Language Bindings</h3>
+          <p>Drop-in examples for C, C++, Python, Swift, Go, Kotlin, Dart, C#, and Zig with non-blocking event queues.</p>
+        </div>
+        <div class="engine-card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18M12 3a15 15 0 000 18"/></svg></div>
+          <h3>Durable Persistence</h3>
+          <p>State persistence across process restarts, flat resident memory, and HTTP CONNECT / SOCKS5 proxies.</p>
+        </div>
       </div>
     </div>
   </div>
@@ -727,6 +892,18 @@
               </div>
             </div>
             <div class="matrix-row">
+              <span class="row-label">Ubuntu PPA</span>
+              <div class="pill-group">
+                <a class="pill" href="https://launchpad.net/~sonycore/+archive/ubuntu/hydra" target="_blank" rel="noopener">Launchpad PPA</a>
+              </div>
+            </div>
+            <div class="matrix-row">
+              <span class="row-label">Fedora COPR</span>
+              <div class="pill-group">
+                <a class="pill" href="https://copr.fedorainfracloud.org/coprs/sonycore/hydra/" target="_blank" rel="noopener">Fedora COPR</a>
+              </div>
+            </div>
+            <div class="matrix-row">
               <span class="row-label">.tar.gz</span>
               <div class="pill-group">
                 <a class="pill" data-asset="linux-x64-tar" href="https://github.com/ja7ad/hydra/releases/download/v0.3.6/hydra-0.3.6-linux-amd64.tar.gz">x64</a>
@@ -803,12 +980,26 @@
         <div class="install-tabs hidden" id="install-tabs-box">
           <div class="tab-row" role="tablist" aria-label="Install command by platform">
             <button class="tab active" role="tab" aria-selected="true" data-target="cmd-unix">macOS / Linux</button>
+            <button class="tab" role="tab" aria-selected="false" data-target="cmd-ppa">Ubuntu PPA</button>
+            <button class="tab" role="tab" aria-selected="false" data-target="cmd-copr">Fedora COPR</button>
             <button class="tab" role="tab" aria-selected="false" data-target="cmd-brew">Homebrew</button>
             <button class="tab" role="tab" aria-selected="false" data-target="cmd-win">Windows</button>
           </div>
           <div class="cmd active" id="cmd-unix">
             <code><b>curl</b> -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | <b>bash</b></code>
             <button class="copy" aria-label="Copy install command" data-copy="curl -fsSL https://raw.githubusercontent.com/ja7ad/hydra/main/install.sh | bash">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
+            </button>
+          </div>
+          <div class="cmd" id="cmd-ppa">
+            <code><b>sudo add-apt-repository</b> ppa:sonycore/hydra &amp;&amp; <b>sudo apt update</b> &amp;&amp; <b>sudo apt install</b> hydra</code>
+            <button class="copy" aria-label="Copy install command" data-copy="sudo add-apt-repository ppa:sonycore/hydra &amp;&amp; sudo apt update &amp;&amp; sudo apt install hydra">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
+            </button>
+          </div>
+          <div class="cmd" id="cmd-copr">
+            <code><b>sudo dnf copr enable</b> sonycore/hydra &amp;&amp; <b>sudo dnf install</b> hydra</code>
+            <button class="copy" aria-label="Copy install command" data-copy="sudo dnf copr enable sonycore/hydra &amp;&amp; sudo dnf install hydra">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
             </button>
           </div>
@@ -824,6 +1015,11 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H5a2 2 0 00-2 2v9a2 2 0 002 2h2"/></svg>
             </button>
           </div>
+          <p class="tab-repo-links">
+            Repositories: 
+            <a href="https://launchpad.net/~sonycore/+archive/ubuntu/hydra" target="_blank" rel="noopener">Launchpad Ubuntu PPA</a> · 
+            <a href="https://copr.fedorainfracloud.org/coprs/sonycore/hydra/" target="_blank" rel="noopener">Fedora COPR</a>
+          </p>
         </div>
       </div>
 
@@ -848,17 +1044,76 @@
 </footer>
 
 <script>
+  // Scroll Sentinel and Mobile Menu Navigation Toggle
   const nav = document.getElementById("nav");
+  const navLinks = document.getElementById("nav-links");
+  const navToggle = document.getElementById("nav-toggle");
+  const iconOpen = document.getElementById("nav-toggle-icon-open");
+  const iconClose = document.getElementById("nav-toggle-icon-close");
+
   new IntersectionObserver(([e]) => nav.classList.toggle("scrolled", !e.isIntersecting))
     .observe(document.getElementById("top-sentinel"));
 
+  if (navToggle && navLinks) {
+    navToggle.addEventListener("click", () => {
+      const isOpen = navLinks.classList.toggle("open");
+      navToggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+      if (iconOpen && iconClose) {
+        iconOpen.style.display = isOpen ? "none" : "block";
+        iconClose.style.display = isOpen ? "block" : "none";
+      }
+    });
+
+    navLinks.querySelectorAll("a").forEach((link) => {
+      link.addEventListener("click", () => {
+        navLinks.classList.remove("open");
+        navToggle.setAttribute("aria-expanded", "false");
+        if (iconOpen && iconClose) {
+          iconOpen.style.display = "block";
+          iconClose.style.display = "none";
+        }
+      });
+    });
+  }
+
+  // Terminal Download Section Toggle
+  const terminalDlToggle = document.getElementById("terminal-dl-toggle");
+  const installTabsBox = document.getElementById("install-tabs-box");
+  if (terminalDlToggle && installTabsBox) {
+    terminalDlToggle.addEventListener("click", () => {
+      const isHidden = installTabsBox.classList.toggle("hidden");
+      terminalDlToggle.classList.toggle("open", !isHidden);
+      terminalDlToggle.setAttribute("aria-expanded", isHidden ? "false" : "true");
+    });
+  }
+
+  // Install Command Tabs
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach((t) => { t.classList.remove("active"); t.setAttribute("aria-selected", "false"); });
       document.querySelectorAll(".cmd").forEach((c) => c.classList.remove("active"));
       tab.classList.add("active");
       tab.setAttribute("aria-selected", "true");
-      document.getElementById(tab.dataset.target).classList.add("active");
+      const targetCmd = document.getElementById(tab.dataset.target);
+      if (targetCmd) targetCmd.classList.add("active");
+    });
+  });
+
+  // Copy to Clipboard Buttons with UI feedback
+  document.querySelectorAll(".copy").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const textToCopy = btn.dataset.copy;
+      if (!textToCopy) return;
+      try {
+        await navigator.clipboard.writeText(textToCopy);
+        const originalSVG = btn.innerHTML;
+        btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+        setTimeout(() => {
+          btn.innerHTML = originalSVG;
+        }, 2000);
+      } catch (err) {
+        console.error("Failed to copy:", err);
+      }
     });
   });
 
@@ -1076,16 +1331,6 @@
     }
   })();
 
-  document.querySelectorAll(".copy").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(btn.dataset.copy);
-        btn.style.color = "var(--accent)";
-        setTimeout(() => { btn.style.color = ""; }, 1200);
-      } catch (_) {  }
-    });
-  });
-
   // OS Auto-Detection & Highlighting
   (() => {
     const ua = navigator.userAgent || "";
@@ -1098,25 +1343,328 @@
     if (card) card.classList.add("highlighted");
   })();
 
-  // Optional Terminal Install Command Toggle
+  // Engine Architecture & Connected Conduits Canvas Animation
   (() => {
-    const btn = document.getElementById("terminal-dl-toggle");
-    const box = document.getElementById("install-tabs-box");
-    if (btn && box) {
-      btn.addEventListener("click", () => {
-        const isHidden = box.classList.contains("hidden");
-        if (isHidden) {
-          box.classList.remove("hidden");
-          btn.classList.add("open");
-          btn.setAttribute("aria-expanded", "true");
-        } else {
-          box.classList.add("hidden");
-          btn.classList.remove("open");
-          btn.setAttribute("aria-expanded", "false");
-        }
+    const canvas = document.getElementById("engine-canvas");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const TEAL = "45, 212, 212";
+    const BLUE = "37, 150, 232";
+
+    // Load Hydra Logo
+    const logoImg = new Image();
+    logoImg.src = "logo.png";
+    let logoLoaded = false;
+    logoImg.onload = () => { logoLoaded = true; };
+
+    // 4 Conduits on Left (Connecting to 4 Left Feature Cards)
+    const leftConduits = [0, 1, 2, 3].map((idx) => ({
+      idx,
+      speed: 1.0 + (idx % 2) * 0.25,
+      particles: [
+        { t: 0.1 },
+        { t: 0.55 }
+      ]
+    }));
+
+    // 4 Conduits on Right (Connecting to 4 Right Feature Cards)
+    const rightConduits = [0, 1, 2, 3].map((idx) => ({
+      idx,
+      speed: 1.1 + ((idx + 1) % 2) * 0.2,
+      particles: [
+        { t: 0.25 },
+        { t: 0.75 }
+      ]
+    }));
+
+    let scale = 1, W = 460, H = 540;
+    const resize = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const rect = canvas.getBoundingClientRect();
+      W = rect.width || 460;
+      H = rect.height || 540;
+      canvas.width = W * dpr;
+      canvas.height = H * dpr;
+      scale = dpr;
+      if (reduce) drawEngineFrame(0);
+    };
+
+    const cubicPoint = (p0, p1, p2, p3, t) => {
+      const a = 1 - t;
+      const a2 = a * a;
+      const a3 = a2 * a;
+      const t2 = t * t;
+      const t3 = t2 * t;
+      return {
+        x: a3 * p0.x + 3 * a2 * t * p1.x + 3 * a * t2 * p2.x + t3 * p3.x,
+        y: a3 * p0.y + 3 * a2 * t * p1.y + 3 * a * t2 * p2.y + t3 * p3.y
+      };
+    };
+
+    function drawEngineFrame(now) {
+      const canvasRect = canvas.getBoundingClientRect();
+      if (!canvasRect.width || !canvasRect.height) return;
+      const curW = canvasRect.width;
+      const curH = canvasRect.height;
+
+      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+      ctx.clearRect(0, 0, curW, curH);
+
+      const cx = curW / 2;
+      const cy = curH / 2;
+      const coreRadius = 42;
+
+      // Query actual vertical centers of the 4 left feature cards
+      const leftCards = document.querySelectorAll(".engine-col-left .engine-card");
+      const yLeft = [];
+      leftCards.forEach((card, idx) => {
+        const cRect = card.getBoundingClientRect();
+        yLeft.push(cRect.top + cRect.height / 2 - canvasRect.top);
       });
+      while (yLeft.length < 4) {
+        yLeft.push(curH * (0.125 + yLeft.length * 0.25));
+      }
+
+      // Query actual vertical centers of the 4 right feature cards
+      const rightCards = document.querySelectorAll(".engine-col-right .engine-card");
+      const yRight = [];
+      rightCards.forEach((card, idx) => {
+        const cRect = card.getBoundingClientRect();
+        yRight.push(cRect.top + cRect.height / 2 - canvasRect.top);
+      });
+      while (yRight.length < 4) {
+        yRight.push(curH * (0.125 + yRight.length * 0.25));
+      }
+
+      // Draw Left Conduits (4 Left Cards -> Hydra Logo)
+      for (const cond of leftConduits) {
+        const sy = yLeft[cond.idx];
+        const p0 = { x: 0, y: sy };
+        const p1 = { x: curW * 0.35, y: sy };
+        const p2 = { x: curW * 0.25, y: cy };
+        const p3 = { x: cx - coreRadius + 2, y: cy + (cond.idx - 1.5) * 8 };
+
+        // Base Conduit Glow Line
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.bezierCurveTo(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
+        ctx.strokeStyle = `rgba(${TEAL}, 0.22)`;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+
+        // Socket Indicator Pin at Left Card Border
+        const pulse = 0.5 + 0.5 * Math.sin(now / 400 + cond.idx);
+        ctx.beginPath();
+        ctx.arc(0, sy, 4, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${TEAL}, 0.95)`;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(0, sy, 7 + pulse * 2, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${TEAL}, ${0.15 + pulse * 0.2})`;
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
+        // Animated Flowing Packets (Left -> Center)
+        for (const p of cond.particles) {
+          const pt = cubicPoint(p0, p1, p2, p3, p.t);
+          const prevPt = cubicPoint(p0, p1, p2, p3, Math.max(0, p.t - 0.08));
+          const grad = ctx.createLinearGradient(prevPt.x, prevPt.y, pt.x, pt.y);
+          grad.addColorStop(0, `rgba(${BLUE}, 0)`);
+          grad.addColorStop(1, `rgba(${TEAL}, 0.95)`);
+          ctx.beginPath();
+          ctx.moveTo(prevPt.x, prevPt.y);
+          ctx.lineTo(pt.x, pt.y);
+          ctx.strokeStyle = grad;
+          ctx.lineWidth = 2.4;
+          ctx.lineCap = "round";
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 2.4, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${TEAL}, 1)`;
+          ctx.fill();
+        }
+      }
+
+      // Draw Right Conduits (Hydra Logo -> 4 Right Cards)
+      for (const cond of rightConduits) {
+        const sy = yRight[cond.idx];
+        const p0 = { x: cx + coreRadius - 2, y: cy + (cond.idx - 1.5) * 8 };
+        const p1 = { x: curW * 0.75, y: cy };
+        const p2 = { x: curW * 0.65, y: sy };
+        const p3 = { x: curW, y: sy };
+
+        // Base Conduit Glow Line
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.bezierCurveTo(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
+        ctx.strokeStyle = `rgba(${BLUE}, 0.22)`;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+
+        // Socket Indicator Pin at Right Card Border
+        const pulse = 0.5 + 0.5 * Math.sin(now / 400 + cond.idx + 2);
+        ctx.beginPath();
+        ctx.arc(curW, sy, 4, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${BLUE}, 0.95)`;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(curW, sy, 7 + pulse * 2, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${BLUE}, ${0.15 + pulse * 0.2})`;
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
+        // Animated Flowing Packets (Center -> Right)
+        for (const p of cond.particles) {
+          const pt = cubicPoint(p0, p1, p2, p3, p.t);
+          const prevPt = cubicPoint(p0, p1, p2, p3, Math.max(0, p.t - 0.08));
+          const grad = ctx.createLinearGradient(prevPt.x, prevPt.y, pt.x, pt.y);
+          grad.addColorStop(0, `rgba(${TEAL}, 0)`);
+          grad.addColorStop(1, `rgba(${BLUE}, 0.95)`);
+          ctx.beginPath();
+          ctx.moveTo(prevPt.x, prevPt.y);
+          ctx.lineTo(pt.x, pt.y);
+          ctx.strokeStyle = grad;
+          ctx.lineWidth = 2.4;
+          ctx.lineCap = "round";
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 2.4, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${BLUE}, 1)`;
+          ctx.fill();
+        }
+      }
+
+      // Draw Center Hydra Hub with Logo & Orbitals
+      const rot = (now / 3200) % (Math.PI * 2);
+
+      // Radial background glow
+      const aura = ctx.createRadialGradient(cx, cy, 10, cx, cy, coreRadius + 32);
+      aura.addColorStop(0, "rgba(45, 212, 212, 0.25)");
+      aura.addColorStop(0.6, "rgba(37, 150, 232, 0.09)");
+      aura.addColorStop(1, "rgba(9, 14, 20, 0)");
+      ctx.beginPath();
+      ctx.arc(cx, cy, coreRadius + 32, 0, Math.PI * 2);
+      ctx.fillStyle = aura;
+      ctx.fill();
+
+      // Outer Rotating Dashed Ring
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(rot);
+      ctx.beginPath();
+      ctx.arc(0, 0, coreRadius + 15, 0, Math.PI * 2);
+      ctx.setLineDash([5, 7]);
+      ctx.strokeStyle = `rgba(${TEAL}, 0.45)`;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Orbital Node Beads
+      for (let i = 0; i < 4; i++) {
+        const ang = (i * Math.PI) / 2;
+        const bx = Math.cos(ang) * (coreRadius + 15);
+        const by = Math.sin(ang) * (coreRadius + 15);
+        ctx.beginPath();
+        ctx.arc(bx, by, 3, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${TEAL}, 0.95)`;
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // Inner Counter-Rotating Ring
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(-rot * 0.8);
+      ctx.beginPath();
+      ctx.arc(0, 0, coreRadius + 7, 0, Math.PI * 2);
+      ctx.setLineDash([2, 5]);
+      ctx.strokeStyle = `rgba(${BLUE}, 0.35)`;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.restore();
+
+      // Center Circle Base Badge
+      ctx.beginPath();
+      ctx.arc(cx, cy, coreRadius, 0, Math.PI * 2);
+      const coreFill = ctx.createRadialGradient(cx, cy, 6, cx, cy, coreRadius);
+      coreFill.addColorStop(0, "rgba(20, 32, 46, 0.98)");
+      coreFill.addColorStop(1, "rgba(9, 14, 20, 0.98)");
+      ctx.fillStyle = coreFill;
+      ctx.fill();
+      ctx.strokeStyle = `rgba(${TEAL}, 0.7)`;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Draw Hydra Logo Image in Center
+      if (logoLoaded && logoImg.width > 0) {
+        const logoSize = 52;
+        ctx.drawImage(logoImg, cx - logoSize / 2, cy - logoSize / 2, logoSize, logoSize);
+      } else {
+        // Fallback Vector Logo
+        ctx.font = "bold 14px 'Geist', system-ui, sans-serif";
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.fillText("HYDRA", cx, cy + 5);
+      }
+    }
+
+    function stepEngine(now, dt) {
+      // Step Left Conduits
+      for (const cond of leftConduits) {
+        for (const p of cond.particles) {
+          p.t += (dt / 1500) * cond.speed;
+          if (p.t >= 1) p.t = 0;
+        }
+      }
+
+      // Step Right Conduits
+      for (const cond of rightConduits) {
+        for (const p of cond.particles) {
+          p.t += (dt / 1500) * cond.speed;
+          if (p.t >= 1) p.t = 0;
+        }
+      }
+    }
+
+    let lastTime = 0, engineRafId = 0, engineRunning = false;
+    const engineLoop = (now) => {
+      const dt = Math.min(50, now - lastTime || 16);
+      lastTime = now;
+      stepEngine(now, dt);
+      drawEngineFrame(now);
+      if (engineRunning) engineRafId = requestAnimationFrame(engineLoop);
+    };
+
+    const startEngine = () => {
+      if (!engineRunning && !reduce) {
+        engineRunning = true;
+        lastTime = performance.now();
+        engineRafId = requestAnimationFrame(engineLoop);
+      }
+    };
+    const stopEngine = () => {
+      engineRunning = false;
+      cancelAnimationFrame(engineRafId);
+    };
+
+    new ResizeObserver(resize).observe(canvas);
+    window.addEventListener("resize", resize);
+    resize();
+
+    if (reduce) {
+      drawEngineFrame(0);
+    } else {
+      new IntersectionObserver(([e]) => (e.isIntersecting ? startEngine() : stopEngine())).observe(canvas);
+      document.addEventListener("visibilitychange", () =>
+        document.hidden ? stopEngine() : startEngine()
+      );
     }
   })();
+
+
 
   // Live Release & Download Asset Resolver from GitHub API
   (async () => {
