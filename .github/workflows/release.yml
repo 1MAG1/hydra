@@ -696,7 +696,22 @@ jobs:
                 "$VERSION" "$DISTRO" "$DISTRO" "$DISTRO" "$GPG_USER" "$(date -R)" > debian/changelog
 
               debuild --no-lintian -S -sa -d -k"$GPG_KEY_ID"
-              dput -u "$LAUNCHPAD_PPA" "../hydra_${VERSION}-1ppa1~${DISTRO}1_source.changes"
+
+              CHANGES="../hydra_${VERSION}-1ppa1~${DISTRO}1_source.changes"
+              for attempt in 1 2 3 4 5; do
+                rm -f ../*.upload
+                if dput -u "$LAUNCHPAD_PPA" "$CHANGES"; then
+                  echo "uploaded $DISTRO on attempt $attempt"
+                  break
+                fi
+                if [ "$attempt" -eq 5 ]; then
+                  echo "::error::dput failed 5 times for $DISTRO; giving up"
+                  exit 1
+                fi
+                echo "dput failed for $DISTRO (attempt $attempt); retrying in $((attempt * 30))s"
+                sleep $((attempt * 30))
+              done
+              sleep 30
             done
             echo "Uploaded PPA packages to $LAUNCHPAD_PPA"
           else
