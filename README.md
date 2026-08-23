@@ -28,6 +28,7 @@
   - [Desktop GUI](#desktop-gui)
 - [Installation](#installation)
   - [Homebrew (macOS / Linux)](#homebrew-macos--linux)
+  - [Linux Packages (Ubuntu PPA / Fedora COPR)](#linux-packages-ubuntu-ppa--fedora-copr)
   - [Quick Install (prebuilt binaries)](#quick-install-prebuilt-binaries)
   - [From Source](#from-source)
   - [Browser Extension](#browser-extension)
@@ -106,6 +107,27 @@ brew install ja7ad/tap/hydra
 ```bash
 brew install --cask ja7ad/tap/hydra
 ```
+
+### Linux Packages (Ubuntu PPA / Fedora COPR)
+
+**Ubuntu / Debian-based (Launchpad PPA)**:
+
+```bash
+sudo add-apt-repository ppa:sonycore/hydra
+sudo apt update
+sudo apt install hydra
+```
+
+> PPA Repository: [launchpad.net/~sonycore/+archive/ubuntu/hydra](https://launchpad.net/~sonycore/+archive/ubuntu/hydra)
+
+**Fedora / RHEL-based (Fedora COPR)**:
+
+```bash
+sudo dnf copr enable sonycore/hydra
+sudo dnf install hydra
+```
+
+> COPR Repository: [copr.fedorainfracloud.org/coprs/sonycore/hydra](https://copr.fedorainfracloud.org/coprs/sonycore/hydra/)
 
 ### Quick Install (prebuilt binaries)
 
