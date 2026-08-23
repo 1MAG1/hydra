@@ -272,6 +272,11 @@ pub fn extensions(enabled: bool) -> svg::Handle {
 
 // ------------------------------------------------------------ browser marks
 
+/// Vendor artwork, kept verbatim in `assets/brand/` rather than redrawn: the
+/// Edge and Firefox marks are too intricate to approximate convincingly.
+const EDGE_SVG: &str = include_str!("../assets/brand/edge.svg");
+const FIREFOX_SVG: &str = include_str!("../assets/brand/firefox.svg");
+
 /// Full-colour brand mark, 32x32, for the Extensions page. Unlike the
 /// toolbar set these are filled shapes rather than gradient outlines: a
 /// browser logo is only recognisable in its own colours.
@@ -295,37 +300,33 @@ pub fn browser_chrome() -> svg::Handle {
     .clone()
 }
 
-/// Edge: the blue-to-teal wave inside a dark ring.
-pub fn browser_edge() -> svg::Handle {
+/// Chromium: the Chrome geometry in the project's blue-greys, for the
+/// "other Chromium browsers" row.
+pub fn browser_chromium() -> svg::Handle {
     static C: OnceLock<svg::Handle> = OnceLock::new();
     C.get_or_init(|| {
         brand_icon(
-            r##"<defs><linearGradient id="e" x1="0" y1="1" x2="1" y2="0">
-<stop offset="0" stop-color="#0F5FCB"/><stop offset="0.55" stop-color="#1B9DE2"/>
-<stop offset="1" stop-color="#37D0A8"/></linearGradient></defs>
-<circle cx="16" cy="16" r="15" fill="url(#e)"/>
-<path d="M4.6 10.5 A13.5 13.5 0 0 1 28.6 13.2 a9 9 0 0 0 -12.4 3.4 c-2.4 4.2 0.6 8.4 4.6 9.6 A13.5 13.5 0 0 1 4.6 10.5 z" fill="#FFFFFF" opacity="0.92"/>
-<path d="M9.2 9.4 A8.6 8.6 0 0 1 24 12.4 a11 11 0 0 0 -13.6 1.2 c-1.5 1.5 -2 3.2 -1.9 4.6 a9.3 9.3 0 0 1 0.7 -8.8 z" fill="#0B4EA2"/>"##,
+            r##"<path d="M16 16 L1 16 A15 15 0 0 1 23.5 3.01 Z" fill="#7C99B8"/>
+<path d="M16 16 L23.5 3.01 A15 15 0 0 1 23.5 28.99 Z" fill="#A8C0D6"/>
+<path d="M16 16 L23.5 28.99 A15 15 0 0 1 1 16 Z" fill="#5B7B9C"/>
+<circle cx="16" cy="16" r="7.6" fill="#FFFFFF"/><circle cx="16" cy="16" r="6" fill="#33648F"/>"##,
         )
     })
     .clone()
 }
 
-/// Firefox: the orange-to-magenta flame wrapped round a violet core.
+/// Edge: Microsoft's own brand mark.
+pub fn browser_edge() -> svg::Handle {
+    static C: OnceLock<svg::Handle> = OnceLock::new();
+    C.get_or_init(|| svg::Handle::from_memory(EDGE_SVG.as_bytes()))
+        .clone()
+}
+
+/// Firefox: Mozilla's own brand mark.
 pub fn browser_firefox() -> svg::Handle {
     static C: OnceLock<svg::Handle> = OnceLock::new();
-    C.get_or_init(|| {
-        brand_icon(
-            r##"<defs><radialGradient id="f" cx="0.62" cy="0.28" r="0.85">
-<stop offset="0" stop-color="#FFE03D"/><stop offset="0.35" stop-color="#FF9500"/>
-<stop offset="0.7" stop-color="#F2453D"/><stop offset="1" stop-color="#A0389C"/>
-</radialGradient></defs>
-<path d="M28.4 9.6 a13.5 13.5 0 1 1 -6.2 -6.4 l-1 4 3.9 -1.7 1.3 3.6 z" fill="url(#f)"/>
-<path d="M16 6.4 a8.6 8.6 0 0 1 8.2 5 c-2 -1.6 -4.7 -2.2 -7.4 -1.6 -3.6 0.8 -5.4 3 -5.9 5.4 -0.4 2 0.2 3.8 1.1 5.1 a8.6 8.6 0 0 1 4 -13.9 z" fill="#FFFFFF" opacity="0.32"/>
-<path d="M16 11.6 a6 6 0 1 1 -4.5 9.9 c1.6 1 3.6 1.2 5.4 0.4 2.6 -1.1 3.7 -3.6 3.4 -6 -0.2 -1.9 -1.4 -3.5 -3.1 -4.2 a6 6 0 0 1 -1.2 -0.1 z" fill="#7C2AA0" opacity="0.55"/>"##,
-        )
-    })
-    .clone()
+    C.get_or_init(|| svg::Handle::from_memory(FIREFOX_SVG.as_bytes()))
+        .clone()
 }
 
 /// Safari: the compass rose.
