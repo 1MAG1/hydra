@@ -97,6 +97,8 @@ pub enum MenuAction {
     StopQueue(String),
     SpeedLimiterToggle,
     Options,
+    /// Options, opened straight on the Extensions page (toolbar shortcut).
+    Extensions,
     HideCategories,
     ArrangeBy(SortKey),
     ToggleDark,
@@ -146,6 +148,7 @@ impl MenuAction {
             MenuAction::StopQueue(q) => format!("stop_queue:{q}"),
             MenuAction::SpeedLimiterToggle => "speed_limiter".into(),
             MenuAction::Options => "options".into(),
+            MenuAction::Extensions => "extensions".into(),
             MenuAction::HideCategories => "hide_cats".into(),
             MenuAction::ArrangeBy(k) => format!("arrange:{k:?}"),
             MenuAction::ToggleDark => "dark".into(),
@@ -215,6 +218,7 @@ impl MenuAction {
             "scheduler" => MenuAction::Scheduler,
             "speed_limiter" => MenuAction::SpeedLimiterToggle,
             "options" => MenuAction::Options,
+            "extensions" => MenuAction::Extensions,
             "hide_cats" => MenuAction::HideCategories,
             "dark" => MenuAction::ToggleDark,
             "homepage" => MenuAction::HomePage,
@@ -307,7 +311,7 @@ pub enum OptTab {
     Connection,
     Proxy,
     Sites,
-    DialUp,
+    Extensions,
     Sounds,
 }
 
@@ -548,6 +552,8 @@ pub enum Message {
     OpenFolder(DlId),
     // options
     OptTabSet(OptTab),
+    /// Extensions page: open a browser's add-on store in the default browser.
+    OptExtStore(&'static str),
     OptOk,
     OptDraft(OptField),
     // update dialog
@@ -959,6 +965,25 @@ impl App {
     }
 
     // -------------------------------------------------------------- windows
+
+    /// Open the Configuration window on a fresh draft of the saved settings.
+    /// `tab` forces a page (the toolbar's Extensions shortcut); `None` keeps
+    /// whichever page was last visited.
+    fn open_options(&mut self, tab: Option<OptTab>) -> Task<Message> {
+        self.options.draft = self.cfg.settings.clone();
+        self.options.draft_cats = self.cfg.categories.clone();
+        self.options.sel_category = "General".into();
+        self.options.dl_limit_mb_txt = self.cfg.settings.dl_limit_mb.to_string();
+        self.options.dl_limit_hours_txt = self.cfg.settings.dl_limit_hours.to_string();
+        self.options.auto_types_edit =
+            iced::widget::text_editor::Content::with_text(&self.cfg.settings.auto_types);
+        self.options.sites_edit =
+            iced::widget::text_editor::Content::with_text(&self.cfg.settings.dont_start_sites);
+        if let Some(t) = tab {
+            self.options.tab = t;
+        }
+        self.open_window(WinKind::Options)
+    }
 
     pub fn open_window(&mut self, kind: WinKind) -> Task<Message> {
         if let Some(id) = self.win_of(kind) {
@@ -2996,6 +3021,10 @@ impl App {
                 self.options.tab = t;
                 Task::none()
             }
+            Message::OptExtStore(url) => {
+                let _ = open::that_detached(url);
+                Task::none()
+            }
             Message::OptOk => {
                 self.cfg.settings = self.options.draft.clone();
                 self.cfg.categories = self.options.draft_cats.clone();
@@ -3782,19 +3811,8 @@ impl App {
                 self.refresh_native_menu();
                 Task::none()
             }
-            MenuAction::Options => {
-                self.options.draft = self.cfg.settings.clone();
-                self.options.draft_cats = self.cfg.categories.clone();
-                self.options.sel_category = "General".into();
-                self.options.dl_limit_mb_txt = self.cfg.settings.dl_limit_mb.to_string();
-                self.options.dl_limit_hours_txt = self.cfg.settings.dl_limit_hours.to_string();
-                self.options.auto_types_edit =
-                    iced::widget::text_editor::Content::with_text(&self.cfg.settings.auto_types);
-                self.options.sites_edit = iced::widget::text_editor::Content::with_text(
-                    &self.cfg.settings.dont_start_sites,
-                );
-                self.open_window(WinKind::Options)
-            }
+            MenuAction::Options => self.open_options(None),
+            MenuAction::Extensions => self.open_options(Some(OptTab::Extensions)),
             MenuAction::CheckUpdates => {
                 // A known offer just reopens its dialog; otherwise run a
                 // fresh check in manual mode so the result is always shown.

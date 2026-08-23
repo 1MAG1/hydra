@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The Configuration window: General, File types, Save to, Downloads,
-//! Connection, Proxy/Socks, Sites Logins, Dial Up/VPN, Sounds — two-row
+//! Connection, Proxy/Socks, Sites Logins, Extensions, Sounds — two-row
 //! tab strip.
 
 use crate::app::{App, El, Message, OptField, OptTab, WinKind};
 use crate::model::ProxyMode;
-use crate::windows::{dlg_btn, dlg_btn_primary};
+use crate::windows::{dlg_btn, dlg_btn_auto, dlg_btn_auto_primary, dlg_btn_primary};
 use crate::{i18n::tr, theme};
 use iced::widget::{
     button, checkbox, column, container, pick_list, radio, row, scrollable, text, text_editor,
@@ -661,12 +661,88 @@ fn sites(app: &App) -> El<'_> {
     .into()
 }
 
-fn dialup(_app: &App) -> El<'_> {
+/// The Chrome Web Store listing — the one published store today. Chromium
+/// browsers (Edge, Brave, Vivaldi, Opera, Arc) install the same item from it.
+const CHROME_STORE: &str =
+    "https://chromewebstore.google.com/detail/hydra-download-manager-in/oieelfilllghmbnhofajpgpmmilfihmo";
+
+/// The Firefox build is not signed by addons.mozilla.org yet, so its row
+/// links to the manual-install walkthrough instead of a store listing.
+const FIREFOX_GUIDE: &str = "https://github.com/ja7ad/hydra/blob/main/extensions/firefox/README.md";
+
+/// One extension row: brand mark on the left, what the extension does in the
+/// middle, the link button on the right. `link` is `None` for a browser with
+/// neither a listing nor a guide, which leaves the button disabled.
+fn ext_row<'a>(
+    icon: iced::widget::svg::Handle,
+    name: &'static str,
+    about: String,
+    label: String,
+    link: Option<&'static str>,
+) -> El<'a> {
+    let msg = link.map(Message::OptExtStore);
+    container(
+        row![
+            iced::widget::svg(icon).width(30.0).height(30.0),
+            column![
+                text(name).size(theme::FONT_SIZE + 1.0),
+                text(about)
+                    .size(theme::FONT_SIZE - 1.0)
+                    .color(theme::dim_text(&iced::Theme::Light)),
+            ]
+            .spacing(3)
+            .width(Length::Fill),
+            // Auto width, not the fixed dialog-button width: store labels
+            // run long once translated and a fixed 132 px clips them.
+            match msg {
+                Some(m) => dlg_btn_auto_primary(label, Some(m)),
+                None => dlg_btn_auto(label, None),
+            },
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(10)
+    .width(Length::Fill)
+    .style(theme::panel)
+    .into()
+}
+
+fn extensions(_app: &App) -> El<'_> {
     column![
-        section(tr("Dial up / VPN settings")),
-        text(tr("Dial-up networking is not applicable on this platform."))
-            .size(theme::FONT_SIZE)
-            .color(theme::dim_text(&iced::Theme::Light)),
+        section(tr("Browser extensions")),
+        text(tr(
+            "Install the Hydra extension to capture downloads straight from your browser."
+        ))
+        .size(theme::FONT_SIZE),
+        ext_row(
+            crate::icons::browser_chrome(),
+            "Google Chrome",
+            tr("Automatic download capture, right-click downloads and media sniffing. Published on the Chrome Web Store."),
+            tr("Open Chrome Web Store"),
+            Some(CHROME_STORE),
+        ),
+        ext_row(
+            crate::icons::browser_edge(),
+            "Microsoft Edge / Brave / Vivaldi / Opera",
+            tr("Chromium browsers install the very same extension from the Chrome Web Store."),
+            tr("Open Chrome Web Store"),
+            Some(CHROME_STORE),
+        ),
+        ext_row(
+            crate::icons::browser_firefox(),
+            "Mozilla Firefox",
+            tr("Not on addons.mozilla.org yet: install the bundled build by hand from Hydra's extensions folder."),
+            tr("Manual install guide"),
+            Some(FIREFOX_GUIDE),
+        ),
+        ext_row(
+            crate::icons::browser_safari(),
+            "Safari",
+            tr("Ships inside the macOS app; enable Hydra under Safari > Settings > Extensions."),
+            tr("Not on store yet"),
+            None,
+        ),
     ]
     .spacing(10)
     .into()
@@ -736,7 +812,7 @@ pub fn view(app: &App) -> El<'_> {
     let tabs_bottom = row![
         tab_btn(tr("Proxy / Socks"), OptTab::Proxy, cur),
         tab_btn(tr("Sites Logins"), OptTab::Sites, cur),
-        tab_btn(tr("Dial Up / VPN"), OptTab::DialUp, cur),
+        tab_btn(tr("Extensions"), OptTab::Extensions, cur),
         tab_btn(tr("Sounds"), OptTab::Sounds, cur),
     ]
     .spacing(1);
@@ -749,7 +825,7 @@ pub fn view(app: &App) -> El<'_> {
         OptTab::Connection => connection(app),
         OptTab::Proxy => proxy(app),
         OptTab::Sites => sites(app),
-        OptTab::DialUp => dialup(app),
+        OptTab::Extensions => extensions(app),
         OptTab::Sounds => sounds(app),
     };
 
