@@ -5,6 +5,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [0.3.9] - 2026-08-23
+
+### Added
+
+- **Linux StatusNotifierItem (SNI) Tray Integration (`hydra-gui`)**: Added native Linux D-Bus `StatusNotifierItem` (SNI) system tray support (`ksni` / `zbus`) with automatic desktop environment detection and runtime fallback between D-Bus SNI and X11/muda. Delivers seamless tray icon support across modern Wayland and X11 desktop environments (GNOME via AppIndicator, KDE Plasma, COSMIC, Sway, Hyprland). Added selectable tray backend options (*Auto*, *StatusNotifierItem (D-Bus)*, *Muda (X11/Legacy)*) under *Options → General*.
+- **Linux Taskbar & Launcher Progress (`hydra-gui`)**: Added Unity and KDE launcher D-Bus progress bar and urgent transfer count badges via `com.canonical.Unity.LauncherEntry`, displaying aggregate download progress and active transfer counts directly on the Linux dock and taskbar launcher.
+- **In-App Browser Extension Manager (`hydra-gui`)**: Added a dedicated **Browser Extensions** tab in the Options window (*Options → Extensions*) and an **Extensions** action button on the main toolbar. Provides interactive extension installation guides for Chrome, Firefox, Edge, and Brave with status badges, installation directories, packed files (`.zip`/`.xpi`), and one-click actions to open extension folders or browser extension management pages (`chrome://extensions`, `about:debugging`, `edge://extensions`, `brave://extensions`).
+- **Official Debian / Ubuntu Launchpad PPA Packaging (`packaging/debian`, CI)**: Added official Debian packaging infrastructure (`control`, `rules`, `copyright`, `postinst`, `postrm`, native messaging host manifests, `.desktop` autostart) with automated Source Package (DSC) generation and Launchpad PPA release triggers (`ppa:ja7ad/hydra`).
+- **Official Fedora Copr Packaging (`packaging/rpm`, CI)**: Added Fedora RPM package specifications (`packaging/rpm/hydra.spec`) and automated Copr repository build and release triggers (`copr enable ja7ad/hydra`).
+- **Post-Install Extension Setup Guidance (`install.sh` / `install.ps1`)**: Added interactive post-installation setup instructions in both Unix shell and Windows PowerShell installation scripts, outlining browser extension loading steps for Chrome, Edge, Brave, and Firefox.
+- **Interactive Web Changelog & Documentation Portal (`docs/`)**: Added a searchable and filterable web changelog portal (`docs/changelog.html`) with category tagging, release links, and improved landing page download modals and engine architecture cards.
+- **Multi-Language Localization**: Added localized strings for the new Extensions settings tab, toolbar extension buttons, and Linux tray backend options across all 10 supported locales (`ar`, `en`, `es`, `fa`, `fr`, `ja`, `ko`, `nl`, `ru`, `zh`).
+
+### Fixed
+
+- **Debian Packaging Native Messaging Manifest Generation**: Replaced inline heredoc JSON manifest creation in `debian/rules` with standalone validated JSON manifest files for Chrome/Chromium and Mozilla Firefox.
+- **Debian Changelog Formatting in Launchpad Release Automation**: Fixed Debian release versioning and distribution targeting (`noble`, `jammy`) in automated Launchpad source package generation.
+
+### Changed & Refactored
+
+- **Linux Package Dependencies**: Updated Debian and RPM package specifications to recommend `gnome-shell-extension-appindicator` instead of legacy shared library appindicator dependencies.
+- **GitHub Release Categorization**: Added the `enhancement` label to the Features category in `.github/release.yml`.
+
+---
+
 ## [0.3.7] - 2026-08-22
 
 ### Added
