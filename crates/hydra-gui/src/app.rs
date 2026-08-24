@@ -490,6 +490,10 @@ pub enum Message {
     NativeMenu(String),
     // main window chrome
     MenuOpen(MenuBarKind),
+    /// Moving the pointer over a menu-bar title while another menu is already
+    /// open: switches to that menu without closing the bar (IDM/Windows menu
+    /// tracking). Unlike [`Message::MenuOpen`] it never toggles a menu shut.
+    MenuHover(MenuBarKind),
     MenuClose,
     /// Hovering (or clicking) a dropdown entry: `Some(i)` opens entry `i`'s
     /// flyout, `None` closes it — macOS submenu behaviour.
@@ -2321,6 +2325,13 @@ impl App {
                     Some(kind)
                 };
                 self.open_submenu = None;
+                Task::none()
+            }
+            Message::MenuHover(kind) => {
+                if self.open_menu != Some(kind) {
+                    self.open_menu = Some(kind);
+                    self.open_submenu = None;
+                }
                 Task::none()
             }
             Message::MenuClose => {
