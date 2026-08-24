@@ -3,5 +3,6 @@
 
 pub mod categories;
 pub mod menu;
+pub mod probe;
 pub mod table;
 pub mod toolbar;
