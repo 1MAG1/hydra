@@ -9,7 +9,7 @@ use crate::progress::{ConnView, Counters, Progress};
 use crate::url::{proxy_from_env, Sidecar, Url};
 use hya_core::{detect_format, Admission, Admit, Category, DeltaEstimator, Scheduler, Source};
 use hya_net::polite::{Politeness, RateLimiter};
-use hya_net::{fetch_range_retry, probe, probe_via_get, SparseSink, Target, TlsCapableConnector};
+use hya_net::{fetch_range_retry, probe_resilient, SparseSink, Target, TlsCapableConnector};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -838,16 +838,12 @@ pub async fn probe_public<C: hya_net::Connector>(
         let target = cur
             .to_target(px.as_ref().map(|(h, p)| (h.as_str(), *p)))?
             .with_headers(args.headers.clone(), Some(args.user_agent.clone()));
-        let pr = match hya_net::probe(c, &target).await {
-            Ok(pr) if !pr.is_redirect() && pr.size == 0 => {
-                hya_net::probe_via_get(c, &target).await.unwrap_or(pr)
-            }
-            Ok(pr) => pr,
-            Err(e) => match hya_net::probe_via_get(c, &target).await {
-                Ok(g) => g,
-                Err(_) => return Err(e.to_string()),
-            },
-        };
+        // One rule for "HEAD said nothing usable", shared with the GUI and the
+        // engine rather than restated here: a HEAD that states `Content-Length: 0`
+        // has answered, and a ranged GET against a zero-length object is refused.
+        let pr = hya_net::probe_resilient(c, &target)
+            .await
+            .map_err(|e| e.to_string())?;
         if pr.is_redirect() && hops < args.max_redirs {
             let next = pr
                 .location
@@ -919,22 +915,12 @@ where
     // `0..=max_hops`: the extra pass is what answers the request that the last
     // permitted hop arrived at. Without it a budget of N would resolve only N-1.
     for hop in 0..=max_hops {
-        let head = probe(c, &target).await;
-        let pr = match head {
-            Ok(pr) if !pr.is_redirect() && pr.size > 0 => Ok(pr),
-            Ok(pr) if pr.is_redirect() => Ok(pr),
-            // HEAD gave nothing usable (no length, or an error such as an unclean
-            // TLS close). A ranged GET is the robust probe, so try it before
-            // declaring the source unusable.
-            other => match probe_via_get(c, &target).await {
-                Ok(g) => Ok(g),
-                Err(e) => match other {
-                    Ok(h) => Ok(h),
-                    Err(he) => Err(format!("HEAD failed ({he}), ranged GET failed ({e})")),
-                },
-            },
-        }
-        .map_err(|e: String| e)?;
+        // HEAD, then a ranged GET when it gives nothing usable — see
+        // [`hya_net::probe_resilient`], which is also what the GUI and the engine
+        // ask, so the three cannot drift apart on which servers they can read.
+        let pr = probe_resilient(c, &target)
+            .await
+            .map_err(|e| e.to_string())?;
 
         if pr.is_redirect() {
             let loc = pr.location.clone().unwrap_or_default();
@@ -1532,7 +1518,15 @@ pub async fn run(job: Job) -> Outcome {
         .clone()
         .or_else(|| probe_info.content_type.clone());
     let usable: Vec<(Url, Target)> = keep.iter().map(|&i| pairs[i].clone()).collect();
-    if size == 0 && !job.spider {
+    // `Content-Length: 0` is a SIZE, not a missing size.
+    //
+    // The two are indistinguishable in `size`, and treating the second as the first
+    // fails a download that had already succeeded: a zero-length object (
+    // `speedtest.bitel.io/Testdateien/0B`) went through the size fallback, then the
+    // unknown-size streaming path, and came out as "the server sent no body" —
+    // exit code 1 over a correctly written empty file.
+    let empty_object = probe_info.stated_length() == Some(0);
+    if size == 0 && !job.spider && !empty_object {
         // `keep` holds the indices that probed consistently; any of them can answer.
         match hya_net::probe_size_via_range(conn.as_ref(), &pairs[keep[0]].1).await {
             Ok(n) if n > 0 => {
@@ -1556,13 +1550,20 @@ pub async fn run(job: Job) -> Outcome {
         }
         p.event(
             0,
-            "size unknown: streaming with one connection (no parallelism, no resume)",
+            if empty_object {
+                "the object is empty (the server stated Content-Length: 0)"
+            } else {
+                "size unknown: streaming with one connection (no parallelism, no resume)"
+            },
         );
         p.end_phase();
         let outs = out_path.to_string_lossy().to_string();
         let t0 = Instant::now();
         return match hya_net::fetch_streaming(conn.as_ref(), &usable[0].1, &outs).await {
-            Ok(0) => failed(&job, 0, "the server sent no body".into()),
+            // An empty body is the whole object when the server said so, and a
+            // failure only when it did not: nothing arrived and nothing said
+            // nothing was supposed to.
+            Ok(0) if !empty_object => failed(&job, 0, "the server sent no body".into()),
             Ok(n) => {
                 let el = t0.elapsed().as_secs_f64();
                 p.event(
