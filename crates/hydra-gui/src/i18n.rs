@@ -21,17 +21,17 @@ use std::sync::RwLock;
 
 /// Languages compiled into the binary: (tag, native display name, catalogue).
 static BUILTIN: &[(&str, &str, &str)] = &[
-    ("en", "English", include_str!("../assets/locale/en.json")),
-    ("fa", "فارسی", include_str!("../assets/locale/fa.json")),
-    ("zh", "简体中文", include_str!("../assets/locale/zh.json")),
-    ("ru", "Русский", include_str!("../assets/locale/ru.json")),
-    ("fr", "Français", include_str!("../assets/locale/fr.json")),
-    ("nl", "Nederlands", include_str!("../assets/locale/nl.json")),
     ("ar", "العربية", include_str!("../assets/locale/ar.json")),
-    ("ja", "日本語", include_str!("../assets/locale/ja.json")),
-    ("es", "Español", include_str!("../assets/locale/es.json")),
-    ("ko", "한국어", include_str!("../assets/locale/ko.json")),
     ("de", "German", include_str!("../assets/locale/de.json")),
+    ("en", "English", include_str!("../assets/locale/en.json")),
+    ("es", "Español", include_str!("../assets/locale/es.json")),
+    ("fa", "فارسی", include_str!("../assets/locale/fa.json")),
+    ("fr", "Français", include_str!("../assets/locale/fr.json")),
+    ("ja", "日本語", include_str!("../assets/locale/ja.json")),
+    ("ko", "한국어", include_str!("../assets/locale/ko.json")),
+    ("nl", "Nederlands", include_str!("../assets/locale/nl.json")),
+    ("ru", "Русский", include_str!("../assets/locale/ru.json")),
+    ("zh", "简体中文", include_str!("../assets/locale/zh.json")),
 ];
 
 static CATALOGUE: RwLock<Option<HashMap<String, String>>> = RwLock::new(None);
