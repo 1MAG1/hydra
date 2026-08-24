@@ -9,8 +9,8 @@ use crate::err::{self, Detail};
 use crate::url::{basic_auth, Url};
 use hya_core::{Capability, Scheduler, Source};
 use hya_net::polite::Pace;
-use hya_net::{probe, Probe, SparseSink, Target, TlsCapableConnector};
-use std::sync::atomic::{AtomicBool, Ordering};
+use hya_net::{probe_resilient, Probe, SparseSink, Target, TlsCapableConnector};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -370,7 +370,11 @@ async fn resolve_one(
         }
         let t = target_for(engine, job, creds, &u);
         let hop = Instant::now();
-        let p = probe(conn.as_ref(), &t)
+        // Resilient rather than a bare HEAD: a server that answers HEAD with an
+        // empty reply (hetzner's speed-test hosts do) otherwise resolves to
+        // "unknown size, no ranges" and sends the whole object down the
+        // single-stream path — no size, no resume, no parallelism.
+        let p = probe_resilient(conn.as_ref(), &t)
             .await
             .map_err(|e| err::from_io(&e))?;
         if p.is_redirect() {
@@ -884,8 +888,23 @@ async fn stream_transfer(
         job.id
     );
 
-    let fut = hya_net::fetch_streaming(conn.as_ref(), target, output);
+    // The byte counter the fetch keeps as it writes. Without it this path
+    // reported nothing at all until the last byte arrived — on a large object
+    // that is an hour of a caller seeing zero and assuming a hung transfer.
+    let written = Arc::new(AtomicU64::new(0));
+    let pace = pace_for(engine, job);
+    let fut = hya_net::fetch_streaming_observed(
+        conn.as_ref(),
+        target,
+        output,
+        &written,
+        Some(cancel.as_ref()),
+        &pace,
+    );
     tokio::pin!(fut);
+    let interval = Duration::from_millis(engine.progress_interval_ms());
+    let began = Instant::now();
+    let mut last = Instant::now() - Duration::from_secs(3600);
     loop {
         tokio::select! {
             r = &mut fut => {
@@ -899,6 +918,7 @@ async fn stream_transfer(
                         g.progress.total_bytes = n;
                         Ok(())
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Err(cancelled()),
                     Err(e) => Err(err::from_io(&e)),
                 };
             }
@@ -907,6 +927,25 @@ async fn stream_transfer(
                     // Dropping the future closes the socket. The partial file
                     // stays where it is; `Stop::CancelRemove` is what deletes it.
                     return Err(cancelled());
+                }
+                if last.elapsed() >= interval {
+                    last = Instant::now();
+                    let done = written.load(Ordering::Relaxed);
+                    let secs = began.elapsed().as_secs_f64().max(1e-3);
+                    let rate = (done as f64 / secs) as u64;
+                    {
+                        let mut g = job.lock();
+                        g.progress.bytes_downloaded = done;
+                        g.progress.bytes_per_second = rate;
+                        g.progress.average_bytes_per_second = rate;
+                        // No total to subtract from: this path runs precisely
+                        // because the server would not state a size, so an ETA
+                        // would be an invention.
+                        g.progress.eta_seconds = 0;
+                        g.progress.active_connections = 1;
+                        g.progress.active_sources = 1;
+                    }
+                    engine.emit(job, EV::HYDRA_EVENT_PROGRESS);
                 }
             }
         }

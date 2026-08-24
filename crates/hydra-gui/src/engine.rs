@@ -19,9 +19,9 @@
 use crate::model::{ConnRow, DlId};
 use hya_core::{Capability, Scheduler, Source};
 use hya_net::polite::RateLimiter;
-use hya_net::{probe, Probe, SparseSink, Target, TlsCapableConnector};
+use hya_net::{probe_resilient, Probe, SparseSink, Target, TlsCapableConnector};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
@@ -291,7 +291,7 @@ pub async fn probe_link(url: String, user_agent: String) -> Option<LinkMeta> {
             Target::direct(&u.host, u.port, &u.path)
         };
         let t = base.with_headers(vec![], Some(user_agent.clone()));
-        let p = probe(connector.as_ref(), &t).await.ok()?;
+        let p = probe_resilient(connector.as_ref(), &t).await.ok()?;
         if p.is_redirect() {
             url = join_url(&u, p.location.as_deref().unwrap_or(""))?;
             continue;
@@ -633,7 +633,7 @@ async fn run_download(
         };
         let t = target_for(&u, &spec);
         let t_hop = std::time::Instant::now();
-        match probe(connector.as_ref(), &t).await {
+        match probe_resilient(connector.as_ref(), &t).await {
             Ok(p) if p.is_redirect() => {
                 let loc = p.location.clone().unwrap_or_default();
                 crate::log::debug(&format!("#{id} redirect {} -> {loc}", p.status));
@@ -740,22 +740,90 @@ async fn run_download(
             line: crate::i18n::tr("Receiving data..."),
         });
         let t0 = std::time::Instant::now();
-        match hya_net::fetch_streaming(connector.as_ref(), &target, &temp).await {
-            Ok(n) => {
-                finish_file(&spec, &final_path, &tx, n, t0.elapsed().as_secs_f64());
-            }
-            Err(e) => {
-                let denied = e.kind() == std::io::ErrorKind::PermissionDenied;
-                ev(Event::Failed {
-                    id,
-                    error: friendly_io(&e, &temp),
-                    done: 0,
-                    held: vec![],
-                    permission_denied: denied,
-                });
+        // Driven through a poll loop rather than a bare await. This path has no
+        // scheduler to observe, so a plain await reported nothing until the last
+        // byte and read the stop flag never: on a large object that is an hour of
+        // "Receiving data..." at 0 B with Pause and Stop doing nothing at all.
+        // The byte counter and the cancel flag are what the loop is for.
+        let written = Arc::new(AtomicU64::new(0));
+        let pace = hya_net::polite::Pace::shared(limiter);
+        let fut = hya_net::fetch_streaming_observed(
+            connector.as_ref(),
+            &target,
+            &temp,
+            &written,
+            Some(cancel.as_ref()),
+            &pace,
+        );
+        tokio::pin!(fut);
+        let mut sm_rate = 0.0f64;
+        let mut rate_mark: Option<(u64, std::time::Instant)> = None;
+        loop {
+            tokio::select! {
+                r = &mut fut => {
+                    match r {
+                        Ok(n) => {
+                            finish_file(&spec, &final_path, &tx, n, t0.elapsed().as_secs_f64());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                            ev(Event::Stopped {
+                                id,
+                                done: written.load(Ordering::Relaxed),
+                                held: vec![],
+                            });
+                        }
+                        Err(e) => {
+                            let denied = e.kind() == std::io::ErrorKind::PermissionDenied;
+                            ev(Event::Failed {
+                                id,
+                                error: friendly_io(&e, &temp),
+                                done: written.load(Ordering::Relaxed),
+                                held: vec![],
+                                permission_denied: denied,
+                            });
+                        }
+                    }
+                    return;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(emit_interval_ms() as u64)) => {
+                    // Dropping the future closes the socket. A stalled read is
+                    // exactly when the user reaches for Stop, so the flag is
+                    // acted on here too and not only between reads.
+                    if cancel.load(Ordering::Relaxed) {
+                        ev(Event::Stopped {
+                            id,
+                            done: written.load(Ordering::Relaxed),
+                            held: vec![],
+                        });
+                        return;
+                    }
+                    let done = written.load(Ordering::Relaxed);
+                    let now = std::time::Instant::now();
+                    if let Some((prev_done, prev_t)) = rate_mark {
+                        let dt = now.duration_since(prev_t).as_secs_f64();
+                        if dt > 0.0 {
+                            let inst = done.saturating_sub(prev_done) as f64 / dt;
+                            let alpha = (-dt / 1.5f64).exp();
+                            sm_rate = sm_rate * alpha + inst * (1.0 - alpha);
+                        }
+                    }
+                    rate_mark = Some((done, now));
+                    ev(Event::Progress {
+                        id,
+                        done,
+                        rate: sm_rate,
+                        // No size to subtract from: this path exists because the
+                        // server would not state one, so any ETA would be invented.
+                        eta: None,
+                        conns: vec![ConnRow {
+                            downloaded: done,
+                            info: crate::i18n::tr("Receiving data..."),
+                        }],
+                        held: vec![],
+                    });
+                }
             }
         }
-        return;
     };
 
     // ---- scheduler path ---------------------------------------------------
@@ -877,8 +945,19 @@ async fn run_download(
                     let r = s.conn_rate(j);
                     ConnRow {
                         downloaded: per_conn.get(&j).map(|e| e.2).unwrap_or(0),
+                        // An idle connection under a concurrency cap is not a
+                        // broken one: the origin refused the extra requests (a
+                        // 429 — `ash-speed.hetzner.com` serves exactly two per
+                        // address), or the adaptive ramp has not admitted this
+                        // slot yet. Labelling that "Disconnect." reads as a
+                        // failure and invites the fix that makes it worse:
+                        // raising the connection count.
                         info: if s.conn_range(j).is_none() {
-                            crate::i18n::tr("Disconnect.")
+                            if s.active_limit() < s.n_conns() {
+                                crate::i18n::tr("Waiting (connection limit)...")
+                            } else {
+                                crate::i18n::tr("Disconnect.")
+                            }
                         } else if r > 1.0 {
                             crate::i18n::tr("Receiving data...")
                         } else {
