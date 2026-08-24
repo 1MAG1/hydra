@@ -31,6 +31,7 @@ static BUILTIN: &[(&str, &str, &str)] = &[
     ("ja", "日本語", include_str!("../assets/locale/ja.json")),
     ("es", "Español", include_str!("../assets/locale/es.json")),
     ("ko", "한국어", include_str!("../assets/locale/ko.json")),
+    ("de", "German", include_str!("../assets/locale/de.json")),
 ];
 
 static CATALOGUE: RwLock<Option<HashMap<String, String>>> = RwLock::new(None);
