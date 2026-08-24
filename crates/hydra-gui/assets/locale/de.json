@@ -335,6 +335,7 @@
   "View release page": "Release-Seite ansehen",
   "Virus checking": "Virenprüfung",
   "Virus scanner program": "Virenscanner-Programm",
+  "Waiting (connection limit)...": "Wartet (Verbindungslimit)...",
   "Watches the clipboard for download links by file type and known download sites; one link opens the file dialog, many open the batch list.": "Überwacht die Zwischenablage auf Download-Links nach Dateityp und bekannten Download-Seiten; Ein Link öffnet den Dateidialog, viele öffnen die Stapelliste.",
   "Wednesday": "Mittwoch",
   "When packaged as Flatpak or Snap, file access goes through portals: pick folders through the file dialog once and the portal remembers the grant.": "Beim Paketieren als Flatpak oder Snap erfolgt der Dateizugriff über Portale: Wählen Sie Ordner einmal über den Dateidialog aus und das Portal merkt sich die Berechtigung.",

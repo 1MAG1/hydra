@@ -945,8 +945,19 @@ async fn run_download(
                     let r = s.conn_rate(j);
                     ConnRow {
                         downloaded: per_conn.get(&j).map(|e| e.2).unwrap_or(0),
+                        // An idle connection under a concurrency cap is not a
+                        // broken one: the origin refused the extra requests (a
+                        // 429 — `ash-speed.hetzner.com` serves exactly two per
+                        // address), or the adaptive ramp has not admitted this
+                        // slot yet. Labelling that "Disconnect." reads as a
+                        // failure and invites the fix that makes it worse:
+                        // raising the connection count.
                         info: if s.conn_range(j).is_none() {
-                            crate::i18n::tr("Disconnect.")
+                            if s.active_limit() < s.n_conns() {
+                                crate::i18n::tr("Waiting (connection limit)...")
+                            } else {
+                                crate::i18n::tr("Disconnect.")
+                            }
                         } else if r > 1.0 {
                             crate::i18n::tr("Receiving data...")
                         } else {

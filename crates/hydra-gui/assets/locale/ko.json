@@ -336,6 +336,7 @@
   "View release page": "릴리스 페이지 보기",
   "Virus checking": "바이러스 검사",
   "Virus scanner program": "바이러스 검사 프로그램",
+  "Waiting (connection limit)...": "대기 중(연결 수 제한)...",
   "Watches the clipboard for download links by file type and known download sites; one link opens the file dialog, many open the batch list.": "파일 형식 및 알려진 다운로드 사이트의 링크가 클립보드에 복사되는지 감시합니다. 단일 링크는 파일 대화상자를, 여러 개는 일괄 목록을 엽니다.",
   "Wednesday": "수요일",
   "When packaged as Flatpak or Snap, file access goes through portals: pick folders through the file dialog once and the portal remembers the grant.": "Flatpak 또는 Snap으로 패키징된 경우 포털을 통해 파일에 접근합니다. 파일 대화상자에서 폴더를 한 번 선택하면 포털이 권한을 기억합니다.",
