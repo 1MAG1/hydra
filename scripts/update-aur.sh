@@ -23,10 +23,11 @@ generate_srcinfo() {
   if command -v makepkg >/dev/null 2>&1; then
     (cd "$dir" && makepkg --printsrcinfo > .SRCINFO)
   elif command -v docker >/dev/null 2>&1; then
-    docker run --rm -v "$dir:/pkg" -w /pkg archlinux:base bash -c "
-      useradd -m builder && chown -R builder /pkg
-      su builder -c 'makepkg --printsrcinfo' > /pkg/.SRCINFO
-    "
+    docker run --rm -i archlinux:base bash -c "
+      cat > /tmp/PKGBUILD
+      useradd -m builder
+      su builder -c 'cd /tmp && makepkg --printsrcinfo'
+    " < "$dir/PKGBUILD" > "$dir/.SRCINFO"
   else
     echo "error: neither makepkg nor docker found to generate .SRCINFO" >&2
     exit 1
