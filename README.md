@@ -2,10 +2,11 @@
   <img src="docs/logo.png" alt="HYDRA Logo" width="180">
 </p>
 
-<h1 align="center">HYDRA</h1>
+<h1 align="center">Hydra Download Manager (HDM)</h1>
 
 <p align="center">
-  <strong>A fast, resilient, multi-source file retriever and download engine.</strong>
+  <strong>Fast, resilient, multi-source download manager and accelerator for Windows, macOS, and Linux.</strong><br>
+  <a href="https://hydra.javad.dev"><strong>https://hydra.javad.dev</strong></a>
 </p>
 
 <p align="center">
@@ -28,7 +29,7 @@
   - [Desktop GUI](#desktop-gui)
 - [Installation](#installation)
   - [Homebrew (macOS / Linux)](#homebrew-macos--linux)
-  - [Linux Packages (Ubuntu PPA / Fedora COPR)](#linux-packages-ubuntu-ppa--fedora-copr)
+  - [Linux Packages (Ubuntu PPA / Fedora COPR / Arch Linux AUR)](#linux-packages-ubuntu-ppa--fedora-copr--arch-linux-aur)
   - [Quick Install (prebuilt binaries)](#quick-install-prebuilt-binaries)
   - [From Source](#from-source)
   - [Browser Extension](#browser-extension)
@@ -49,7 +50,7 @@
 
 ## Overview
 
-**HYDRA** is a high-performance network file retriever designed for speed, resilience, and adaptability. It dynamically partitions downloads across multiple connections and independent mirror sources, continuously rebalancing work to maximize throughput without stalling on slow peers. It ships as both a `wget`/`curl`-compatible CLI and a cross-platform desktop download manager with browser integration.
+**Hydra Download Manager (HDM)** is an open-source, high-performance network file retriever and download accelerator designed for speed, resilience, and adaptability. It dynamically partitions downloads across multiple connections and independent mirror sources, continuously rebalancing work to maximize throughput without stalling on slow peers. It ships as both a `wget`/`curl`-compatible CLI and a cross-platform desktop download manager with browser integration.
 
 <p align="center">
   <img src="docs/img/screenshot.jpg" alt="Hydra Download Manager" width="720">
@@ -108,7 +109,7 @@ brew install ja7ad/tap/hydra
 brew install --cask ja7ad/tap/hydra
 ```
 
-### Linux Packages (Ubuntu PPA / Fedora COPR)
+### Linux Packages (Ubuntu PPA / Fedora COPR / Arch Linux AUR)
 
 **Ubuntu / Debian-based (Launchpad PPA)**:
 
@@ -128,6 +129,24 @@ sudo dnf install hydra
 ```
 
 > COPR Repository: [copr.fedorainfracloud.org/coprs/sonycore/hydra](https://copr.fedorainfracloud.org/coprs/sonycore/hydra/)
+
+**Arch Linux (AUR)**:
+
+Build from source:
+
+```bash
+paru -S hydra-download-manager
+# or: yay -S hydra-download-manager
+```
+
+Precompiled binary:
+
+```bash
+paru -S hydra-download-manager-bin
+# or: yay -S hydra-download-manager-bin
+```
+
+> AUR Packages: [hydra-download-manager](https://aur.archlinux.org/packages/hydra-download-manager) | [hydra-download-manager-bin](https://aur.archlinux.org/packages/hydra-download-manager-bin)
 
 ### Quick Install (prebuilt binaries)
 

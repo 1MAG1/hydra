@@ -1,0 +1,160 @@
+name: 🐛 Bug Report
+description: Report something in HYDRA that behaves incorrectly, crashes, or hangs.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+
+        **Please do not report security vulnerabilities here.** Use a private
+        [security advisory](https://github.com/ja7ad/hydra/security/advisories/new) instead.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checklist
+      options:
+        - label: I searched [existing issues](https://github.com/ja7ad/hydra/issues?q=is%3Aissue) and this is not a duplicate.
+          required: true
+        - label: I reproduced this on the latest HYDRA release (or the current `main`).
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Where does the problem show up? Pick "Not sure" if you can't tell.
+      options:
+        - CLI (`hydra`)
+        - Interactive TUI (`hydra interactive`)
+        - Desktop GUI (Hydra Download Manager)
+        - Engine / scheduling (`hya-core`)
+        - Transport / protocols (`hya-net` — HTTP, FTP, proxies, TLS)
+        - Embeddable library (`libhydra` / C ABI)
+        - Browser extension (Chrome / Edge / Firefox / Safari)
+        - Native messaging host (`hydra-host`)
+        - Updater
+        - Installer / packaging (install script, Homebrew, PPA, COPR, MSI)
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: HYDRA version
+      description: Output of `hydra --version`, or the version shown in the GUI's About / Settings screen.
+      placeholder: "hydra 0.3.10"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows (x86_64)
+        - Windows (ARM64)
+        - Android
+        - iOS
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version / distribution
+      placeholder: "Ubuntu 24.04, macOS 15.3, Windows 11 23H2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How did you install HYDRA?
+      options:
+        - Homebrew (formula or cask)
+        - Ubuntu PPA (`ppa:sonycore/hydra`)
+        - Fedora COPR
+        - Install script (`install.sh` / `install.ps1`)
+        - Prebuilt archive from GitHub Releases
+        - Built from source (`cargo build` / `make`)
+        - Browser extension store
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the actual behavior, including any error message shown.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: |
+        Give the exact command line or the sequence of UI actions. **Redact URLs, tokens
+        and credentials** as needed — but keep the shape of the URL (scheme, whether it
+        is a mirror set, whether it goes through a proxy), since that is usually the part
+        that matters.
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / terminal output
+      description: |
+        Paste the relevant output. It is automatically formatted as code, no backticks needed.
+        Logs live in `~/.config/hydra` on Linux/macOS and `%APPDATA%\hydra` on Windows.
+      render: text
+
+  - type: textarea
+    id: transfer-context
+    attributes:
+      label: Transfer details (for download / engine issues)
+      description: Skip this if the bug is unrelated to a transfer.
+      value: |
+        - Protocol (HTTP, HTTPS, FTP):
+        - Server supports range requests (`Accept-Ranges: bytes`):
+        - Number of connections (`-n`) and mirror sources:
+        - Proxy in the path (HTTP CONNECT, SOCKS4/4a/5), if any:
+        - File size and destination filesystem (e.g. 4 GiB onto exFAT):
+
+  - type: textarea
+    id: regression
+    attributes:
+      label: Did this work in an earlier version?
+      description: If you know the last version that worked, naming it makes the bug much faster to bisect.
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I'm willing to open a pull request for this bug.
+          required: false

@@ -1,0 +1,13 @@
+# Blank issues stay enabled so questions and anything the two forms don't fit
+# still have a home (label them `question` on triage).
+blank_issues_enabled: true
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/ja7ad/hydra/security/advisories/new
+    about: Report privately via a GitHub security advisory. Never open a public issue for a vulnerability.
+  - name: 📖 Installation, usage and embedding docs
+    url: https://github.com/ja7ad/hydra#readme
+    about: Install methods, CLI usage, wget/curl dialects, and the libhydra embedding guide.
+  - name: 🛠️ Contributing guide
+    url: https://github.com/ja7ad/hydra/blob/main/CONTRIBUTING.md
+    about: Project layout, build prerequisites, pre-submit checks, and the C ABI rules.

@@ -9,7 +9,7 @@ use crate::progress::{ConnView, Counters, Progress};
 use crate::url::{proxy_from_env, Sidecar, Url};
 use hya_core::{detect_format, Admission, Admit, Category, DeltaEstimator, Scheduler, Source};
 use hya_net::polite::{Politeness, RateLimiter};
-use hya_net::{fetch_range_retry, probe, probe_via_get, SparseSink, Target, TlsCapableConnector};
+use hya_net::{fetch_range_retry, probe_resilient, SparseSink, Target, TlsCapableConnector};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -838,16 +838,12 @@ pub async fn probe_public<C: hya_net::Connector>(
         let target = cur
             .to_target(px.as_ref().map(|(h, p)| (h.as_str(), *p)))?
             .with_headers(args.headers.clone(), Some(args.user_agent.clone()));
-        let pr = match hya_net::probe(c, &target).await {
-            Ok(pr) if !pr.is_redirect() && pr.size == 0 => {
-                hya_net::probe_via_get(c, &target).await.unwrap_or(pr)
-            }
-            Ok(pr) => pr,
-            Err(e) => match hya_net::probe_via_get(c, &target).await {
-                Ok(g) => g,
-                Err(_) => return Err(e.to_string()),
-            },
-        };
+        // One rule for "HEAD said nothing usable", shared with the GUI and the
+        // engine rather than restated here: a HEAD that states `Content-Length: 0`
+        // has answered, and a ranged GET against a zero-length object is refused.
+        let pr = hya_net::probe_resilient(c, &target)
+            .await
+            .map_err(|e| e.to_string())?;
         if pr.is_redirect() && hops < args.max_redirs {
             let next = pr
                 .location
@@ -859,8 +855,39 @@ pub async fn probe_public<C: hya_net::Connector>(
                 continue;
             }
         }
+        // The same forwarding expressed in HTML rather than in a header, so
+        // that `--server-response` and `hydra checksum` describe the object
+        // reached rather than the referrer stripper in front of it.
+        if pr.maybe_redirector() && hops < args.max_redirs {
+            if let Some(next) = hya_net::html_redirect(c, &target)
+                .await
+                .and_then(|loc| cur.join(&loc))
+            {
+                cur = next;
+                hops += 1;
+                continue;
+            }
+        }
         return Ok((pr, cur));
     }
+}
+
+/// One source after redirect resolution: what described it, and where it ended up.
+struct Resolved {
+    probe: hya_net::Probe,
+    /// The target the transfer must use — post-redirect, which is commonly a
+    /// different host from the one asked for.
+    target: Target,
+    /// The URL the last hop arrived at.
+    url: Url,
+    /// At least one hop was a redirector PAGE rather than a `3xx`.
+    ///
+    /// Kept because it changes what the file should be called: a `3xx` chain
+    /// starts from a URL the user named, so its filename is theirs to keep
+    /// (this is curl's and wget's rule, and `-O` exists for the rest), while a
+    /// redirector page means the URL they had named a forwarding stub. Nobody
+    /// asked for `index.html`.
+    via_html: bool,
 }
 
 async fn probe_resolving<C>(
@@ -869,7 +896,7 @@ async fn probe_resolving<C>(
     t: &Target,
     p: &mut Progress,
     max_redirs: u32,
-) -> Result<(hya_net::Probe, Target), String>
+) -> Result<Resolved, String>
 where
     C: hya_net::Connector,
 {
@@ -884,25 +911,16 @@ where
     let max_hops = max_redirs as usize;
     let mut target = t.clone();
     let mut current = u.clone();
+    let mut via_html = false;
     // `0..=max_hops`: the extra pass is what answers the request that the last
     // permitted hop arrived at. Without it a budget of N would resolve only N-1.
     for hop in 0..=max_hops {
-        let head = probe(c, &target).await;
-        let pr = match head {
-            Ok(pr) if !pr.is_redirect() && pr.size > 0 => Ok(pr),
-            Ok(pr) if pr.is_redirect() => Ok(pr),
-            // HEAD gave nothing usable (no length, or an error such as an unclean
-            // TLS close). A ranged GET is the robust probe, so try it before
-            // declaring the source unusable.
-            other => match probe_via_get(c, &target).await {
-                Ok(g) => Ok(g),
-                Err(e) => match other {
-                    Ok(h) => Ok(h),
-                    Err(he) => Err(format!("HEAD failed ({he}), ranged GET failed ({e})")),
-                },
-            },
-        }
-        .map_err(|e: String| e)?;
+        // HEAD, then a ranged GET when it gives nothing usable — see
+        // [`hya_net::probe_resilient`], which is also what the GUI and the engine
+        // ask, so the three cannot drift apart on which servers they can read.
+        let pr = probe_resilient(c, &target)
+            .await
+            .map_err(|e| e.to_string())?;
 
         if pr.is_redirect() {
             let loc = pr.location.clone().unwrap_or_default();
@@ -924,7 +942,36 @@ where
             current = next;
             continue;
         }
-        return Ok((pr, target));
+
+        // A redirect the server expressed in HTML instead of in a header: a
+        // referrer stripper or link filter answering `200` with a page whose
+        // whole content is "go here instead". Charged to the SAME hop budget —
+        // two such pages pointing at each other is a loop like any other, and
+        // `--max-redirs` is what bounds it.
+        if pr.maybe_redirector() && hop < max_hops {
+            if let Some(next) = hya_net::html_redirect(c, &target)
+                .await
+                .and_then(|loc| current.join(&loc))
+            {
+                p.event(
+                    1,
+                    &format!("html redirect {} -> {}", current.host, next.host),
+                );
+                let px = proxy_for(&next);
+                target = next
+                    .to_target(px.as_ref().map(|(h, p)| (h.as_str(), *p)))
+                    .map_err(|e| format!("redirect target unusable: {e}"))?;
+                current = next;
+                via_html = true;
+                continue;
+            }
+        }
+        return Ok(Resolved {
+            probe: pr,
+            target,
+            url: current,
+            via_html,
+        });
     }
     Err(format!("too many redirects (--max-redirs {max_redirs})"))
 }
@@ -934,18 +981,36 @@ async fn probe_all(
     pairs: &[(Url, Target)],
     p: &mut Progress,
     max_redirs: u32,
-) -> Result<(hya_net::Probe, Vec<usize>, Vec<(usize, Target)>), String> {
+) -> Result<
+    (
+        hya_net::Probe,
+        Vec<usize>,
+        Vec<(usize, Target)>,
+        Option<String>,
+    ),
+    String,
+> {
     let c = conn.clone();
     let mut first: Option<hya_net::Probe> = None;
     let mut keep = Vec::new();
     // Targets after redirect resolution, paired with the index they came from.
     let mut resolved_targets: Vec<(usize, Target)> = Vec::new();
+    // The name the FIRST source ended up at, when a redirector page moved it.
+    let mut renamed: Option<String> = None;
     for (i, (u, t)) in pairs.iter().enumerate() {
         match probe_resolving(c.as_ref(), u, t, p, max_redirs).await {
-            Ok((pr, resolved)) => {
+            Ok(r) => {
+                let (pr, resolved) = (r.probe, r.target);
                 // A redirect may have moved the object to a different host; the
                 // transfer must use the resolved target, not the one we started from.
                 resolved_targets.push((i, resolved));
+                if i == 0 && r.via_html {
+                    // Content-Disposition first: a redirector's destination is
+                    // as entitled to name its own file as any other object.
+                    renamed = pr
+                        .suggested_filename()
+                        .or_else(|| Some(r.url.suggested_filename()));
+                }
                 let (size, ranges, validator) = (pr.size, pr.ranges, pr.validator.clone());
                 p.event(
                     1,
@@ -993,7 +1058,7 @@ async fn probe_all(
         }
     }
     match first {
-        Some(pr) if !keep.is_empty() => Ok((pr, keep, resolved_targets)),
+        Some(pr) if !keep.is_empty() => Ok((pr, keep, resolved_targets, renamed)),
         _ => Err("no usable source: every probe failed".into()),
     }
 }
@@ -1410,10 +1475,25 @@ pub async fn run(job: Job) -> Outcome {
     }
 
     p.phase("resolving and probing sources");
-    let (probe_info, keep, resolved) = match probe_all(&conn, &pairs, &mut p, job.max_redirs).await
-    {
-        Ok(v) => v,
-        Err(e) => return failed(&job, 0, e),
+    let (probe_info, keep, resolved, renamed) =
+        match probe_all(&conn, &pairs, &mut p, job.max_redirs).await {
+            Ok(v) => v,
+            Err(e) => return failed(&job, 0, e),
+        };
+    // The requested URL was a redirector PAGE, so the name taken from it names
+    // the stub, not the file — `href.li/?…` yields `index.html`. Adopt the name
+    // the object actually landed under. Only when the user named nothing: `-O`
+    // and `--output-dir`-relative paths are explicit and are never second-guessed.
+    let (name, mut out_path) = match renamed.filter(|_| job.output.is_none()) {
+        Some(fresh) => {
+            p.event(1, &format!("naming the output {fresh} (redirector page)"));
+            let path = match &job.output_dir {
+                Some(dir) => dir.join(&fresh),
+                None => PathBuf::from(&fresh),
+            };
+            (fresh, path)
+        }
+        None => (name, out_path),
     };
     // Adopt the post-redirect targets: a release asset commonly redirects to a
     // different host, and fetching from the pre-redirect URL would 302 on every range.
@@ -1438,7 +1518,15 @@ pub async fn run(job: Job) -> Outcome {
         .clone()
         .or_else(|| probe_info.content_type.clone());
     let usable: Vec<(Url, Target)> = keep.iter().map(|&i| pairs[i].clone()).collect();
-    if size == 0 && !job.spider {
+    // `Content-Length: 0` is a SIZE, not a missing size.
+    //
+    // The two are indistinguishable in `size`, and treating the second as the first
+    // fails a download that had already succeeded: a zero-length object (
+    // `speedtest.bitel.io/Testdateien/0B`) went through the size fallback, then the
+    // unknown-size streaming path, and came out as "the server sent no body" —
+    // exit code 1 over a correctly written empty file.
+    let empty_object = probe_info.stated_length() == Some(0);
+    if size == 0 && !job.spider && !empty_object {
         // `keep` holds the indices that probed consistently; any of them can answer.
         match hya_net::probe_size_via_range(conn.as_ref(), &pairs[keep[0]].1).await {
             Ok(n) if n > 0 => {
@@ -1462,13 +1550,20 @@ pub async fn run(job: Job) -> Outcome {
         }
         p.event(
             0,
-            "size unknown: streaming with one connection (no parallelism, no resume)",
+            if empty_object {
+                "the object is empty (the server stated Content-Length: 0)"
+            } else {
+                "size unknown: streaming with one connection (no parallelism, no resume)"
+            },
         );
         p.end_phase();
         let outs = out_path.to_string_lossy().to_string();
         let t0 = Instant::now();
         return match hya_net::fetch_streaming(conn.as_ref(), &usable[0].1, &outs).await {
-            Ok(0) => failed(&job, 0, "the server sent no body".into()),
+            // An empty body is the whole object when the server said so, and a
+            // failure only when it did not: nothing arrived and nothing said
+            // nothing was supposed to.
+            Ok(0) if !empty_object => failed(&job, 0, "the server sent no body".into()),
             Ok(n) => {
                 let el = t0.elapsed().as_secs_f64();
                 p.event(

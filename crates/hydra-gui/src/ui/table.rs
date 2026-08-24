@@ -5,11 +5,18 @@
 //! Transfer rate | Last Try Date | Description, with a flat listview-style
 //! header, sortable columns and a horizontal scrollbar. Q is the
 //! icon-only queue-membership strip.
+//!
+//! Only the rows inside the scrolled viewport are built (see [`view`]): iced
+//! rebuilds and relayouts the whole tree on every message, so a rubber-band
+//! sweep over a few hundred downloads otherwise rebuilt a few hundred rows —
+//! ~17 widgets each — for every pointer motion event.
+
+use std::collections::HashSet;
 
 use crate::app::{App, El, Message, SortKey};
-use crate::model::DownloadItem;
+use crate::model::{DlId, DownloadItem};
 use crate::{fmt, i18n::tr, icons, theme};
-use iced::widget::{column, container, mouse_area, row, scrollable, svg, text};
+use iced::widget::{column, container, mouse_area, row, scrollable, stack, svg, text};
 use iced::Length;
 
 const COLS: [(&str, f32, Option<SortKey>); 8] = [
@@ -27,6 +34,17 @@ const COLS: [(&str, f32, Option<SortKey>); 8] = [
 /// Width of the draggable divider between header cells.
 const GRIP: f32 = 6.0;
 
+/// Height of one cell, and of the 1 px rule drawn under it.
+const CELL_H: f32 = 24.0;
+/// Pitch of the list: what one row (header row included) advances by. The
+/// virtual window is measured in these, so it must match the real layout.
+const ROW_H: f32 = CELL_H + 1.0;
+/// Rows built above and below the viewport, so a scroll or a resize that
+/// lands between two frames never uncovers a gap.
+const OVERSCAN: usize = 6;
+/// Ruled empty rows kept below the data even on a short window.
+const MIN_FILLER: usize = 60;
+
 pub fn default_widths() -> Vec<f32> {
     COLS.iter().map(|c| c.1).collect()
 }
@@ -43,8 +61,7 @@ fn total_width(w: &[f32]) -> f32 {
     w.iter().sum::<f32>() + GRIP * w.len() as f32
 }
 
-fn header(app: &App) -> El<'_> {
-    let w = widths(app);
+fn header<'a>(app: &App, w: &[f32], tw: f32) -> El<'a> {
     let mut r = row![].spacing(0);
     for (i, (label, _, key)) in COLS.iter().enumerate() {
         let arrow = match key {
@@ -64,7 +81,7 @@ fn header(app: &App) -> El<'_> {
         )
         .padding([3, 6])
         .width(w[i])
-        .height(24.0)
+        .height(CELL_H)
         .clip(true)
         .style(theme::header_cell(app.hover_col == Some(i)));
         // A container under a `mouse_area`, not a `button`: a button forces the
@@ -86,13 +103,13 @@ fn header(app: &App) -> El<'_> {
                 .on_press(Message::ColResizeStart(i)),
         );
     }
-    column![r, row_line(total_width(&w))].into()
+    column![r, row_line(tw)].into()
 }
 
 fn cell<'a>(content: El<'a>, w: f32) -> El<'a> {
     container(content)
         .width(w)
-        .height(24.0)
+        .height(CELL_H)
         .padding([2, 6])
         .clip(true)
         .into()
@@ -101,6 +118,12 @@ fn cell<'a>(content: El<'a>, w: f32) -> El<'a> {
 /// The divider strip between columns: full drag-handle width, drawing one
 /// centred 1 px vertical line — a single hairline, no boxed gaps.
 fn rule_grip<'a>() -> El<'a> {
+    grip_line(CELL_H.into())
+}
+
+/// The hairline of [`rule_grip`], at an explicit height so the empty grid
+/// below the data can draw one line down its whole block.
+fn grip_line<'a>(h: Length) -> El<'a> {
     container(
         container(iced::widget::space::horizontal())
             .width(1.0)
@@ -111,7 +134,7 @@ fn rule_grip<'a>() -> El<'a> {
             }),
     )
     .width(GRIP)
-    .height(24.0)
+    .height(h)
     .padding(iced::Padding {
         left: (GRIP - 1.0) / 2.0,
         ..iced::Padding::ZERO
@@ -131,16 +154,38 @@ fn row_line<'a>(tw: f32) -> El<'a> {
         .into()
 }
 
-/// An empty ruled row so the list shows a full grid below the data. It is a
-/// press target too: a drag begun here sweeps into the rows above/below it,
-/// and a plain click on it clears the selection.
-fn filler_row<'a>(w: &[f32], tw: f32) -> El<'a> {
-    let mut r = row![].spacing(0);
-    for width in w {
-        r = r.push(cell(text("").size(theme::FONT_SIZE).into(), *width));
-        r = r.push(rule_grip());
+/// Blank block standing in for rows outside the viewport, at exactly the
+/// height they would take — the content height, and with it the scrollbar,
+/// must not depend on how much of the list is currently built.
+fn spacer<'a>(tw: f32, h: f32) -> El<'a> {
+    container(iced::widget::space::horizontal())
+        .width(tw)
+        .height(h)
+        .into()
+}
+
+/// The ruled empty grid below the last download, as one block rather than a
+/// row of widgets per line: every filler row was an identical press target,
+/// so `rows` of them cost ~17 widgets each for nothing.
+///
+/// Layer 1 draws the horizontal rules and fixes the block's height; layer 2
+/// runs the column hairlines down it.
+fn filler_block<'a>(w: &[f32], tw: f32, rows: usize) -> El<'a> {
+    let mut lines = column![].width(tw);
+    for _ in 0..rows {
+        lines = lines.push(spacer(tw, CELL_H));
+        lines = lines.push(row_line(tw));
     }
-    mouse_area(column![r, row_line(tw)])
+    let mut verts = row![].spacing(0);
+    for width in w {
+        verts = verts.push(
+            container(iced::widget::space::horizontal())
+                .width(*width)
+                .height(Length::Fill),
+        );
+        verts = verts.push(grip_line(Length::Fill));
+    }
+    mouse_area(stack![lines, verts.height(Length::Fill)])
         .interaction(iced::mouse::Interaction::Idle)
         .on_press(Message::EmptyPress)
         .on_enter(Message::EmptyEnter)
@@ -175,9 +220,7 @@ fn queue_glyph<'a>(d: &DownloadItem) -> El<'a> {
     }
 }
 
-fn data_row<'a>(app: &App, d: &'a DownloadItem) -> El<'a> {
-    let w = widths(app);
-    let selected = app.selected.contains(&d.id);
+fn data_row<'a>(app: &App, d: &'a DownloadItem, w: &[f32], tw: f32, selected: bool) -> El<'a> {
     let size_txt = d.size.map(fmt::size2).unwrap_or_default();
     let eta_txt = match d.state {
         crate::model::DlState::Receiving => d.eta_secs.map(fmt::eta).unwrap_or_default(),
@@ -225,7 +268,6 @@ fn data_row<'a>(app: &App, d: &'a DownloadItem) -> El<'a> {
     ]
     .spacing(0);
 
-    let tw = total_width(&w);
     // The row is a plain container, not a button: `button` reports its press
     // only on mouse-*release* (so the drag never knows where it started) and
     // always paints the hand cursor. `mouse_area` presses on the way down,
@@ -249,24 +291,54 @@ fn data_row<'a>(app: &App, d: &'a DownloadItem) -> El<'a> {
 pub fn view(app: &App) -> El<'_> {
     let w = widths(app);
     let tw = total_width(&w);
+    let items = app.visible();
+    let n = items.len();
+    // Membership lookup for the selected-row styling: `Vec::contains` per row
+    // made painting quadratic once a sweep had selected the whole list.
+    let sel: HashSet<DlId> = app.selected.iter().copied().collect();
+
+    // Rows the viewport can show. `table_vh` comes from the scrollable itself
+    // and is 0 until it first reports one (a list shorter than the viewport
+    // never scrolls, and then nothing is virtualised anyway), so fall back to
+    // the window height — an over-estimate only ever builds spare rows.
+    let vh = if app.table_vh > 1.0 {
+        app.table_vh
+    } else {
+        app.main_size.height.max(1200.0)
+    };
+    let per_screen = (vh / ROW_H).ceil() as usize + 1;
+    // The header scrolls with the content, so it offsets the first data row.
+    let first = ((app.table_scroll - ROW_H).max(0.0) / ROW_H).floor() as usize;
+    let first = first.saturating_sub(OVERSCAN).min(n);
+    let last = first.saturating_add(per_screen + 2 * OVERSCAN).min(n);
+
+    // Both spacers are pushed even at zero height: iced matches widget state
+    // to children by position, so a leading child that comes and goes would
+    // shift every row's `mouse_area` state by one as the window slides.
     let mut rows = column![].width(tw);
-    let mut n = 0usize;
-    for d in app.visible() {
-        rows = rows.push(data_row(app, d));
-        n += 1;
+    rows = rows.push(spacer(tw, first as f32 * ROW_H));
+    for d in &items[first..last] {
+        rows = rows.push(data_row(app, d, &w, tw, sel.contains(&d.id)));
     }
-    // Ruled empty rows below the data. Enough to cover any
-    // realistic window height; scrolling past them is fine.
-    for _ in n..n.max(60) {
-        rows = rows.push(filler_row(&w, tw));
+    rows = rows.push(spacer(tw, (n - last) as f32 * ROW_H));
+    // Ruled empty rows below the data, enough to carry the grid to the bottom
+    // of the window; scrolling past them is fine.
+    let fillers = MIN_FILLER.max(per_screen).saturating_sub(n);
+    if fillers > 0 {
+        rows = rows.push(filler_block(&w, tw, fillers));
     }
-    let body = column![header(app), rows].width(tw);
+
+    let body = column![header(app, &w, tw), rows].width(tw);
     container(
         scrollable(body)
             .direction(scrollable::Direction::Both {
                 vertical: scrollable::Scrollbar::default(),
                 horizontal: scrollable::Scrollbar::default(),
             })
+            // Feeds the virtual window above. The scrollable only reports a
+            // viewport when it actually scrolls, and it drops repeats, so an
+            // idle list produces no messages.
+            .on_scroll(|v| Message::TableScrolled(v.absolute_offset().y, v.bounds().height))
             .width(Length::Fill)
             .height(Length::Fill),
     )
