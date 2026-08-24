@@ -23,6 +23,8 @@ mod log;
 mod macos_dock;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+#[cfg(target_os = "macos")]
+mod macos_surface;
 mod menubus;
 mod model;
 mod sounds;
@@ -137,6 +139,10 @@ fn boot() -> (App, Task<Message>) {
         list_drag_from_empty: false,
         hover_row: None,
         hover_col: None,
+        drag_order: Vec::new(),
+        table_scroll: 0.0,
+        table_vh: 0.0,
+        cursor_cell: std::sync::Arc::new(ui::probe::CursorCell::default()),
         perm_status: windows::permissions::PermStatus::default(),
         main_pos: None,
         main_size: iced::Size::new(0.0, 0.0),
@@ -331,6 +337,21 @@ fn subscription(app: &App) -> Subscription<Message> {
             _ => None,
         }),
     ];
+    // A drag in flight samples the pointer on a fixed cadence instead of on
+    // every motion event. Each message repaints the window — on a Retina
+    // display macOS colour-converts that whole surface per present — so a
+    // 120 Hz pointer meant 120 full repaints a second for a rectangle that
+    // reads the same at 60. Power save halves it again.
+    if app.list_drag || app.resizing.is_some() {
+        subs.push(
+            iced::time::every(std::time::Duration::from_millis(if power_save {
+                33
+            } else {
+                16
+            }))
+            .map(|_| Message::DragTick),
+        );
+    }
     // The glide tick exists only while something is moving; an idle list
     // costs zero redraws. Power save drops the animation entirely — the bar
     // then steps at the engine's event rate.

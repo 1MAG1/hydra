@@ -503,7 +503,14 @@ pub enum Message {
     TreeToggle(u8),
     RowClick(DlId),
     RowRightClick(DlId),
-    CursorMoved(Point),
+    /// Sample the pointer while a rubber-band or a column resize is in
+    /// flight. Motion itself publishes nothing (see [`crate::ui::probe`]);
+    /// this ticks at a fixed rate instead, because every message repaints the
+    /// window and a 120 Hz pointer would repaint it 120 times a second.
+    DragTick,
+    /// The download table scrolled: (vertical offset, viewport height).
+    /// Drives the virtual row window in `ui::table`.
+    TableScrolled(f32, f32),
     Mods(iced::keyboard::Modifiers),
     RawKey(iced::keyboard::Key, iced::keyboard::Modifiers),
     SelectAll,
@@ -784,6 +791,17 @@ pub struct App {
     pub hover_row: Option<DlId>,
     /// Header cell under the pointer, for the same reason.
     pub hover_col: Option<usize>,
+    /// Visible order snapshotted when a drag-selection starts. The sweep
+    /// extends the selection on every row it crosses, and re-deriving the
+    /// order there meant re-filtering and re-sorting the whole list per row.
+    pub drag_order: Vec<DlId>,
+    /// Scroll offset and viewport height last reported by the download
+    /// table, so `ui::table` can build only the rows actually on screen.
+    pub table_scroll: f32,
+    pub table_vh: f32,
+    /// Pointer position, kept without a message per motion event — see
+    /// [`crate::ui::probe`]. Read through [`App::cursor_now`].
+    pub cursor_cell: std::sync::Arc<crate::ui::probe::CursorCell>,
     /// Live results shown in the Permissions window.
     pub perm_status: crate::windows::permissions::PermStatus,
     /// Main window origin/size on screen, tracked so dialogs open centred
@@ -893,6 +911,18 @@ impl App {
             .map(|(id, _)| *id)
     }
 
+    /// The pointer, right now. Motion publishes no messages at all, so menu
+    /// placement, the start of a drag and `Message::DragTick` all read the
+    /// position from the probe.
+    pub fn cursor_now(&self) -> Point {
+        self.cursor_cell.get()
+    }
+
+    /// Ids of [`Self::visible`], in the same order.
+    pub fn visible_ids(&self) -> Vec<DlId> {
+        self.visible().iter().map(|d| d.id).collect()
+    }
+
     /// Items shown for the current tree selection, sorted.
     pub fn visible(&self) -> Vec<&DownloadItem> {
         let mut v: Vec<&DownloadItem> = self
@@ -915,29 +945,37 @@ impl App {
             })
             .collect();
         let (key, asc) = self.sort;
-        v.sort_by(|a, b| {
-            let ord = match key {
-                SortKey::Name => a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()),
-                SortKey::Queue => a.queue.cmp(&b.queue).then(a.q_order.cmp(&b.q_order)),
-                SortKey::Size => a.size.unwrap_or(0).cmp(&b.size.unwrap_or(0)),
-                SortKey::Status => a.status_text().cmp(&b.status_text()),
-                SortKey::TimeLeft => a
-                    .eta_secs
-                    .unwrap_or(u64::MAX)
-                    .cmp(&b.eta_secs.unwrap_or(u64::MAX)),
-                SortKey::Rate => a
-                    .rate
-                    .partial_cmp(&b.rate)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-                SortKey::LastTry => a.last_try.cmp(&b.last_try),
-                SortKey::Description => a.description.cmp(&b.description),
-            };
-            if asc {
-                ord
-            } else {
-                ord.reverse()
-            }
-        });
+        // Name and Status build a key per item instead of comparing on the
+        // fly: `to_lowercase` and `status_text` each allocate, and this runs
+        // on every rebuild — two allocations per *comparison* put O(n log n)
+        // of them on the pointer's event rate during a drag.
+        match key {
+            SortKey::Name => sort_keyed(&mut v, asc, |d| d.file_name.to_lowercase()),
+            SortKey::Status => sort_keyed(&mut v, asc, DownloadItem::status_text),
+            _ => v.sort_by(|a, b| {
+                let ord = match key {
+                    SortKey::Queue => a.queue.cmp(&b.queue).then(a.q_order.cmp(&b.q_order)),
+                    SortKey::Size => a.size.unwrap_or(0).cmp(&b.size.unwrap_or(0)),
+                    SortKey::TimeLeft => a
+                        .eta_secs
+                        .unwrap_or(u64::MAX)
+                        .cmp(&b.eta_secs.unwrap_or(u64::MAX)),
+                    SortKey::Rate => a
+                        .rate
+                        .partial_cmp(&b.rate)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                    SortKey::LastTry => a.last_try.cmp(&b.last_try),
+                    SortKey::Description => a.description.cmp(&b.description),
+                    // Handled above.
+                    SortKey::Name | SortKey::Status => std::cmp::Ordering::Equal,
+                };
+                if asc {
+                    ord
+                } else {
+                    ord.reverse()
+                }
+            }),
+        }
         v
     }
 
@@ -2103,6 +2141,13 @@ impl App {
             Message::Noop => Task::none(),
             Message::WindowOpened(id) => {
                 #[cfg(target_os = "macos")]
+                let pin_surface = iced::window::run(id, |w| {
+                    crate::macos_surface::pin_color_space(w);
+                })
+                .discard();
+                #[cfg(not(target_os = "macos"))]
+                let pin_surface = Task::none();
+                #[cfg(target_os = "macos")]
                 {
                     // Back to Regular before installing the menu: with the
                     // Dock hidden the app sat in Accessory, which has no
@@ -2139,12 +2184,13 @@ impl App {
                 {
                     self.capture_raise = false;
                     return Task::batch([
+                        pin_surface,
                         skip_taskbar,
                         window::set_level(id, window::Level::AlwaysOnTop),
                         window::gain_focus(id),
                     ]);
                 }
-                Task::batch([skip_taskbar, window::gain_focus(id)])
+                Task::batch([pin_surface, skip_taskbar, window::gain_focus(id)])
             }
             Message::WindowClosed(id) => {
                 let kind = self.windows.remove(&id);
@@ -2363,7 +2409,9 @@ impl App {
                 Task::none()
             }
             Message::RowClick(id) => {
-                self.band = Some((self.cursor, self.cursor));
+                let at = self.cursor_now();
+                self.cursor = at;
+                self.band = Some((at, at));
                 if self.mods.command() || self.mods.control() {
                     // Toggle membership.
                     if self.selected.contains(&id) {
@@ -2378,7 +2426,7 @@ impl App {
                 if self.mods.shift() {
                     // Range from the anchor within the visible ordering.
                     let anchor = self.sel_anchor.unwrap_or(id);
-                    let order: Vec<DlId> = self.visible().iter().map(|d| d.id).collect();
+                    let order: Vec<DlId> = self.visible_ids();
                     let a = order.iter().position(|x| *x == anchor);
                     let b = order.iter().position(|x| *x == id);
                     if let (Some(a), Some(b)) = (a, b) {
@@ -2398,6 +2446,7 @@ impl App {
                 self.list_press = Some(id);
                 self.list_drag = true;
                 self.list_drag_from_empty = false;
+                self.drag_order = self.visible_ids();
                 if double {
                     let st = self.item(id).map(|d| d.state);
                     match st {
@@ -2418,10 +2467,16 @@ impl App {
                     self.selected = vec![id];
                     self.sel_anchor = Some(id);
                 }
-                self.ctx_at = Some(self.cursor);
+                self.ctx_at = Some(self.cursor_now());
                 Task::none()
             }
-            Message::CursorMoved(p) => {
+            Message::TableScrolled(offset, viewport_h) => {
+                self.table_scroll = offset;
+                self.table_vh = viewport_h;
+                Task::none()
+            }
+            Message::DragTick => {
+                let p = self.cursor_now();
                 self.cursor = p;
                 if self.list_drag {
                     if let Some(band) = self.band.as_mut() {
@@ -2509,7 +2564,7 @@ impl App {
                 }
             }
             Message::SelectAll => {
-                self.selected = self.visible().iter().map(|d| d.id).collect();
+                self.selected = self.visible_ids();
                 self.sel_anchor = self.selected.first().copied();
                 Task::none()
             }
@@ -2520,11 +2575,10 @@ impl App {
                 if !self.list_drag {
                     return Task::none();
                 }
-                let order: Vec<DlId> = self.visible().iter().map(|d| d.id).collect();
                 let anchor = if self.list_drag_from_empty {
                     // Band pinned to the end of the list: the press was below
                     // every row.
-                    match order.last() {
+                    match self.drag_order.last() {
                         Some(last) => *last,
                         None => return Task::none(),
                     }
@@ -2533,11 +2587,11 @@ impl App {
                     self.list_press = Some(a);
                     a
                 };
-                let a = order.iter().position(|x| *x == anchor);
-                let b = order.iter().position(|x| *x == id);
+                let a = self.drag_order.iter().position(|x| *x == anchor);
+                let b = self.drag_order.iter().position(|x| *x == id);
                 if let (Some(a), Some(b)) = (a, b) {
                     let (lo, hi) = (a.min(b), a.max(b));
-                    self.selected = order[lo..=hi].to_vec();
+                    self.selected = self.drag_order[lo..=hi].to_vec();
                     self.sel_anchor = Some(anchor);
                 }
                 Task::none()
@@ -2548,7 +2602,10 @@ impl App {
                 self.list_drag = true;
                 self.list_drag_from_empty = true;
                 self.list_press = None;
-                self.band = Some((self.cursor, self.cursor));
+                self.drag_order = self.visible_ids();
+                let at = self.cursor_now();
+                self.cursor = at;
+                self.band = Some((at, at));
                 self.selected.clear();
                 self.sel_anchor = None;
                 self.last_click = None;
@@ -2570,9 +2627,8 @@ impl App {
                 let Some(anchor) = self.list_press else {
                     return Task::none();
                 };
-                let order: Vec<DlId> = self.visible().iter().map(|d| d.id).collect();
-                if let Some(a) = order.iter().position(|x| *x == anchor) {
-                    self.selected = order[a..].to_vec();
+                if let Some(a) = self.drag_order.iter().position(|x| *x == anchor) {
+                    self.selected = self.drag_order[a..].to_vec();
                     self.sel_anchor = Some(anchor);
                 }
                 Task::none()
@@ -2595,7 +2651,7 @@ impl App {
             }
             Message::QueueMenuOpen(start) => {
                 self.queue_menu = Some(start);
-                self.ctx_at = Some(self.cursor);
+                self.ctx_at = Some(self.cursor_now());
                 Task::none()
             }
             Message::ClipboardAddStart(text) => {
@@ -2631,12 +2687,13 @@ impl App {
                 self.list_press = None;
                 self.list_drag = false;
                 self.list_drag_from_empty = false;
+                self.drag_order = Vec::new();
                 self.band = None;
                 Task::none()
             }
             Message::ColResizeStart(col) => {
                 if let Some(w) = self.col_widths.get(col) {
-                    self.resizing = Some((col, self.cursor.x, *w));
+                    self.resizing = Some((col, self.cursor_now().x, *w));
                 }
                 Task::none()
             }
@@ -3464,9 +3521,17 @@ impl App {
                 };
                 let moved = order.remove(from);
                 order.insert(to, moved);
-                for (i, id) in order.iter().enumerate() {
-                    if let Some(d) = self.item_mut(*id) {
-                        d.q_order = i as u32;
+                // One pass over the list, not `item_mut` per member: this runs
+                // for every row the drag crosses, and the linear lookup made
+                // reordering a long queue quadratic in the download count.
+                let rank: HashMap<DlId, u32> = order
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| (*id, i as u32))
+                    .collect();
+                for d in &mut self.state.downloads {
+                    if let Some(i) = rank.get(&d.id) {
+                        d.q_order = *i;
                     }
                 }
                 Task::none()
@@ -4341,6 +4406,19 @@ impl App {
 /// resolution at the reference ratio (1009x606 on a 1512x982 screen — i.e.
 /// two thirds of the width, ~62% of the height), clamped to the layout's
 /// 900x600 floor. Falls back to 1009x606 when the display cannot be queried.
+/// Stable sort on a precomputed key, applied in place.
+///
+/// The equivalent of `sort_by(|a, b| key(a).cmp(&key(b)))` with the key built
+/// once per item rather than once per comparison; ties keep their order in
+/// both directions, exactly as reversing the comparison would.
+fn sort_keyed<'a, K: Ord>(v: &mut [&'a DownloadItem], asc: bool, key: impl Fn(&DownloadItem) -> K) {
+    let mut keyed: Vec<(K, &'a DownloadItem)> = v.iter().map(|d| (key(d), *d)).collect();
+    keyed.sort_by(|a, b| if asc { a.0.cmp(&b.0) } else { b.0.cmp(&a.0) });
+    for (slot, (_, d)) in v.iter_mut().zip(keyed) {
+        *slot = d;
+    }
+}
+
 pub fn main_window_size() -> iced::Size {
     let fallback = iced::Size::new(1009.0, 606.0);
     let Ok(displays) = display_info::DisplayInfo::all() else {
