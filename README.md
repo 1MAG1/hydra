@@ -2,10 +2,11 @@
   <img src="docs/logo.png" alt="HYDRA Logo" width="180">
 </p>
 
-<h1 align="center">HYDRA</h1>
+<h1 align="center">Hydra Download Manager (HDM)</h1>
 
 <p align="center">
-  <strong>A fast, resilient, multi-source file retriever and download engine.</strong>
+  <strong>Fast, resilient, multi-source download manager and accelerator for Windows, macOS, and Linux.</strong><br>
+  <a href="https://hydra.javad.dev"><strong>https://hydra.javad.dev</strong></a>
 </p>
 
 <p align="center">
@@ -49,7 +50,7 @@
 
 ## Overview
 
-**HYDRA** is a high-performance network file retriever designed for speed, resilience, and adaptability. It dynamically partitions downloads across multiple connections and independent mirror sources, continuously rebalancing work to maximize throughput without stalling on slow peers. It ships as both a `wget`/`curl`-compatible CLI and a cross-platform desktop download manager with browser integration.
+**Hydra Download Manager (HDM)** is an open-source, high-performance network file retriever and download accelerator designed for speed, resilience, and adaptability. It dynamically partitions downloads across multiple connections and independent mirror sources, continuously rebalancing work to maximize throughput without stalling on slow peers. It ships as both a `wget`/`curl`-compatible CLI and a cross-platform desktop download manager with browser integration.
 
 <p align="center">
   <img src="docs/img/screenshot.jpg" alt="Hydra Download Manager" width="720">

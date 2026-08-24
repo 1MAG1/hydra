@@ -262,14 +262,18 @@ pub fn context_entries(app: &App) -> Vec<Entry> {
 pub fn bar(app: &App) -> El<'_> {
     let mut r = row![].spacing(2).padding([2, 6]);
     for (kind, label) in BAR {
+        // The title of the open menu stays highlighted while its dropdown is
+        // up, so hovering across the bar clearly shows which menu is showing.
+        let open = app.open_menu == Some(kind);
         r = r.push(
             button(text(tr(label)).size(theme::FONT_SIZE + 1.0))
                 .padding([3, 10])
-                .style(theme::btn_menu)
+                .style(move |t: &iced::Theme, s: button::Status| {
+                    theme::btn_menu(t, if open { button::Status::Hovered } else { s })
+                })
                 .on_press(Message::MenuOpen(kind)),
         );
     }
-    let _ = app;
     r.into()
 }
 
@@ -292,8 +296,20 @@ fn ghost<'a>(label: &str) -> iced::widget::Button<'a, Message> {
 pub fn bar_overlay(app: &App, kind: MenuBarKind) -> El<'_> {
     let items = entries(kind, app);
     let panel = dropdown(&items, app.open_submenu);
-    // Same height as the real bar row (+1 for the rule below it).
-    let bar_ghost = row![ghost(BAR[0].1)].padding([2, 6]);
+    // Same height as the real bar row (+1 for the rule below it). Every title
+    // is replayed here, not just the first: the overlay covers the real bar,
+    // so these ghosts are what the pointer actually reaches while a menu is
+    // open. Hovering one switches the dropdown to it (menu tracking, like IDM
+    // and every native Windows/Linux menu bar); pressing the open title again
+    // closes the bar.
+    let mut bar_ghost = row![].spacing(2).padding([2, 6]);
+    for (k, label) in BAR {
+        bar_ghost = bar_ghost.push(
+            mouse_area(ghost(label))
+                .on_enter(Message::MenuHover(k))
+                .on_press(Message::MenuOpen(k)),
+        );
+    }
     // The buttons left of the open one push the panel to its x position.
     let mut below = row![].spacing(2).padding(iced::Padding {
         left: 6.0,
