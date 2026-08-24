@@ -7,3 +7,5 @@
 # transfer sidecars and downloaded test payloads
 *.hydra
 /bench-out/
+.SRCINFO
+

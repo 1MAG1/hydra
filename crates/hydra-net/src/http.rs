@@ -9,6 +9,7 @@ use crate::polite::Pace;
 use crate::sink::SparseSink;
 use crate::{Arrival, Connector, Target, READ_BUF};
 use std::io;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -72,6 +73,46 @@ impl Probe {
     /// This probe described a redirect rather than the object.
     pub fn is_redirect(&self) -> bool {
         matches!(self.status, 301 | 302 | 303 | 307 | 308) && self.location.is_some()
+    }
+
+    /// This response could be a redirector PAGE — a forward expressed in HTML
+    /// instead of in a `Location` header (see [`crate::redirect`]).
+    ///
+    /// A cheap pre-filter, not an answer: it says only that fetching the body
+    /// to look for a redirect directive is worth one small request. The three
+    /// conditions are what separate a forwarding page from a download:
+    ///
+    /// * **HTML.** An object with any other type is the object.
+    /// * **No `Content-Disposition`.** A server that names a file to save is
+    ///   serving that file, whatever its type.
+    /// * **Small, or of unstated length.** Redirector pages are under a
+    ///   kilobyte; HEAD against one commonly omits `Content-Length` entirely
+    ///   (chunked, or `Vary`-driven), which is why an unknown size qualifies.
+    ///
+    /// Deliberately permissive about ordinary web pages: one that really does
+    /// carry a meta refresh is one a browser would follow too, so following it
+    /// is the answer the user expects rather than a false positive.
+    /// The length the server STATED, as opposed to the length this probe inferred.
+    ///
+    /// `size` cannot answer the question on its own: it is 0 both when the server
+    /// sent no `Content-Length` and when it sent `Content-Length: 0`, and those are
+    /// opposite facts. The first means "ask another way"; the second means the
+    /// object is empty and every further request is waste — or worse, since a
+    /// `bytes=0-0` GET against a zero-length object is unsatisfiable and answered
+    /// `416`, which reads as a failure for a download that should have succeeded.
+    pub fn stated_length(&self) -> Option<u64> {
+        header_value(&self.raw_head, "content-length").and_then(|v| v.trim().parse().ok())
+    }
+
+    pub fn maybe_redirector(&self) -> bool {
+        (200..300).contains(&self.status)
+            && self.disposition.is_none()
+            && self.size <= crate::redirect::MAX_REDIRECTOR_PAGE
+            && self
+                .content_type
+                .as_deref()
+                .map(|c| c.trim_start().to_ascii_lowercase().starts_with("text/html"))
+                .unwrap_or(false)
     }
 }
 
@@ -173,6 +214,34 @@ fn build_request_head_disp(
 /// So this is the honest degradation: one connection, sequential, no resume, no
 /// parallelism, and the caller is told that is what happened.
 pub async fn fetch_streaming<C: Connector>(c: &C, t: &Target, path: &str) -> io::Result<u64> {
+    fetch_streaming_observed(c, t, path, &AtomicU64::new(0), None, &Pace::unlimited()).await
+}
+
+/// The same streaming fetch, made observable, interruptible and rate-shaped.
+///
+/// The plain [`fetch_streaming`] hands back one number, once, when the whole body
+/// has arrived. On a ten-gigabyte object that is an hour of a caller having nothing
+/// to show and no way to stop: the byte counter sits at zero, the stop flag nothing
+/// reads, and the socket keeps pulling until the object ends. All three are the same
+/// missing thing — a loop nobody can see into.
+///
+/// `written` carries the running total, so a caller polling it can report progress
+/// while the body is still arriving. `cancel` is checked between reads and ends the
+/// transfer with [`io::ErrorKind::Interrupted`], the same signal
+/// [`crate::run_transfer_cancellable`] uses, with the bytes so far flushed to disk.
+/// `pace` shapes the reads themselves, so a rate cap applies here exactly as it does
+/// on the ranged path.
+pub async fn fetch_streaming_observed<C: Connector>(
+    c: &C,
+    t: &Target,
+    path: &str,
+    written: &AtomicU64,
+    cancel: Option<&AtomicBool>,
+    pace: &Pace,
+) -> io::Result<u64> {
+    let stopped = || cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+    let interrupted = || io::Error::new(io::ErrorKind::Interrupted, "cancelled");
+
     let mut s = c.connect(t).await?;
     let req = build_request_head("GET", t, None);
     s.write_all(req.as_bytes()).await?;
@@ -180,6 +249,9 @@ pub async fn fetch_streaming<C: Connector>(c: &C, t: &Target, path: &str) -> io:
     let mut head = Vec::new();
     let mut buf = vec![0u8; 32 * 1024];
     let body_start = loop {
+        if stopped() {
+            return Err(interrupted());
+        }
         let n = match s.read(&mut buf).await {
             Ok(0) => break find_crlf2(&head),
             Ok(n) => n,
@@ -227,6 +299,10 @@ pub async fn fetch_streaming<C: Connector>(c: &C, t: &Target, path: &str) -> io:
         let mut need_size = true;
         let mut remaining = 0u64;
         loop {
+            if stopped() {
+                w.flush().await?;
+                return Err(interrupted());
+            }
             if need_size {
                 if let Some(i) = find_crlf(&pending) {
                     let line = String::from_utf8_lossy(&pending[..i]).to_string();
@@ -249,6 +325,7 @@ pub async fn fetch_streaming<C: Connector>(c: &C, t: &Target, path: &str) -> io:
                 let take = (remaining as usize).min(pending.len());
                 w.write_all(&pending[..take]).await?;
                 total += take as u64;
+                written.store(total, Ordering::Relaxed);
                 pending.drain(..take);
                 remaining -= take as u64;
                 if remaining == 0 {
@@ -267,23 +344,33 @@ pub async fn fetch_streaming<C: Connector>(c: &C, t: &Target, path: &str) -> io:
                 }
                 continue;
             }
-            let n = match s.read(&mut buf).await {
+            let want = pace.read_size(buf.len());
+            let n = match s.read(&mut buf[..want]).await {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(e),
             };
+            pace.wait(n as u64).await;
             pending.extend_from_slice(&buf[..n]);
         }
     } else {
         w.write_all(first).await?;
         total += first.len() as u64;
+        written.store(total, Ordering::Relaxed);
         loop {
-            match s.read(&mut buf).await {
+            if stopped() {
+                w.flush().await?;
+                return Err(interrupted());
+            }
+            let want = pace.read_size(buf.len());
+            match s.read(&mut buf[..want]).await {
                 Ok(0) => break,
                 Ok(n) => {
+                    pace.wait(n as u64).await;
                     w.write_all(&buf[..n]).await?;
                     total += n as u64;
+                    written.store(total, Ordering::Relaxed);
                 }
                 // An unclean TLS close is how many servers end a Connection: close
                 // body. The bytes already read are still valid.
@@ -437,6 +524,65 @@ pub async fn probe_via_get<C: Connector>(c: &C, t: &Target) -> io::Result<Probe>
         raw_head: h.to_string(),
         raw_request: req,
     })
+}
+
+/// Probe an object, falling back to a ranged GET when HEAD gives nothing usable.
+///
+/// HEAD is the cheap question and the common case answers it. But it is optional in
+/// practice, and the servers that refuse it do not refuse politely: `ash-speed.hetzner.com`
+/// answers a HEAD by closing the connection with an empty reply, which [`probe`] reports
+/// as a successful response carrying status 0, no length and no range support. Trusting
+/// that reads as "an object of unknown size that cannot be resumed", which sends a
+/// ten-gigabyte transfer down the single-stream path: no parallelism, no resume, and no
+/// size to show. The object is perfectly ordinary — the same URL answers `bytes=0-0`
+/// with `206`, its full length and a strong ETag.
+///
+/// So a HEAD that returns no length is treated as no answer rather than as an answer of
+/// zero, and the ranged GET is asked instead. A redirect IS an answer and is returned as
+/// it stands: the object is elsewhere, and this host has nothing to say about its bytes.
+pub async fn probe_resilient<C: Connector>(c: &C, t: &Target) -> io::Result<Probe> {
+    // A HEAD that STATED a length has answered, even when the length is zero.
+    //
+    // `Probe::size` cannot tell "no Content-Length" from "Content-Length: 0" —
+    // both are 0 — and the difference decides whether a second request is needed.
+    // Reading the header back off the raw block is what keeps a genuinely empty
+    // object (`/Testdateien/0B`) to one request, and it matters beyond the cost:
+    // a ranged GET against a zero-length object is unsatisfiable, so servers
+    // answer `bytes=0-0` with `416`, and a fallback that trusted the GET would
+    // turn a perfectly good empty file into a failed download.
+    let answered = |p: &Probe| {
+        p.status >= 200 && p.status < 400 && (p.size > 0 || p.stated_length().is_some())
+    };
+    let head = probe(c, t).await;
+    match &head {
+        // A redirect is a complete answer: the object is elsewhere, and asking
+        // this host for its bytes only wastes a request.
+        Ok(p) if p.is_redirect() => return head,
+        Ok(p) if answered(p) => return head,
+        _ => {}
+    }
+    // No length, an error status, or no reply at all. Ask the way that cannot be
+    // refused: a `bytes=0-0` GET costs one byte of body, proves range support
+    // rather than trusting an `Accept-Ranges` advertisement, and carries the total
+    // in its `Content-Range`.
+    let get = probe_via_get(c, t).await;
+    match (head, get) {
+        (_, Ok(g)) if g.status >= 200 && g.status < 400 => Ok(g),
+        // The GET was refused where the HEAD was not. Keep the HEAD: this is the
+        // 416-on-an-empty-object case, and a `404` learned from HEAD is also a
+        // better error than "the ranged GET was unsatisfiable".
+        (Ok(h), Ok(g)) => Ok(if h.status >= 200 && h.status < 400 {
+            h
+        } else {
+            g
+        }),
+        (Ok(h), Err(_)) => Ok(h),
+        (Err(_), Ok(g)) => Ok(g),
+        (Err(head_err), Err(get_err)) => Err(io::Error::new(
+            head_err.kind(),
+            format!("HEAD failed ({head_err}), ranged GET failed ({get_err})"),
+        )),
+    }
 }
 
 /// Total object size from a one-byte range request.

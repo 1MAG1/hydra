@@ -1,7 +1,8 @@
-# Configures the notes GitHub generates for `generate_release_notes: true`
-# (used by .github/workflows/release.yml when a release is published). Native
-# GitHub feature — no extra workflow or Action involved, and it's computed
-# correctly at actual release time for both stable and RC tags.
+# Configures the notes GitHub generates for the `releases/generate-notes` API
+# (called by the "Generate release notes" step in
+# .github/workflows/release.yml when a release is published). Native GitHub
+# feature — no extra Action involved, and it's computed correctly at actual
+# release time for both stable and RC tags.
 #
 # Categorization is by PR label, so PRs need the matching label applied before
 # merge (labels below follow the `<type>(<scope>): summary` convention already

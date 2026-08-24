@@ -503,3 +503,43 @@ async fn limit_rate_shapes_the_aggregate_transfer() {
     eprintln!("limit-rate: {SIZE} B in {elapsed:.2}s = {achieved:.0} B/s (cap {CAP})");
     let _ = std::fs::remove_file(&out);
 }
+
+/// A forward expressed in HTML instead of in a `Location` header must be
+/// recognised and resolved.
+///
+/// The failure this covers is a silent one: a referrer stripper such as
+/// `href.li/?<url>` answers `200 OK` with a kilobyte of HTML, so a client that
+/// only understands `3xx` reports SUCCESS and writes the forwarding page under
+/// the object's name. The assertion is therefore in two parts — the probe must
+/// classify the page as a possible redirector, and the resolver must read the
+/// real target out of it.
+#[tokio::test]
+async fn an_html_redirector_page_is_recognised_and_resolved() {
+    const SIZE: u64 = 4096;
+    let net = OriginSet::new();
+    let (obj_port, _obj) = net.spawn(SIZE, 8_000_000);
+    let dest = format!("http://127.0.0.1:{obj_port}/obj");
+    let (port, _ctl) = net.spawn_html_redirecting(SIZE, 8_000_000, &dest);
+
+    let t = Target::direct("127.0.0.1", port, "/?https://example.org/setup.exe");
+    let p = probe(&net, &t).await.expect("probe");
+    assert_eq!(p.status, 200, "a redirector answers 200, not 3xx");
+    assert!(
+        !p.is_redirect(),
+        "there is no Location header to find: that is the point"
+    );
+    assert!(
+        p.maybe_redirector(),
+        "a small text/html body with no Content-Disposition is worth a look"
+    );
+
+    assert_eq!(
+        hya_net::html_redirect(&net, &t).await.as_deref(),
+        Some(dest.as_str()),
+    );
+
+    // And the object itself is not mistaken for one.
+    let obj = probe(&net, &tgt(obj_port)).await.expect("probe");
+    assert!(!obj.maybe_redirector());
+    assert!(hya_net::html_redirect(&net, &tgt(obj_port)).await.is_none());
+}

@@ -430,6 +430,12 @@ pub struct BatchState {
     pub checks: Vec<(String, bool)>,
     /// Probed sizes for the Size column (absent = probe still running).
     pub sizes: std::collections::HashMap<String, u64>,
+    /// Resolved names for the File Name column, by URL.
+    ///
+    /// Kept separately from the URL-implied name because they disagree exactly
+    /// where it matters: a redirector link (`href.li/?<url>`) implies
+    /// `index.html`, and only the probe knows it forwards to `setup.exe`.
+    pub names: std::collections::HashMap<String, String>,
     pub parsed: bool,
     pub to_category: bool,
     pub category: String,
@@ -484,6 +490,10 @@ pub enum Message {
     NativeMenu(String),
     // main window chrome
     MenuOpen(MenuBarKind),
+    /// Moving the pointer over a menu-bar title while another menu is already
+    /// open: switches to that menu without closing the bar (IDM/Windows menu
+    /// tracking). Unlike [`Message::MenuOpen`] it never toggles a menu shut.
+    MenuHover(MenuBarKind),
     MenuClose,
     /// Hovering (or clicking) a dropdown entry: `Some(i)` opens entry `i`'s
     /// flyout, `None` closes it — macOS submenu behaviour.
@@ -493,7 +503,14 @@ pub enum Message {
     TreeToggle(u8),
     RowClick(DlId),
     RowRightClick(DlId),
-    CursorMoved(Point),
+    /// Sample the pointer while a rubber-band or a column resize is in
+    /// flight. Motion itself publishes nothing (see [`crate::ui::probe`]);
+    /// this ticks at a fixed rate instead, because every message repaints the
+    /// window and a 120 Hz pointer would repaint it 120 times a second.
+    DragTick,
+    /// The download table scrolled: (vertical offset, viewport height).
+    /// Drives the virtual row window in `ui::table`.
+    TableScrolled(f32, f32),
     Mods(iced::keyboard::Modifiers),
     RawKey(iced::keyboard::Key, iced::keyboard::Modifiers),
     SelectAll,
@@ -586,7 +603,10 @@ pub enum Message {
     // batch
     BatchEdit(iced::widget::text_editor::Action),
     BatchLoaded(Option<String>),
-    BatchProbed(String, Option<u64>),
+    BatchProbed(String, Option<engine::LinkMeta>),
+    /// A File Info dialog's own probe answered: the real name and size of a
+    /// link that is not being downloaded yet.
+    InfoProbed(DlId, Option<engine::LinkMeta>),
     BatchCheck(usize, bool),
     BatchCheckAll(bool),
     BatchSaveMode(u8),
@@ -771,6 +791,17 @@ pub struct App {
     pub hover_row: Option<DlId>,
     /// Header cell under the pointer, for the same reason.
     pub hover_col: Option<usize>,
+    /// Visible order snapshotted when a drag-selection starts. The sweep
+    /// extends the selection on every row it crosses, and re-deriving the
+    /// order there meant re-filtering and re-sorting the whole list per row.
+    pub drag_order: Vec<DlId>,
+    /// Scroll offset and viewport height last reported by the download
+    /// table, so `ui::table` can build only the rows actually on screen.
+    pub table_scroll: f32,
+    pub table_vh: f32,
+    /// Pointer position, kept without a message per motion event — see
+    /// [`crate::ui::probe`]. Read through [`App::cursor_now`].
+    pub cursor_cell: std::sync::Arc<crate::ui::probe::CursorCell>,
     /// Live results shown in the Permissions window.
     pub perm_status: crate::windows::permissions::PermStatus,
     /// Main window origin/size on screen, tracked so dialogs open centred
@@ -880,6 +911,18 @@ impl App {
             .map(|(id, _)| *id)
     }
 
+    /// The pointer, right now. Motion publishes no messages at all, so menu
+    /// placement, the start of a drag and `Message::DragTick` all read the
+    /// position from the probe.
+    pub fn cursor_now(&self) -> Point {
+        self.cursor_cell.get()
+    }
+
+    /// Ids of [`Self::visible`], in the same order.
+    pub fn visible_ids(&self) -> Vec<DlId> {
+        self.visible().iter().map(|d| d.id).collect()
+    }
+
     /// Items shown for the current tree selection, sorted.
     pub fn visible(&self) -> Vec<&DownloadItem> {
         let mut v: Vec<&DownloadItem> = self
@@ -902,29 +945,37 @@ impl App {
             })
             .collect();
         let (key, asc) = self.sort;
-        v.sort_by(|a, b| {
-            let ord = match key {
-                SortKey::Name => a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()),
-                SortKey::Queue => a.queue.cmp(&b.queue).then(a.q_order.cmp(&b.q_order)),
-                SortKey::Size => a.size.unwrap_or(0).cmp(&b.size.unwrap_or(0)),
-                SortKey::Status => a.status_text().cmp(&b.status_text()),
-                SortKey::TimeLeft => a
-                    .eta_secs
-                    .unwrap_or(u64::MAX)
-                    .cmp(&b.eta_secs.unwrap_or(u64::MAX)),
-                SortKey::Rate => a
-                    .rate
-                    .partial_cmp(&b.rate)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-                SortKey::LastTry => a.last_try.cmp(&b.last_try),
-                SortKey::Description => a.description.cmp(&b.description),
-            };
-            if asc {
-                ord
-            } else {
-                ord.reverse()
-            }
-        });
+        // Name and Status build a key per item instead of comparing on the
+        // fly: `to_lowercase` and `status_text` each allocate, and this runs
+        // on every rebuild — two allocations per *comparison* put O(n log n)
+        // of them on the pointer's event rate during a drag.
+        match key {
+            SortKey::Name => sort_keyed(&mut v, asc, |d| d.file_name.to_lowercase()),
+            SortKey::Status => sort_keyed(&mut v, asc, DownloadItem::status_text),
+            _ => v.sort_by(|a, b| {
+                let ord = match key {
+                    SortKey::Queue => a.queue.cmp(&b.queue).then(a.q_order.cmp(&b.q_order)),
+                    SortKey::Size => a.size.unwrap_or(0).cmp(&b.size.unwrap_or(0)),
+                    SortKey::TimeLeft => a
+                        .eta_secs
+                        .unwrap_or(u64::MAX)
+                        .cmp(&b.eta_secs.unwrap_or(u64::MAX)),
+                    SortKey::Rate => a
+                        .rate
+                        .partial_cmp(&b.rate)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                    SortKey::LastTry => a.last_try.cmp(&b.last_try),
+                    SortKey::Description => a.description.cmp(&b.description),
+                    // Handled above.
+                    SortKey::Name | SortKey::Status => std::cmp::Ordering::Equal,
+                };
+                if asc {
+                    ord
+                } else {
+                    ord.reverse()
+                }
+            }),
+        }
         v
     }
 
@@ -1767,6 +1818,74 @@ impl App {
 
     // -------------------------------------------------------------- engine
 
+    /// Adopt what a probe learned about `id`: its size, and the name the
+    /// object actually landed under — a `Content-Disposition`, or the last
+    /// segment of a URL the engine had to resolve redirects to reach.
+    ///
+    /// Shared by the two places a probe can answer, because both must produce
+    /// the same result: the running transfer's `Probed` event, and the
+    /// speculative probe fired for the File Info dialog when no background
+    /// download is running behind it.
+    fn adopt_probed(&mut self, id: DlId, name: Option<String>, size: Option<u64>) -> Task<Message> {
+        let mut adopted = false;
+        if let Some(d) = self.item_mut(id) {
+            if d.size.is_none() {
+                d.size = size;
+            }
+            // Only adopt a server name if the user hasn't renamed.
+            if let Some(name) = name.filter(|n| !n.is_empty()) {
+                if d.downloaded == 0 && d.held.is_empty() {
+                    adopted = d.file_name != name;
+                    d.file_name = name;
+                }
+            }
+        }
+        // The File Info dialog fills itself as the probe answers: real name
+        // from Content-Disposition, category by extension, size via the item
+        // it displays.
+        if self.file_info.dl == id && self.win_of(WinKind::FileInfo(id)).is_some() {
+            let probed_name = self.item(id).map(|d| d.file_name.clone());
+            if let Some(name) = probed_name {
+                if !self.file_info.name_touched {
+                    self.file_info.file_name = name.clone();
+                }
+                if !self.file_info.cat_touched {
+                    if let Some(cat) = categorize(&name, &self.cfg.categories) {
+                        let dir = self
+                            .cfg
+                            .categories
+                            .iter()
+                            .find(|c| c.name == cat)
+                            .map(|c| c.dir.clone());
+                        self.file_info.category = cat.clone();
+                        if let (false, Some(dir)) = (self.file_info.dir_touched, dir.clone()) {
+                            self.file_info.save_dir = dir;
+                        }
+                        let dir_untouched = !self.file_info.dir_touched;
+                        if let Some(d) = self.item_mut(id) {
+                            d.category = Some(cat);
+                            if let (Some(dir), true) = (dir, dir_untouched) {
+                                d.save_dir = dir;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // A transfer already under way was started under the name the URL
+        // implied, and the probe has just found the real one. The engine
+        // renames the `.part` into its final path when the transfer ends, so
+        // that path has to be corrected too; without this the list showed
+        // `setup.exe` while the disk still got `index.html`.
+        if adopted {
+            if let Some(path) = self.item(id).map(|d| d.full_path()) {
+                engine::send(Cmd::SetFinalPath(id, path.to_string_lossy().into_owned()));
+            }
+        }
+        self.save_state();
+        Task::none()
+    }
+
     fn on_engine(&mut self, ev: engine::Event) -> Task<Message> {
         match ev {
             engine::Event::Probed {
@@ -1776,57 +1895,13 @@ impl App {
                 file_name,
             } => {
                 if let Some(d) = self.item_mut(id) {
-                    if d.size.is_none() {
-                        d.size = size;
-                    }
                     d.resume = Some(ranges);
-                    // Only adopt a server name if the user hasn't renamed.
-                    if let Some(name) = file_name {
-                        if d.downloaded == 0 && d.held.is_empty() && !name.is_empty() {
-                            d.file_name = name;
-                        }
-                    }
                     // The state stays Connecting: the probe answered, but no
                     // byte has arrived — the first Progress event promotes to
                     // Receiving. (Jumping early made the Status column show
                     // "0.00%" while the dialog still said Connecting.)
                 }
-                // The File Info dialog fills itself as the probe answers:
-                // real name from Content-Disposition, category by
-                // extension, size via the item it displays.
-                if self.file_info.dl == id && self.win_of(WinKind::FileInfo(id)).is_some() {
-                    let probed_name = self.item(id).map(|d| d.file_name.clone());
-                    if let Some(name) = probed_name {
-                        if !self.file_info.name_touched {
-                            self.file_info.file_name = name.clone();
-                        }
-                        if !self.file_info.cat_touched {
-                            if let Some(cat) = categorize(&name, &self.cfg.categories) {
-                                let dir = self
-                                    .cfg
-                                    .categories
-                                    .iter()
-                                    .find(|c| c.name == cat)
-                                    .map(|c| c.dir.clone());
-                                self.file_info.category = cat.clone();
-                                if let (false, Some(dir)) =
-                                    (self.file_info.dir_touched, dir.clone())
-                                {
-                                    self.file_info.save_dir = dir;
-                                }
-                                let dir_untouched = !self.file_info.dir_touched;
-                                if let Some(d) = self.item_mut(id) {
-                                    d.category = Some(cat);
-                                    if let (Some(dir), true) = (dir, dir_untouched) {
-                                        d.save_dir = dir;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                self.save_state();
-                Task::none()
+                self.adopt_probed(id, file_name, size)
             }
             engine::Event::Status { id, line } => {
                 if let Some(d) = self.item_mut(id) {
@@ -2066,6 +2141,13 @@ impl App {
             Message::Noop => Task::none(),
             Message::WindowOpened(id) => {
                 #[cfg(target_os = "macos")]
+                let pin_surface = iced::window::run(id, |w| {
+                    crate::macos_surface::pin_color_space(w);
+                })
+                .discard();
+                #[cfg(not(target_os = "macos"))]
+                let pin_surface = Task::none();
+                #[cfg(target_os = "macos")]
                 {
                     // Back to Regular before installing the menu: with the
                     // Dock hidden the app sat in Accessory, which has no
@@ -2102,12 +2184,13 @@ impl App {
                 {
                     self.capture_raise = false;
                     return Task::batch([
+                        pin_surface,
                         skip_taskbar,
                         window::set_level(id, window::Level::AlwaysOnTop),
                         window::gain_focus(id),
                     ]);
                 }
-                Task::batch([skip_taskbar, window::gain_focus(id)])
+                Task::batch([pin_surface, skip_taskbar, window::gain_focus(id)])
             }
             Message::WindowClosed(id) => {
                 let kind = self.windows.remove(&id);
@@ -2290,6 +2373,13 @@ impl App {
                 self.open_submenu = None;
                 Task::none()
             }
+            Message::MenuHover(kind) => {
+                if self.open_menu != Some(kind) {
+                    self.open_menu = Some(kind);
+                    self.open_submenu = None;
+                }
+                Task::none()
+            }
             Message::MenuClose => {
                 self.open_menu = None;
                 self.open_submenu = None;
@@ -2319,7 +2409,9 @@ impl App {
                 Task::none()
             }
             Message::RowClick(id) => {
-                self.band = Some((self.cursor, self.cursor));
+                let at = self.cursor_now();
+                self.cursor = at;
+                self.band = Some((at, at));
                 if self.mods.command() || self.mods.control() {
                     // Toggle membership.
                     if self.selected.contains(&id) {
@@ -2334,7 +2426,7 @@ impl App {
                 if self.mods.shift() {
                     // Range from the anchor within the visible ordering.
                     let anchor = self.sel_anchor.unwrap_or(id);
-                    let order: Vec<DlId> = self.visible().iter().map(|d| d.id).collect();
+                    let order: Vec<DlId> = self.visible_ids();
                     let a = order.iter().position(|x| *x == anchor);
                     let b = order.iter().position(|x| *x == id);
                     if let (Some(a), Some(b)) = (a, b) {
@@ -2354,6 +2446,7 @@ impl App {
                 self.list_press = Some(id);
                 self.list_drag = true;
                 self.list_drag_from_empty = false;
+                self.drag_order = self.visible_ids();
                 if double {
                     let st = self.item(id).map(|d| d.state);
                     match st {
@@ -2374,10 +2467,16 @@ impl App {
                     self.selected = vec![id];
                     self.sel_anchor = Some(id);
                 }
-                self.ctx_at = Some(self.cursor);
+                self.ctx_at = Some(self.cursor_now());
                 Task::none()
             }
-            Message::CursorMoved(p) => {
+            Message::TableScrolled(offset, viewport_h) => {
+                self.table_scroll = offset;
+                self.table_vh = viewport_h;
+                Task::none()
+            }
+            Message::DragTick => {
+                let p = self.cursor_now();
                 self.cursor = p;
                 if self.list_drag {
                     if let Some(band) = self.band.as_mut() {
@@ -2465,7 +2564,7 @@ impl App {
                 }
             }
             Message::SelectAll => {
-                self.selected = self.visible().iter().map(|d| d.id).collect();
+                self.selected = self.visible_ids();
                 self.sel_anchor = self.selected.first().copied();
                 Task::none()
             }
@@ -2476,11 +2575,10 @@ impl App {
                 if !self.list_drag {
                     return Task::none();
                 }
-                let order: Vec<DlId> = self.visible().iter().map(|d| d.id).collect();
                 let anchor = if self.list_drag_from_empty {
                     // Band pinned to the end of the list: the press was below
                     // every row.
-                    match order.last() {
+                    match self.drag_order.last() {
                         Some(last) => *last,
                         None => return Task::none(),
                     }
@@ -2489,11 +2587,11 @@ impl App {
                     self.list_press = Some(a);
                     a
                 };
-                let a = order.iter().position(|x| *x == anchor);
-                let b = order.iter().position(|x| *x == id);
+                let a = self.drag_order.iter().position(|x| *x == anchor);
+                let b = self.drag_order.iter().position(|x| *x == id);
                 if let (Some(a), Some(b)) = (a, b) {
                     let (lo, hi) = (a.min(b), a.max(b));
-                    self.selected = order[lo..=hi].to_vec();
+                    self.selected = self.drag_order[lo..=hi].to_vec();
                     self.sel_anchor = Some(anchor);
                 }
                 Task::none()
@@ -2504,7 +2602,10 @@ impl App {
                 self.list_drag = true;
                 self.list_drag_from_empty = true;
                 self.list_press = None;
-                self.band = Some((self.cursor, self.cursor));
+                self.drag_order = self.visible_ids();
+                let at = self.cursor_now();
+                self.cursor = at;
+                self.band = Some((at, at));
                 self.selected.clear();
                 self.sel_anchor = None;
                 self.last_click = None;
@@ -2526,9 +2627,8 @@ impl App {
                 let Some(anchor) = self.list_press else {
                     return Task::none();
                 };
-                let order: Vec<DlId> = self.visible().iter().map(|d| d.id).collect();
-                if let Some(a) = order.iter().position(|x| *x == anchor) {
-                    self.selected = order[a..].to_vec();
+                if let Some(a) = self.drag_order.iter().position(|x| *x == anchor) {
+                    self.selected = self.drag_order[a..].to_vec();
                     self.sel_anchor = Some(anchor);
                 }
                 Task::none()
@@ -2551,7 +2651,7 @@ impl App {
             }
             Message::QueueMenuOpen(start) => {
                 self.queue_menu = Some(start);
-                self.ctx_at = Some(self.cursor);
+                self.ctx_at = Some(self.cursor_now());
                 Task::none()
             }
             Message::ClipboardAddStart(text) => {
@@ -2587,12 +2687,13 @@ impl App {
                 self.list_press = None;
                 self.list_drag = false;
                 self.list_drag_from_empty = false;
+                self.drag_order = Vec::new();
                 self.band = None;
                 Task::none()
             }
             Message::ColResizeStart(col) => {
                 if let Some(w) = self.col_widths.get(col) {
-                    self.resizing = Some((col, self.cursor.x, *w));
+                    self.resizing = Some((col, self.cursor_now().x, *w));
                 }
                 Task::none()
             }
@@ -2744,7 +2845,18 @@ impl App {
                     let bg = if self.cfg.settings.bg_download {
                         self.start_download(id, false)
                     } else {
-                        Task::none()
+                        // Nothing is fetching behind the dialog, so nothing
+                        // would answer what this file is called or how big it
+                        // is: the fields would keep whatever the URL implied
+                        // until the user pressed Start. That is wrong for any
+                        // link whose name is not in its own path — a redirector
+                        // (`href.li/?<url>`) reads as `index.html` — so ask the
+                        // network the question the transfer would have asked.
+                        let ua = self.cfg.settings.user_agent.clone();
+                        let url = self.item(id).map(|d| d.url.clone()).unwrap_or_default();
+                        Task::perform(engine::probe_link(url, ua), move |meta| {
+                            Message::InfoProbed(id, meta)
+                        })
                     };
                     Task::batch([close, self.open_window(WinKind::FileInfo(id)), bg])
                 } else {
@@ -3409,9 +3521,17 @@ impl App {
                 };
                 let moved = order.remove(from);
                 order.insert(to, moved);
-                for (i, id) in order.iter().enumerate() {
-                    if let Some(d) = self.item_mut(*id) {
-                        d.q_order = i as u32;
+                // One pass over the list, not `item_mut` per member: this runs
+                // for every row the drag crosses, and the linear lookup made
+                // reordering a long queue quadratic in the download count.
+                let rank: HashMap<DlId, u32> = order
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| (*id, i as u32))
+                    .collect();
+                for d in &mut self.state.downloads {
+                    if let Some(i) = rank.get(&d.id) {
+                        d.q_order = *i;
                     }
                 }
                 Task::none()
@@ -3485,21 +3605,30 @@ impl App {
                     .batch
                     .checks
                     .iter()
-                    .filter(|(u, _)| !self.batch.sizes.contains_key(u))
+                    .filter(|(u, _)| !self.batch.names.contains_key(u))
                     .map(|(u, _)| {
                         let url = u.clone();
                         let ua = ua.clone();
-                        Task::perform(engine::probe_size(url.clone(), ua), move |size| {
-                            Message::BatchProbed(url.clone(), size)
+                        Task::perform(engine::probe_link(url.clone(), ua), move |meta| {
+                            Message::BatchProbed(url.clone(), meta)
                         })
                     })
                     .collect();
                 Task::batch(probes)
             }
             Message::BatchLoaded(None) => Task::none(),
-            Message::BatchProbed(url, size) => {
-                if let Some(size) = size {
-                    self.batch.sizes.insert(url, size);
+            Message::InfoProbed(id, meta) => match meta {
+                Some(meta) => self.adopt_probed(id, Some(meta.file_name), meta.size),
+                None => Task::none(),
+            },
+            Message::BatchProbed(url, meta) => {
+                if let Some(meta) = meta {
+                    if let Some(size) = meta.size {
+                        self.batch.sizes.insert(url.clone(), size);
+                    }
+                    if !meta.file_name.is_empty() {
+                        self.batch.names.insert(url, meta.file_name);
+                    }
                 }
                 Task::none()
             }
@@ -3546,7 +3675,27 @@ impl App {
                 let dir_override = self.batch.to_dir.then(|| self.batch.dir.clone());
                 let queue = Some("Main download queue".to_string());
                 for url in checked {
+                    // A name the probe resolved (a redirector's real target, or
+                    // a `Content-Disposition`) beats the one the pasted URL
+                    // implies, and it decides the category with it.
+                    let probed = self.batch.names.get(&url).cloned();
                     let id = self.add_item(url, None, queue.clone());
+                    if let Some(name) = probed.filter(|n| !n.is_empty()) {
+                        let cat = categorize(&name, &self.cfg.categories);
+                        let dir = cat
+                            .as_deref()
+                            .and_then(|c| self.cfg.categories.iter().find(|k| k.name == c))
+                            .map(|k| k.dir.clone());
+                        if let Some(d) = self.item_mut(id) {
+                            d.file_name = name;
+                            if let Some(c) = cat {
+                                d.category = Some(c);
+                            }
+                            if let Some(dir) = dir {
+                                d.save_dir = dir;
+                            }
+                        }
+                    }
                     if let Some(c) = &cat_override {
                         let dir = self
                             .cfg
@@ -4257,6 +4406,19 @@ impl App {
 /// resolution at the reference ratio (1009x606 on a 1512x982 screen — i.e.
 /// two thirds of the width, ~62% of the height), clamped to the layout's
 /// 900x600 floor. Falls back to 1009x606 when the display cannot be queried.
+/// Stable sort on a precomputed key, applied in place.
+///
+/// The equivalent of `sort_by(|a, b| key(a).cmp(&key(b)))` with the key built
+/// once per item rather than once per comparison; ties keep their order in
+/// both directions, exactly as reversing the comparison would.
+fn sort_keyed<'a, K: Ord>(v: &mut [&'a DownloadItem], asc: bool, key: impl Fn(&DownloadItem) -> K) {
+    let mut keyed: Vec<(K, &'a DownloadItem)> = v.iter().map(|d| (key(d), *d)).collect();
+    keyed.sort_by(|a, b| if asc { a.0.cmp(&b.0) } else { b.0.cmp(&a.0) });
+    for (slot, (_, d)) in v.iter_mut().zip(keyed) {
+        *slot = d;
+    }
+}
+
 pub fn main_window_size() -> iced::Size {
     let fallback = iced::Size::new(1009.0, 606.0);
     let Ok(displays) = display_info::DisplayInfo::all() else {

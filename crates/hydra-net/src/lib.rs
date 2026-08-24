@@ -52,6 +52,7 @@ pub mod manifest;
 pub mod origin;
 pub mod parity;
 pub mod polite;
+pub mod redirect;
 pub mod scheme;
 pub mod socks;
 pub mod stream_digest;
@@ -325,9 +326,10 @@ pub mod sink;
 pub mod transfer;
 
 pub use http::{
-    fetch_range_retry, fetch_small, fetch_streaming, header_lookup, probe, probe_size_via_range,
-    probe_via_get, Probe,
+    fetch_range_retry, fetch_small, fetch_streaming, fetch_streaming_observed, header_lookup,
+    probe, probe_resilient, probe_size_via_range, probe_via_get, Probe,
 };
+pub use redirect::{html_redirect, html_redirect_target};
 pub use sink::SparseSink;
 pub use transfer::{
     run_transfer, run_transfer_cancellable, run_transfer_into, run_transfer_observed,

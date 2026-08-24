@@ -3,13 +3,36 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Hydra: fast, resilient, multi-source download manager</title>
-<meta name="description" content="Hydra is a high-performance download engine that splits every file across connections and mirrors. Ships as a wget/curl-compatible CLI, a terminal UI, and a desktop download manager for Windows (x64 & ARM64), macOS, and Linux.">
+<title>Hydra Download Manager (HDM) – Fast, Multi-Source Download Engine</title>
+<meta name="description" content="Hydra Download Manager (HDM) is an open-source, high-performance download manager for Windows, macOS, and Linux featuring multi-connection acceleration, browser integration, and CLI support.">
+<link rel="canonical" href="https://hydra.javad.dev/">
 <link rel="icon" type="image/png" href="logo.png">
-<meta property="og:title" content="Hydra Download Manager">
-<meta property="og:description" content="A fast, resilient, multi-source file retriever and download engine. CLI, TUI, and desktop app with browser integration.">
-<meta property="og:image" content="https://ja7ad.github.io/hydra/img/screenshot.png">
+<meta property="og:title" content="Hydra Download Manager (HDM) – Fast, Multi-Source Download Engine">
+<meta property="og:description" content="Hydra Download Manager (HDM) is an open-source, high-performance download manager for Windows, macOS, and Linux featuring multi-connection acceleration, browser integration, and CLI support.">
+<meta property="og:image" content="https://hydra.javad.dev/img/screenshot.jpg">
+<meta property="og:url" content="https://hydra.javad.dev/">
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="Hydra Download Manager">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Hydra Download Manager (HDM) – Fast, Multi-Source Download Engine">
+<meta name="twitter:description" content="Hydra Download Manager (HDM) is an open-source, high-performance download manager for Windows, macOS, and Linux featuring multi-connection acceleration, browser integration, and CLI support.">
+<meta name="twitter:image" content="https://hydra.javad.dev/img/screenshot.jpg">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Hydra Download Manager",
+  "alternateName": ["HDM", "Hydra"],
+  "operatingSystem": "Windows, macOS, Linux",
+  "applicationCategory": "UtilitiesApplication",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  },
+  "url": "https://hydra.javad.dev"
+}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -583,19 +606,19 @@
 <header class="hero">
   <div class="wrap hero-grid">
     <div class="hero-copy">
-      <h1>Every mirror. Every connection. <span class="grad">One download.</span></h1>
-      <p>Hydra splits each file across parallel connections and mirror sources, then rebalances work away from slow peers while the transfer runs. Built in Rust, for the terminal and the desktop.</p>
+      <h1>Hydra Download Manager <span class="grad">(HDM)</span></h1>
+      <p>An open-source, high-performance download manager and accelerator that splits every file across parallel connections and mirror sources. Featuring dynamic range stealing and real-time stall recovery for Windows, macOS, and Linux.</p>
       <div class="hero-ctas">
         <a class="btn btn-primary" href="#download">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
-          Download
+          Download HDM
         </a>
         <a class="btn btn-ghost" href="https://github.com/ja7ad/hydra">View on GitHub</a>
       </div>
     </div>
     <div class="shot">
       <div class="viz">
-        <canvas id="hero-canvas" role="img" aria-label="Animation of one download being fed by several mirror sources at once"></canvas>
+        <canvas id="hero-canvas" role="img" aria-label="Animation of Hydra Download Manager feeding one download from several mirror sources at once"></canvas>
       </div>
     </div>
   </div>
@@ -604,8 +627,8 @@
 <section id="engine">
   <div class="wrap">
     <div class="sec-head">
-      <h2>An engine built to saturate the link &amp; embed anywhere</h2>
-      <p>The core is a statistical scheduler for byte ranges, wrapped with a frozen C ABI (<code>libhydra</code>). Embed multi-source downloads, dynamic range stealing, and sub-timeout stall prediction into any app or platform.</p>
+      <h2>Multi-Source Acceleration &amp; Embedded Download Engine</h2>
+      <p>Hydra Download Manager core is a high-performance download accelerator and statistical scheduler for byte ranges, wrapped with a frozen C ABI (<code>libhydra</code>). Embed multi-source downloads, dynamic range stealing, and sub-timeout stall prediction into any application or platform.</p>
     </div>
 
     <div class="engine-showcase">
@@ -668,18 +691,18 @@
 <section class="gui" id="app">
   <div class="wrap">
     <div class="sec-head">
-      <h2>A full download manager on the desktop</h2>
-      <p>The Hydra app wraps the engine in a native, localized interface for Windows, macOS, and Linux, with the workflow you expect from a classic download manager.</p>
+      <h2>Open-Source Download Manager for Desktop (Windows, macOS, Linux)</h2>
+      <p>Hydra Download Manager (HDM) wraps the acceleration engine in a native, localized desktop interface for Windows, macOS, and Linux — an open-source alternative to classic download managers like IDM, FDM, and JDownloader.</p>
     </div>
     <div class="gui-screenshot-wrap">
-      <img src="img/screenshot.jpg" alt="Hydra Desktop Download Manager Screenshot" class="gui-screenshot" loading="lazy">
+      <img src="img/screenshot.jpg" alt="Hydra Download Manager (HDM) Desktop GUI on Windows, macOS, and Linux" class="gui-screenshot" loading="lazy">
     </div>
     <div class="gui-grid">
       <div class="gui-item">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v11H4zM2 19h20M9 8l3 3 3-3"/></svg></div>
         <div>
-          <h3>Browser capture</h3>
-          <p>Extensions for Chrome, Edge, Firefox, and Safari hand downloads to the app over a local WebSocket bridge, with a native-messaging fallback that can launch the app on demand.</p>
+          <h3>Browser Extension Integration</h3>
+          <p>Official browser integration for Chrome, Edge, Firefox, and Safari hands downloads to HDM over a local WebSocket bridge, with a native-messaging fallback that can launch the app on demand.</p>
         </div>
       </div>
       <div class="gui-item">
@@ -739,8 +762,8 @@
   <div class="wrap cli-grid">
     <div>
       <div class="sec-head" style="margin-bottom:0">
-        <h2>At home in the terminal</h2>
-        <p>The same engine drives a scriptable CLI and a full-screen queue manager, so servers and headless boxes get the multi-source treatment too.</p>
+        <h2>Open-Source Download Manager for Desktop &amp; Terminal (CLI &amp; TUI)</h2>
+        <p>The same high-performance download accelerator engine drives a scriptable CLI and a full-screen interactive queue manager, giving servers, containers, and terminal users multi-source download acceleration.</p>
       </div>
       <div class="cli-points">
         <div class="cli-point">
@@ -787,8 +810,8 @@
 <section id="download">
   <div class="wrap">
     <div class="dl-card">
-      <h2>Download Hydra</h2>
-      <p class="dl-subtitle">Free, open source, and high-performance. CLI, TUI, desktop app, and browser integration included.</p>
+      <h2>Download Hydra Download Manager (HDM)</h2>
+      <p class="dl-subtitle">Free, open-source download manager and accelerator for Windows, macOS, and Linux. Desktop GUI, CLI, TUI, and browser integration included.</p>
       <div class="version-tag-pill" id="latest-ver-badge">Latest release: <span id="ver-tag">v0.3.6</span></div>
 
       <div class="vscode-dl-grid">

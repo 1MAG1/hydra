@@ -19,9 +19,9 @@
 use crate::model::{ConnRow, DlId};
 use hya_core::{Capability, Scheduler, Source};
 use hya_net::polite::RateLimiter;
-use hya_net::{probe, Probe, SparseSink, Target, TlsCapableConnector};
+use hya_net::{probe_resilient, Probe, SparseSink, Target, TlsCapableConnector};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
@@ -255,12 +255,27 @@ fn shared_connector() -> Result<Arc<TlsCapableConnector>, String> {
         .clone()
 }
 
-/// Probe just the object size of a URL (for the batch dialog's Size column).
+/// What a link turns out to be, once its redirects have been resolved.
+#[derive(Clone, Debug)]
+pub struct LinkMeta {
+    /// `None` when the server would not state one.
+    pub size: Option<u64>,
+    /// The name the object should be saved under: `Content-Disposition` if the
+    /// server named one, else the last path segment of the FINAL URL.
+    pub file_name: String,
+}
+
+/// Probe a link for the batch dialog's File Name and Size columns.
+///
+/// Resolves redirects first, including the ones expressed in HTML (see
+/// [`hya_net::redirect`]): a referrer stripper such as `href.li/?<url>` has no
+/// filename in its own path, and reading the column off the pasted URL listed
+/// every such link as `index.html` with no size.
 ///
 /// Bounded: a pasted 500-link batch must not open 500 concurrent
 /// handshakes (fd limits, origin rate limiting). A small global gate keeps
 /// the fan-out polite; the shared connector reuses connections per host.
-pub async fn probe_size(url: String, user_agent: String) -> Option<u64> {
+pub async fn probe_link(url: String, user_agent: String) -> Option<LinkMeta> {
     static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
     let gate = GATE
         .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(6)))
@@ -276,26 +291,29 @@ pub async fn probe_size(url: String, user_agent: String) -> Option<u64> {
             Target::direct(&u.host, u.port, &u.path)
         };
         let t = base.with_headers(vec![], Some(user_agent.clone()));
-        match probe(connector.as_ref(), &t).await {
-            Ok(p) if p.is_redirect() => {
-                let loc = p.location.clone()?;
-                url = if loc.starts_with("http://") || loc.starts_with("https://") {
-                    loc
-                } else if loc.starts_with('/') {
-                    format!(
-                        "{}://{}:{}{}",
-                        if u.tls { "https" } else { "http" },
-                        u.host,
-                        u.port,
-                        loc
-                    )
-                } else {
-                    return None;
-                };
-            }
-            Ok(p) if p.status < 300 && p.size > 0 => return Some(p.size),
-            _ => return None,
+        let p = probe_resilient(connector.as_ref(), &t).await.ok()?;
+        if p.is_redirect() {
+            url = join_url(&u, p.location.as_deref().unwrap_or(""))?;
+            continue;
         }
+        if p.maybe_redirector() {
+            if let Some(next) = hya_net::html_redirect(connector.as_ref(), &t)
+                .await
+                .and_then(|loc| join_url(&u, &loc))
+            {
+                url = next;
+                continue;
+            }
+        }
+        if p.status >= 300 {
+            return None;
+        }
+        return Some(LinkMeta {
+            size: (p.size > 0).then_some(p.size),
+            file_name: p
+                .suggested_filename()
+                .unwrap_or_else(|| file_name_from_url(&url)),
+        });
     }
     None
 }
@@ -400,6 +418,53 @@ pub fn parse_url(url: &str) -> Result<ParsedUrl, String> {
 }
 
 /// Best-effort display file name for a URL (last path segment, %-decoded).
+/// Resolve a redirect target against the URL that served it.
+///
+/// One implementation for both redirect kinds and both probe paths: a
+/// `Location` header and an HTML redirector's target are the same sort of
+/// reference and are allowed the same spellings — absolute, protocol-relative
+/// (`//host/path`), root-relative, or relative to the current directory.
+///
+/// `None` for anything this client cannot fetch, which includes the
+/// `javascript:`/`data:` targets that appear in redirector markup: refusing is
+/// how a caller learns the chain ends here rather than silently fetching the
+/// wrong thing.
+pub fn join_url(base: &ParsedUrl, loc: &str) -> Option<String> {
+    let loc = loc.trim();
+    if loc.is_empty() {
+        return None;
+    }
+    let scheme = if base.tls { "https" } else { "http" };
+    let lower = loc.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return Some(loc.to_string());
+    }
+    if let Some(rest) = loc.strip_prefix("//") {
+        return Some(format!("{scheme}://{rest}"));
+    }
+    if loc.starts_with('/') {
+        return Some(format!("{scheme}://{}:{}{}", base.host, base.port, loc));
+    }
+    // A scheme this client has no transport for. Not an address to chase.
+    if lower
+        .split('/')
+        .next()
+        .map(|h| h.contains(':'))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let dir = base
+        .path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit_once('/')
+        .map(|(d, _)| d)
+        .unwrap_or("");
+    Some(format!("{scheme}://{}:{}{dir}/{loc}", base.host, base.port))
+}
+
 pub fn file_name_from_url(url: &str) -> String {
     let path = parse_url(url).map(|p| p.path).unwrap_or_default();
     let seg = path
@@ -568,40 +633,51 @@ async fn run_download(
         };
         let t = target_for(&u, &spec);
         let t_hop = std::time::Instant::now();
-        match probe(connector.as_ref(), &t).await {
+        match probe_resilient(connector.as_ref(), &t).await {
             Ok(p) if p.is_redirect() => {
                 let loc = p.location.clone().unwrap_or_default();
                 crate::log::debug(&format!("#{id} redirect {} -> {loc}", p.status));
-                url = if loc.starts_with("http://") || loc.starts_with("https://") {
-                    loc
-                } else if loc.starts_with('/') {
-                    format!(
-                        "{}://{}:{}{}",
-                        if u.tls { "https" } else { "http" },
-                        u.host,
-                        u.port,
-                        loc
-                    )
-                } else {
-                    let dir = u.path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-                    format!(
-                        "{}://{}:{}{}/{}",
-                        if u.tls { "https" } else { "http" },
-                        u.host,
-                        u.port,
-                        dir,
-                        loc
-                    )
-                };
+                match join_url(&u, &loc) {
+                    Some(next) => url = next,
+                    None => {
+                        ev(Event::Failed {
+                            id,
+                            error: format!("{}: {loc}", crate::i18n::tr("Unusable redirect")),
+                            done: 0,
+                            held: spec.held.clone(),
+                            permission_denied: false,
+                        });
+                        return;
+                    }
+                }
             }
             Ok(p) => {
-                crate::log::debug(&format!(
-                    "#{id} probe: status={} size={} ranges={} type={:?}",
-                    p.status, p.size, p.ranges, p.content_type
-                ));
-                delta = t_hop.elapsed().as_secs_f64().clamp(0.05, 45.0);
-                probed = Some((u, p));
-                break;
+                // A redirect the server expressed in HTML rather than in a
+                // header: a referrer stripper or link filter answering `200`
+                // with a page whose whole content is "go here instead".
+                // Without this hop the saved file IS that page — the
+                // one-kilobyte `index.html` this resolves. Charged to the same
+                // hop budget as a `3xx`, since a pair of such pages pointing at
+                // each other is a loop like any other.
+                let hop_to = if p.maybe_redirector() {
+                    hya_net::html_redirect(connector.as_ref(), &t)
+                        .await
+                        .and_then(|loc| join_url(&u, &loc))
+                } else {
+                    None
+                };
+                if let Some(next) = hop_to {
+                    crate::log::debug(&format!("#{id} html redirect -> {next}"));
+                    url = next;
+                } else {
+                    crate::log::debug(&format!(
+                        "#{id} probe: status={} size={} ranges={} type={:?}",
+                        p.status, p.size, p.ranges, p.content_type
+                    ));
+                    delta = t_hop.elapsed().as_secs_f64().clamp(0.05, 45.0);
+                    probed = Some((u, p));
+                    break;
+                }
             }
             Err(e) => {
                 crate::log::error(&format!("#{id} probe failed: {e}"));
@@ -664,22 +740,90 @@ async fn run_download(
             line: crate::i18n::tr("Receiving data..."),
         });
         let t0 = std::time::Instant::now();
-        match hya_net::fetch_streaming(connector.as_ref(), &target, &temp).await {
-            Ok(n) => {
-                finish_file(&spec, &final_path, &tx, n, t0.elapsed().as_secs_f64());
-            }
-            Err(e) => {
-                let denied = e.kind() == std::io::ErrorKind::PermissionDenied;
-                ev(Event::Failed {
-                    id,
-                    error: friendly_io(&e, &temp),
-                    done: 0,
-                    held: vec![],
-                    permission_denied: denied,
-                });
+        // Driven through a poll loop rather than a bare await. This path has no
+        // scheduler to observe, so a plain await reported nothing until the last
+        // byte and read the stop flag never: on a large object that is an hour of
+        // "Receiving data..." at 0 B with Pause and Stop doing nothing at all.
+        // The byte counter and the cancel flag are what the loop is for.
+        let written = Arc::new(AtomicU64::new(0));
+        let pace = hya_net::polite::Pace::shared(limiter);
+        let fut = hya_net::fetch_streaming_observed(
+            connector.as_ref(),
+            &target,
+            &temp,
+            &written,
+            Some(cancel.as_ref()),
+            &pace,
+        );
+        tokio::pin!(fut);
+        let mut sm_rate = 0.0f64;
+        let mut rate_mark: Option<(u64, std::time::Instant)> = None;
+        loop {
+            tokio::select! {
+                r = &mut fut => {
+                    match r {
+                        Ok(n) => {
+                            finish_file(&spec, &final_path, &tx, n, t0.elapsed().as_secs_f64());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                            ev(Event::Stopped {
+                                id,
+                                done: written.load(Ordering::Relaxed),
+                                held: vec![],
+                            });
+                        }
+                        Err(e) => {
+                            let denied = e.kind() == std::io::ErrorKind::PermissionDenied;
+                            ev(Event::Failed {
+                                id,
+                                error: friendly_io(&e, &temp),
+                                done: written.load(Ordering::Relaxed),
+                                held: vec![],
+                                permission_denied: denied,
+                            });
+                        }
+                    }
+                    return;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(emit_interval_ms() as u64)) => {
+                    // Dropping the future closes the socket. A stalled read is
+                    // exactly when the user reaches for Stop, so the flag is
+                    // acted on here too and not only between reads.
+                    if cancel.load(Ordering::Relaxed) {
+                        ev(Event::Stopped {
+                            id,
+                            done: written.load(Ordering::Relaxed),
+                            held: vec![],
+                        });
+                        return;
+                    }
+                    let done = written.load(Ordering::Relaxed);
+                    let now = std::time::Instant::now();
+                    if let Some((prev_done, prev_t)) = rate_mark {
+                        let dt = now.duration_since(prev_t).as_secs_f64();
+                        if dt > 0.0 {
+                            let inst = done.saturating_sub(prev_done) as f64 / dt;
+                            let alpha = (-dt / 1.5f64).exp();
+                            sm_rate = sm_rate * alpha + inst * (1.0 - alpha);
+                        }
+                    }
+                    rate_mark = Some((done, now));
+                    ev(Event::Progress {
+                        id,
+                        done,
+                        rate: sm_rate,
+                        // No size to subtract from: this path exists because the
+                        // server would not state one, so any ETA would be invented.
+                        eta: None,
+                        conns: vec![ConnRow {
+                            downloaded: done,
+                            info: crate::i18n::tr("Receiving data..."),
+                        }],
+                        held: vec![],
+                    });
+                }
             }
         }
-        return;
     };
 
     // ---- scheduler path ---------------------------------------------------
@@ -801,8 +945,19 @@ async fn run_download(
                     let r = s.conn_rate(j);
                     ConnRow {
                         downloaded: per_conn.get(&j).map(|e| e.2).unwrap_or(0),
+                        // An idle connection under a concurrency cap is not a
+                        // broken one: the origin refused the extra requests (a
+                        // 429 — `ash-speed.hetzner.com` serves exactly two per
+                        // address), or the adaptive ramp has not admitted this
+                        // slot yet. Labelling that "Disconnect." reads as a
+                        // failure and invites the fix that makes it worse:
+                        // raising the connection count.
                         info: if s.conn_range(j).is_none() {
-                            crate::i18n::tr("Disconnect.")
+                            if s.active_limit() < s.n_conns() {
+                                crate::i18n::tr("Waiting (connection limit)...")
+                            } else {
+                                crate::i18n::tr("Disconnect.")
+                            }
                         } else if r > 1.0 {
                             crate::i18n::tr("Receiving data...")
                         } else {
@@ -1118,6 +1273,28 @@ mod tests {
         assert_eq!(f.port, 21);
         assert!(parse_url("sftp://x/y").is_err());
         assert_eq!(file_name_from_url("https://h/a/b%20c.bin"), "b c.bin");
+    }
+
+    /// Every spelling a `Location` header or a redirector page may use.
+    #[test]
+    fn redirect_targets_resolve_against_the_page_that_served_them() {
+        let base = parse_url("https://h.org/a/b/page?q=1").unwrap();
+        let j = |loc: &str| join_url(&base, loc);
+        assert_eq!(
+            j("https://x.org/f.zip").as_deref(),
+            Some("https://x.org/f.zip")
+        );
+        assert_eq!(j("//x.org/f.zip").as_deref(), Some("https://x.org/f.zip"));
+        assert_eq!(
+            j("/dl/f.zip").as_deref(),
+            Some("https://h.org:443/dl/f.zip")
+        );
+        // Relative to the current DIRECTORY, with the query dropped: joining
+        // against `b?q=1` would have produced `/a/b?q=1/f.zip`.
+        assert_eq!(j("f.zip").as_deref(), Some("https://h.org:443/a/b/f.zip"));
+        // Nothing fetchable, so the chain ends rather than guessing.
+        assert_eq!(j("javascript:void(0)"), None);
+        assert_eq!(j("  "), None);
     }
 
     #[test]

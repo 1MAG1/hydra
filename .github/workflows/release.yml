@@ -574,6 +574,15 @@ jobs:
           sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="${GITHUB_REF_NAME}" --jq .body > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
       # A pre-release tag (v0.3.0-rc) is published as a GitHub pre-release and
       # is never marked latest, so `releases/latest` — what the in-app updater
       # polls — keeps pointing at the last stable release. A plain tag
@@ -583,7 +592,7 @@ jobs:
         with:
           name: hydra ${{ needs.verify-version.outputs.tag_version }}
           files: dist/*
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           prerelease: ${{ needs.verify-version.outputs.prerelease == 'true' }}
           make_latest: ${{ needs.verify-version.outputs.prerelease != 'true' }}
 
@@ -690,16 +699,63 @@ jobs:
             # Copy Debian packaging files to debian/ directory
             cp -r packaging/debian debian
 
-            # Update changelog and build source packages for each distribution
-            for DISTRO in noble jammy; do
-              printf "hydra (%s-1ppa1~%s1) %s; urgency=medium\n\n  * Automated Launchpad PPA release for %s.\n\n -- %s  %s\n" \
-                "$VERSION" "$DISTRO" "$DISTRO" "$DISTRO" "$GPG_USER" "$(date -R)" > debian/changelog
+            # Update changelog and build source packages for each distribution.
+            # The version deliberately carries no hyphen: this is a 3.0 (native)
+            # package, for which a Debian revision is invalid ("native package
+            # version may not have a revision"), so the series suffix goes into the
+            # upstream version instead.
+            for entry in "noble:24.04" "jammy:22.04"; do
+              DISTRO="${entry%%:*}"; SERIES="${entry##*:}"
+              DEB_VERSION="${VERSION}ppa1~ubuntu${SERIES}.1"
 
-              debuild --no-lintian -S -sa -d -k"$GPG_KEY_ID"
-              dput -u "$LAUNCHPAD_PPA" "../hydra_${VERSION}-1ppa1~${DISTRO}1_source.changes"
+              printf "hydra (%s) %s; urgency=medium\n\n  * Automated Launchpad PPA release for %s.\n\n -- %s  %s\n" \
+                "$DEB_VERSION" "$DISTRO" "$DISTRO" "$GPG_USER" "$(date -R -u)" > debian/changelog
+
+              debuild --no-lintian -S -d -k"$GPG_KEY_ID"
+
+              CHANGES="../hydra_${DEB_VERSION}_source.changes"
+              [ -f "$CHANGES" ] || { echo "::error::$CHANGES not produced"; ls -1 ../*.changes >&2 || true; exit 1; }
+
+              # Launchpad's FTP endpoint intermittently answers
+              #   550 Requested action not taken: internal server error
+              # and drops the passive data channel (Launchpad bug #2043679); it has
+              # consistently hit the second upload of a run. Retry with backoff;
+              # -f makes dput ignore its own .upload log on retries, and timeout
+              # stops a hung FTP session from stalling the job.
+              for attempt in 1 2 3 4 5; do
+                if timeout 600 dput -u -f "$LAUNCHPAD_PPA" "$CHANGES"; then
+                  echo "queued $DISTRO on attempt $attempt (acceptance is reported by Launchpad via email)"
+                  break
+                fi
+                [ "$attempt" -lt 5 ] || { echo "::error::dput failed 5 times for $DISTRO"; exit 1; }
+                echo "dput failed for $DISTRO (attempt $attempt); retrying in $((attempt * 30))s"
+                sleep $((attempt * 30))
+              done
+              [ "$DISTRO" = jammy ] || sleep 30
             done
             echo "Uploaded PPA packages to $LAUNCHPAD_PPA"
           else
             echo "note: LAUNCHPAD_GPG_KEY or LAUNCHPAD_PPA not set; skipping Launchpad release"
           fi
+
+      - name: Publish to AUR
+        if: needs.verify-version.outputs.prerelease == 'false'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${AUR_SSH_PRIVATE_KEY:-}" ]; then
+            mkdir -p ~/.ssh
+            echo "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur_ed25519
+            chmod 600 ~/.ssh/aur_ed25519
+            ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+
+            export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_ed25519 -o StrictHostKeyChecking=accept-new"
+            scripts/update-aur.sh "$VERSION"
+          else
+            echo "note: AUR_SSH_PRIVATE_KEY not set; skipping automated AUR publish"
+          fi
+
+
 
