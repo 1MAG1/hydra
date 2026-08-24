@@ -5,6 +5,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [0.3.12] - 2026-08-24
+
+### Added
+
+- **HTML Redirect & Meta Refresh Resolution (`hya-net`, `hydra-cli`, `hydra-gui`, `hydra-ffi`)**: Added automated HTML redirector page and `<meta http-equiv="refresh">` / JavaScript redirection detection (`hya_net::redirect`, `Probe::maybe_redirector`). CLI automatically follows redirectors to adopt target destination file names unless overridden by `-O`/`--output-dir`. GUI integrates asynchronous redirect probing in the File Info dialog and Batch download window to show resolved file names, and FFI drivers resolve HTML redirects within hop limits.
+- **Resilient Probe Fallback & Observable Single-Stream Fetching (`hya-net`, `hydra-cli`, `hydra-gui`, `hydra-ffi`)**: Added `probe_resilient` to seamlessly fallback to a 1-byte ranged GET (`Range: bytes=0-0`) when origins refuse HTTP HEAD requests or drop connections without `Content-Length`. Added `fetch_streaming_observed` for single-stream fallback downloads supporting atomic write progress tracking, real-time download rate calculations, rate limiter pacing (`Pace`), and responsive cancellation/pause handling.
+- **Adaptive Concurrency Throttling on 429/503 Limits (`hya-net`)**: Implemented dynamic concurrency backoff upon encountering HTTP 429 (Too Many Requests) or 503 (Service Unavailable) status codes. Retains active streaming connections while lowering concurrency ceilings down to the streaming floor during refusal bursts, periodically probing upward after sustained progress to safely restore concurrency.
+- **Official Arch Linux AUR Packaging (`packaging/aur`, `packaging/aur-bin`, CI)**: Added official Arch Linux User Repository (AUR) package specifications for both source (`hydra-download-manager`) and pre-built binary (`hydra-download-manager-bin`) distributions, complete with automated `.SRCINFO` generation, release publishing workflows, and documentation.
+- **German Localization (`hydra-gui`)**: Added full German (`de`) language translation catalog across all GUI menus, settings tabs, dialogs, and notifications.
+- **Connection Limit Status Indicator (`hydra-gui`)**: Added dedicated "Waiting (connection limit)..." connection state status when connections are throttled or held back by concurrency limits or server rate limiting.
+
+### Fixed
+
+- **GUI Rendering & Resource Usage Optimization (`hydra-gui`)**: Virtualized the download table viewport to render only visible rows plus overscan, drastically reducing memory usage and CPU rendering time on large queues. Replaced per-row linear searches with `HashSet<DlId>` lookups for selection styling.
+- **Mouse Movement Overhead & Selection Scroll Stability (`hydra-gui`)**: Replaced high-frequency mouse motion event redraws with zero-sized cursor probing and cadence-sampled drag ticks (`Message::DragTick`). Stabilized the root widget tree with an unconditional overlay stack to prevent scroll position resets when clicking or dragging rows.
+- **macOS Window Color Space Pinning (`hydra-gui`)**: Pinned AppKit window color space to the softbuffer drawing surface on macOS (`macos_surface`), eliminating full-window ColorSync conversions on Retina/P3 displays and cutting main-thread redraw CPU usage by ~35%.
+- **GUI Menu Bar Hover Tracking (`hydra-gui`)**: Fixed menu bar behavior on Windows and Linux so hovering across menu headers (`File`, `Edit`, `View`, etc.) automatically switches the active dropdown menu once a menu is open.
+- **Empty File Downloads with `Content-Length: 0` (`hya-net`, `hydra-cli`)**: Fixed zero-byte download handling by accurately distinguishing explicit `Content-Length: 0` headers from missing length metadata.
+- **Launchpad PPA Upload & Release Automation (`.github/workflows/release.yml`)**: Fixed PPA upload loop indentation, repaired FTP upload errors, and removed duplicate workflow steps.
+- **Release Notes Deduplication (`.github/workflows/release.yml`, `.github/release.yml`)**: Integrated GitHub API release notes generation into release workflows to prevent duplicate release note bodies.
+
+### Changed & Refactored
+
+- **Korean & Multi-Language Localization**: Updated Korean (`ko`) translation strings and added new status strings across all 11 supported locales (`ar`, `de`, `en`, `es`, `fa`, `fr`, `ja`, `ko`, `nl`, `ru`, `zh`).
+- **CI Security & Documentation Assets**: Added explicit top-level workflow permissions in CI workflows, optimized documentation and extension images via lossless compression, and updated web documentation SEO and sitemap metadata.
+
+---
+
 ## [0.3.11] - 2026-08-23
 
 ### Added
