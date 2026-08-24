@@ -22,11 +22,22 @@ pub fn view(app: &App) -> El<'_> {
         .height(180.0);
 
     // Link table: File Name | Size | Download from | Save to.
+    //
+    // The name is the probe's answer where there is one: a redirector link
+    // (`href.li/?<url>`) has no filename of its own and would otherwise list —
+    // and save — as `index.html`. Until the probe answers, the URL's own last
+    // segment stands in.
+    let name_for = |url: &str| -> String {
+        st.names
+            .get(url)
+            .cloned()
+            .unwrap_or_else(|| crate::engine::file_name_from_url(url))
+    };
     let save_to_for = |url: &str| -> String {
         if st.to_dir {
             st.dir.clone()
         } else {
-            let name = crate::engine::file_name_from_url(url);
+            let name = name_for(url);
             let cat = if st.to_category {
                 Some(st.category.clone())
             } else {
@@ -59,7 +70,7 @@ pub fn view(app: &App) -> El<'_> {
                         .style(theme::check)
                 )
                 .width(28.0),
-                container(text(crate::engine::file_name_from_url(url)).size(theme::FONT_SIZE))
+                container(text(name_for(url)).size(theme::FONT_SIZE))
                     .width(220.0)
                     .clip(true),
                 container(

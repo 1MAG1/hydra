@@ -52,6 +52,16 @@ pub struct OriginControl {
     pub lie_length: Arc<AtomicBool>,
     /// Reply 301 to this path instead of serving (0 = disabled).
     pub redirect_to: Arc<Mutex<Option<String>>>,
+    /// Answer `200 OK` with a redirector PAGE pointing at this location — a
+    /// forward expressed in HTML rather than in a header (see
+    /// [`crate::redirect`]).
+    ///
+    /// Distinct from `redirect_to` because the two fail differently: a client
+    /// that ignores a `301` gets nothing, while a client that ignores this one
+    /// SUCCEEDS — it saves the forwarding page under the object's name and
+    /// reports a completed download. Only an origin that serves the page can
+    /// show the difference.
+    pub html_redirect_to: Arc<Mutex<Option<String>>>,
     /// Frame the body as `Transfer-Encoding: chunked` in pieces of this many
     /// bytes (0 = disabled, send a plain body).
     ///
@@ -141,6 +151,7 @@ impl OriginControl {
             ranges: Arc::new(AtomicBool::new(true)),
             lie_length: Arc::new(AtomicBool::new(false)),
             redirect_to: Arc::new(Mutex::new(None)),
+            html_redirect_to: Arc::new(Mutex::new(None)),
             chunked: Arc::new(AtomicU64::new(0)),
             keep_alive: Arc::new(AtomicBool::new(false)),
             close_after_requests: Arc::new(AtomicU64::new(0)),
@@ -203,6 +214,14 @@ impl OriginSet {
     pub fn spawn_redirecting(&self, size: u64, rate: u64, loc: &str) -> (u16, OriginControl) {
         let (port, ctl) = self.spawn(size, rate);
         *ctl.redirect_to.lock().unwrap() = Some(loc.to_string());
+        (port, ctl)
+    }
+
+    /// An origin that answers every request with an HTML redirector page
+    /// pointing at `loc` — `200 OK`, `text/html`, meta refresh and script.
+    pub fn spawn_html_redirecting(&self, size: u64, rate: u64, loc: &str) -> (u16, OriginControl) {
+        let (port, ctl) = self.spawn(size, rate);
+        *ctl.html_redirect_to.lock().unwrap() = Some(loc.to_string());
         (port, ctl)
     }
 
@@ -349,6 +368,26 @@ where
             "HTTP/1.1 301 Moved Permanently\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
         sock.write_all(resp.as_bytes()).await?;
+        return Ok(false);
+    }
+    // Same reason as above: clone out of the lock before the await.
+    let html = ctl.html_redirect_to.lock().unwrap().clone();
+    if let Some(loc) = html {
+        let body = format!(
+            "<!DOCTYPE html>\n<html><head><title>redirecting</title>\n\
+             <meta http-equiv=\"refresh\" content=\"0; url={loc}\" />\n\
+             <script>window.location.replace( \"{loc}\" + window.location.hash );</script>\n\
+             </head><body><p>Redirecting..</p></body></html>\n"
+        );
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        sock.write_all(resp.as_bytes()).await?;
+        if !is_head {
+            sock.write_all(body.as_bytes()).await?;
+        }
         return Ok(false);
     }
     if ctl.overloaded.load(Ordering::Relaxed) {

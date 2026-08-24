@@ -382,6 +382,21 @@ async fn resolve_one(
             })?;
             continue;
         }
+        // A forward expressed in HTML rather than in a header: a referrer
+        // stripper or link filter answering `200` with a page whose whole
+        // content is "go here instead". Following it costs one small GET on a
+        // response that was already going to be downloaded, and not following
+        // it means saving the forwarding page under the object's name — a
+        // failure that reports success. Charged to the same hop budget.
+        if p.maybe_redirector() {
+            if let Some(next) = hya_net::html_redirect(conn.as_ref(), &t)
+                .await
+                .and_then(|loc| u.join(&loc).ok())
+            {
+                u = next;
+                continue;
+            }
+        }
         if p.status >= 400 {
             return Err(Detail {
                 code: E::HYDRA_ERR_NETWORK as u32,

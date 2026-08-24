@@ -430,6 +430,12 @@ pub struct BatchState {
     pub checks: Vec<(String, bool)>,
     /// Probed sizes for the Size column (absent = probe still running).
     pub sizes: std::collections::HashMap<String, u64>,
+    /// Resolved names for the File Name column, by URL.
+    ///
+    /// Kept separately from the URL-implied name because they disagree exactly
+    /// where it matters: a redirector link (`href.li/?<url>`) implies
+    /// `index.html`, and only the probe knows it forwards to `setup.exe`.
+    pub names: std::collections::HashMap<String, String>,
     pub parsed: bool,
     pub to_category: bool,
     pub category: String,
@@ -586,7 +592,10 @@ pub enum Message {
     // batch
     BatchEdit(iced::widget::text_editor::Action),
     BatchLoaded(Option<String>),
-    BatchProbed(String, Option<u64>),
+    BatchProbed(String, Option<engine::LinkMeta>),
+    /// A File Info dialog's own probe answered: the real name and size of a
+    /// link that is not being downloaded yet.
+    InfoProbed(DlId, Option<engine::LinkMeta>),
     BatchCheck(usize, bool),
     BatchCheckAll(bool),
     BatchSaveMode(u8),
@@ -1767,6 +1776,74 @@ impl App {
 
     // -------------------------------------------------------------- engine
 
+    /// Adopt what a probe learned about `id`: its size, and the name the
+    /// object actually landed under — a `Content-Disposition`, or the last
+    /// segment of a URL the engine had to resolve redirects to reach.
+    ///
+    /// Shared by the two places a probe can answer, because both must produce
+    /// the same result: the running transfer's `Probed` event, and the
+    /// speculative probe fired for the File Info dialog when no background
+    /// download is running behind it.
+    fn adopt_probed(&mut self, id: DlId, name: Option<String>, size: Option<u64>) -> Task<Message> {
+        let mut adopted = false;
+        if let Some(d) = self.item_mut(id) {
+            if d.size.is_none() {
+                d.size = size;
+            }
+            // Only adopt a server name if the user hasn't renamed.
+            if let Some(name) = name.filter(|n| !n.is_empty()) {
+                if d.downloaded == 0 && d.held.is_empty() {
+                    adopted = d.file_name != name;
+                    d.file_name = name;
+                }
+            }
+        }
+        // The File Info dialog fills itself as the probe answers: real name
+        // from Content-Disposition, category by extension, size via the item
+        // it displays.
+        if self.file_info.dl == id && self.win_of(WinKind::FileInfo(id)).is_some() {
+            let probed_name = self.item(id).map(|d| d.file_name.clone());
+            if let Some(name) = probed_name {
+                if !self.file_info.name_touched {
+                    self.file_info.file_name = name.clone();
+                }
+                if !self.file_info.cat_touched {
+                    if let Some(cat) = categorize(&name, &self.cfg.categories) {
+                        let dir = self
+                            .cfg
+                            .categories
+                            .iter()
+                            .find(|c| c.name == cat)
+                            .map(|c| c.dir.clone());
+                        self.file_info.category = cat.clone();
+                        if let (false, Some(dir)) = (self.file_info.dir_touched, dir.clone()) {
+                            self.file_info.save_dir = dir;
+                        }
+                        let dir_untouched = !self.file_info.dir_touched;
+                        if let Some(d) = self.item_mut(id) {
+                            d.category = Some(cat);
+                            if let (Some(dir), true) = (dir, dir_untouched) {
+                                d.save_dir = dir;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // A transfer already under way was started under the name the URL
+        // implied, and the probe has just found the real one. The engine
+        // renames the `.part` into its final path when the transfer ends, so
+        // that path has to be corrected too; without this the list showed
+        // `setup.exe` while the disk still got `index.html`.
+        if adopted {
+            if let Some(path) = self.item(id).map(|d| d.full_path()) {
+                engine::send(Cmd::SetFinalPath(id, path.to_string_lossy().into_owned()));
+            }
+        }
+        self.save_state();
+        Task::none()
+    }
+
     fn on_engine(&mut self, ev: engine::Event) -> Task<Message> {
         match ev {
             engine::Event::Probed {
@@ -1776,57 +1853,13 @@ impl App {
                 file_name,
             } => {
                 if let Some(d) = self.item_mut(id) {
-                    if d.size.is_none() {
-                        d.size = size;
-                    }
                     d.resume = Some(ranges);
-                    // Only adopt a server name if the user hasn't renamed.
-                    if let Some(name) = file_name {
-                        if d.downloaded == 0 && d.held.is_empty() && !name.is_empty() {
-                            d.file_name = name;
-                        }
-                    }
                     // The state stays Connecting: the probe answered, but no
                     // byte has arrived — the first Progress event promotes to
                     // Receiving. (Jumping early made the Status column show
                     // "0.00%" while the dialog still said Connecting.)
                 }
-                // The File Info dialog fills itself as the probe answers:
-                // real name from Content-Disposition, category by
-                // extension, size via the item it displays.
-                if self.file_info.dl == id && self.win_of(WinKind::FileInfo(id)).is_some() {
-                    let probed_name = self.item(id).map(|d| d.file_name.clone());
-                    if let Some(name) = probed_name {
-                        if !self.file_info.name_touched {
-                            self.file_info.file_name = name.clone();
-                        }
-                        if !self.file_info.cat_touched {
-                            if let Some(cat) = categorize(&name, &self.cfg.categories) {
-                                let dir = self
-                                    .cfg
-                                    .categories
-                                    .iter()
-                                    .find(|c| c.name == cat)
-                                    .map(|c| c.dir.clone());
-                                self.file_info.category = cat.clone();
-                                if let (false, Some(dir)) =
-                                    (self.file_info.dir_touched, dir.clone())
-                                {
-                                    self.file_info.save_dir = dir;
-                                }
-                                let dir_untouched = !self.file_info.dir_touched;
-                                if let Some(d) = self.item_mut(id) {
-                                    d.category = Some(cat);
-                                    if let (Some(dir), true) = (dir, dir_untouched) {
-                                        d.save_dir = dir;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                self.save_state();
-                Task::none()
+                self.adopt_probed(id, file_name, size)
             }
             engine::Event::Status { id, line } => {
                 if let Some(d) = self.item_mut(id) {
@@ -2744,7 +2777,18 @@ impl App {
                     let bg = if self.cfg.settings.bg_download {
                         self.start_download(id, false)
                     } else {
-                        Task::none()
+                        // Nothing is fetching behind the dialog, so nothing
+                        // would answer what this file is called or how big it
+                        // is: the fields would keep whatever the URL implied
+                        // until the user pressed Start. That is wrong for any
+                        // link whose name is not in its own path — a redirector
+                        // (`href.li/?<url>`) reads as `index.html` — so ask the
+                        // network the question the transfer would have asked.
+                        let ua = self.cfg.settings.user_agent.clone();
+                        let url = self.item(id).map(|d| d.url.clone()).unwrap_or_default();
+                        Task::perform(engine::probe_link(url, ua), move |meta| {
+                            Message::InfoProbed(id, meta)
+                        })
                     };
                     Task::batch([close, self.open_window(WinKind::FileInfo(id)), bg])
                 } else {
@@ -3485,21 +3529,30 @@ impl App {
                     .batch
                     .checks
                     .iter()
-                    .filter(|(u, _)| !self.batch.sizes.contains_key(u))
+                    .filter(|(u, _)| !self.batch.names.contains_key(u))
                     .map(|(u, _)| {
                         let url = u.clone();
                         let ua = ua.clone();
-                        Task::perform(engine::probe_size(url.clone(), ua), move |size| {
-                            Message::BatchProbed(url.clone(), size)
+                        Task::perform(engine::probe_link(url.clone(), ua), move |meta| {
+                            Message::BatchProbed(url.clone(), meta)
                         })
                     })
                     .collect();
                 Task::batch(probes)
             }
             Message::BatchLoaded(None) => Task::none(),
-            Message::BatchProbed(url, size) => {
-                if let Some(size) = size {
-                    self.batch.sizes.insert(url, size);
+            Message::InfoProbed(id, meta) => match meta {
+                Some(meta) => self.adopt_probed(id, Some(meta.file_name), meta.size),
+                None => Task::none(),
+            },
+            Message::BatchProbed(url, meta) => {
+                if let Some(meta) = meta {
+                    if let Some(size) = meta.size {
+                        self.batch.sizes.insert(url.clone(), size);
+                    }
+                    if !meta.file_name.is_empty() {
+                        self.batch.names.insert(url, meta.file_name);
+                    }
                 }
                 Task::none()
             }
@@ -3546,7 +3599,27 @@ impl App {
                 let dir_override = self.batch.to_dir.then(|| self.batch.dir.clone());
                 let queue = Some("Main download queue".to_string());
                 for url in checked {
+                    // A name the probe resolved (a redirector's real target, or
+                    // a `Content-Disposition`) beats the one the pasted URL
+                    // implies, and it decides the category with it.
+                    let probed = self.batch.names.get(&url).cloned();
                     let id = self.add_item(url, None, queue.clone());
+                    if let Some(name) = probed.filter(|n| !n.is_empty()) {
+                        let cat = categorize(&name, &self.cfg.categories);
+                        let dir = cat
+                            .as_deref()
+                            .and_then(|c| self.cfg.categories.iter().find(|k| k.name == c))
+                            .map(|k| k.dir.clone());
+                        if let Some(d) = self.item_mut(id) {
+                            d.file_name = name;
+                            if let Some(c) = cat {
+                                d.category = Some(c);
+                            }
+                            if let Some(dir) = dir {
+                                d.save_dir = dir;
+                            }
+                        }
+                    }
                     if let Some(c) = &cat_override {
                         let dir = self
                             .cfg
