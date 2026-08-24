@@ -28,7 +28,7 @@
   - [Desktop GUI](#desktop-gui)
 - [Installation](#installation)
   - [Homebrew (macOS / Linux)](#homebrew-macos--linux)
-  - [Linux Packages (Ubuntu PPA / Fedora COPR)](#linux-packages-ubuntu-ppa--fedora-copr)
+  - [Linux Packages (Ubuntu PPA / Fedora COPR / Arch Linux AUR)](#linux-packages-ubuntu-ppa--fedora-copr--arch-linux-aur)
   - [Quick Install (prebuilt binaries)](#quick-install-prebuilt-binaries)
   - [From Source](#from-source)
   - [Browser Extension](#browser-extension)
@@ -108,7 +108,7 @@ brew install ja7ad/tap/hydra
 brew install --cask ja7ad/tap/hydra
 ```
 
-### Linux Packages (Ubuntu PPA / Fedora COPR)
+### Linux Packages (Ubuntu PPA / Fedora COPR / Arch Linux AUR)
 
 **Ubuntu / Debian-based (Launchpad PPA)**:
 
@@ -128,6 +128,24 @@ sudo dnf install hydra
 ```
 
 > COPR Repository: [copr.fedorainfracloud.org/coprs/sonycore/hydra](https://copr.fedorainfracloud.org/coprs/sonycore/hydra/)
+
+**Arch Linux (AUR)**:
+
+Build from source:
+
+```bash
+paru -S hydra-download-manager
+# or: yay -S hydra-download-manager
+```
+
+Precompiled binary:
+
+```bash
+paru -S hydra-download-manager-bin
+# or: yay -S hydra-download-manager-bin
+```
+
+> AUR Packages: [hydra-download-manager](https://aur.archlinux.org/packages/hydra-download-manager) | [hydra-download-manager-bin](https://aur.archlinux.org/packages/hydra-download-manager-bin)
 
 ### Quick Install (prebuilt binaries)
 
