@@ -738,3 +738,24 @@ jobs:
             echo "note: LAUNCHPAD_GPG_KEY or LAUNCHPAD_PPA not set; skipping Launchpad release"
           fi
 
+      - name: Publish to AUR
+        if: needs.verify-version.outputs.prerelease == 'false'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${AUR_SSH_PRIVATE_KEY:-}" ]; then
+            mkdir -p ~/.ssh
+            echo "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur_ed25519
+            chmod 600 ~/.ssh/aur_ed25519
+            ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+
+            export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_ed25519 -o StrictHostKeyChecking=accept-new"
+            scripts/update-aur.sh "$VERSION"
+          else
+            echo "note: AUR_SSH_PRIVATE_KEY not set; skipping automated AUR publish"
+          fi
+
+
+
