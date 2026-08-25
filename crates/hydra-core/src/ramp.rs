@@ -274,6 +274,36 @@ impl ConcurrencyRamp {
         self.level
     }
 
+    /// Lower the ceiling the search may reach, and the level it is holding with it.
+    ///
+    /// Called when the origin refuses a request and the transfer learns a limit
+    /// smaller than the connection budget. Two things go wrong without it. The
+    /// search keeps doubling toward a count it can never be given, so every level
+    /// above the limit measures the same rate and the search is deciding on
+    /// readings that describe the same concurrency. And the warm-up gate waits for
+    /// `level` connections to deliver — connections the refusal has clamped away —
+    /// so every level burns its whole `WARM_DELTAS` deadline before it is judged.
+    ///
+    /// Only ever downward: a ceiling learned from a refusal must not be raised by
+    /// the search that provoked it. The transfer loop owns probing back up.
+    pub fn clamp_max(&mut self, max: usize) {
+        let max = max.max(1);
+        if max >= self.max {
+            return;
+        }
+        self.max = max;
+        self.adm.clamp_max(max);
+        if self.level > max {
+            self.level = max;
+            // The rate held from the level being abandoned describes a concurrency
+            // this ramp will never run again.
+            self.held_rate = None;
+        }
+        if let Some(n) = self.settled {
+            self.settled = Some(n.min(max));
+        }
+    }
+
     /// Close the window if it is due and decide what to do next.
     pub fn poll(&mut self, now: f64, delta: f64) -> Ramp {
         if let Some(n) = self.settled {
@@ -430,6 +460,56 @@ mod tests {
             }
         }
         r.level()
+    }
+
+    /// A ceiling learned from a refusal must end the search, not be climbed past.
+    ///
+    /// The transfer lowers this when the origin answers `429`: the connections above
+    /// the new ceiling will never be admitted, so a search that keeps doubling
+    /// toward them is measuring the same concurrency over and over and waiting out
+    /// its warm-up deadline at every level for connections that cannot arrive.
+    #[test]
+    fn a_clamped_ceiling_settles_the_search_there() {
+        let mut r = ConcurrencyRamp::new(0.15, 8);
+        let delta = 0.12;
+        let mut now = 0.0;
+        r.start(now, delta);
+        // A path with plenty of headroom, so nothing but the clamp can stop it.
+        for _ in 0..400 {
+            let rate = 400e3 * r.level() as f64;
+            now += 0.05;
+            r.observe((rate * 0.05) as u64, now);
+            if r.level() >= 4 {
+                break;
+            }
+            let _ = r.poll(now, delta);
+        }
+        assert!(
+            r.level() >= 4,
+            "the ramp must have climbed before being clamped"
+        );
+        r.clamp_max(2);
+        assert_eq!(
+            r.level(),
+            2,
+            "the clamp must take the level down with the ceiling"
+        );
+        let mut settled = None;
+        for _ in 0..400 {
+            let rate = 400e3 * r.level() as f64;
+            now += 0.05;
+            r.observe((rate * 0.05) as u64, now);
+            if let Ramp::Settled(n) = r.poll(now, delta) {
+                settled = Some(n);
+                break;
+            }
+        }
+        assert_eq!(
+            settled,
+            Some(2),
+            "a search clamped to 2 on a path with headroom must settle at 2, \
+             not keep asking for connections the origin has refused"
+        );
     }
 
     /// A path that saturates at one connection must not be given eight.

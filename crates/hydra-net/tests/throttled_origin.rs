@@ -164,3 +164,263 @@ async fn a_429_lowers_the_connection_count_instead_of_livelocking() {
         "{refused} refusals means the client never lowered its concurrency"
     );
 }
+
+/// Concurrency a throttled origin refuses must cost nothing, not everything.
+///
+/// # The ordering this exists to reproduce
+///
+/// A refusal is a 162-byte body that comes back a round trip ahead of the first
+/// body bytes of the requests beside it that were GRANTED. On loopback, where a
+/// granted response delivers its first slice in microseconds, that ordering never
+/// happens and [`a_429_lowers_the_connection_count_instead_of_livelocking`]
+/// passes on a client that mishandles it completely. The `400 ms` first-byte
+/// delay below is the whole point of this second origin.
+///
+/// Three things went wrong under that ordering, and all three read "nothing has
+/// delivered yet" as "nothing is working":
+///
+/// * the client stood the whole SOURCE down on the first refusal, aborting the
+///   requests the origin had just agreed to serve and paying their handshakes
+///   again;
+/// * the ceiling's floor — "never below what is visibly working" — was zero
+///   whenever the working connections were between ranges, so a ceiling that had
+///   correctly found the origin's limit was halved off it and the transfer
+///   finished at one connection against an origin serving two;
+/// * assignment kept reserving work for the six connections the ceiling had
+///   already ruled out, handing the two live ones a budget-sized share at a time
+///   and paying a request — a first byte, and on this origin a fresh handshake —
+///   for each.
+///
+/// # What is asserted
+///
+/// Not a wall-clock number, which would be a claim about the machine: the same
+/// object is fetched at one connection and at eight, and the eight-connection
+/// transfer must not be dramatically worse. That is the property the user sees,
+/// and it is what failed. Measured on this origin before the fix: 3.8 s at one
+/// connection against 17.8 s at eight, monotonically worse at every count in
+/// between (5.9 s at two, 10.5 s at four). After: 3.8 s against 4.2 s.
+///
+/// The live original is `ash-speed.hetzner.com`, which serves two connections per
+/// address and refuses the rest. A 100 MB object there took 6 m 57 s at `-x 8`
+/// against 2 m 05 s at `-x 2`, which is the same shape at a real RTT.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrency_the_origin_refuses_costs_nothing() {
+    let single = fetch_from_slow_first_byte_origin(1).await;
+    let wide = fetch_from_slow_first_byte_origin(8).await;
+    eprintln!("single={single:?} wide={wide:?}");
+    assert!(
+        wide.refusals > 0,
+        "the origin must actually have refused the wide transfer, or this proves nothing"
+    );
+    assert_eq!(
+        single.refusals, 0,
+        "one connection is inside this origin's limit and must never be refused"
+    );
+    // Generous: the wide transfer legitimately pays a few refused requests to find
+    // the limit, and this runs on whatever CI machine it lands on. The failure it
+    // catches was 4.7x, and every count between 1 and 8 was worse than the one
+    // below it.
+    assert!(
+        wide.elapsed_s < single.elapsed_s * 1.75 + 1.0,
+        "{:.2}s at eight connections against {:.2}s at one: concurrency the origin \
+         refuses is costing the transfer instead of being dropped",
+        wide.elapsed_s,
+        single.elapsed_s
+    );
+    // The same failure seen as requests rather than as clock. Eight connections
+    // against a two-connection origin needs a handful more requests than one does,
+    // not an order of magnitude more.
+    assert!(
+        wide.grants <= 16,
+        "{} granted requests to deliver the object at eight connections against {} \
+         at one: the transfer is re-requesting work a share at a time",
+        wide.grants,
+        single.grants
+    );
+}
+
+#[derive(Debug)]
+struct ThrottledRun {
+    elapsed_s: f64,
+    refusals: usize,
+    grants: usize,
+}
+
+/// Fetch the whole object at `n` connections from the slow-first-byte origin.
+async fn fetch_from_slow_first_byte_origin(n: usize) -> ThrottledRun {
+    let refusals = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let grants = Arc::new(AtomicUsize::new(0));
+    let abandoned = Arc::new(AtomicUsize::new(0));
+    let port = spawn_slow_first_byte_origin(
+        refusals.clone(),
+        peak.clone(),
+        grants.clone(),
+        abandoned.clone(),
+    )
+    .await;
+    let conn = Arc::new(TlsCapableConnector::new().expect("client must build"));
+    let t = Target::direct("127.0.0.1", port, "/obj");
+    let out = std::env::temp_dir().join(format!("hydra_throttled_slow_first_byte_{n}.bin"));
+    let outs = out.to_string_lossy().to_string();
+
+    let sched = Scheduler::new(SIZE, vec![Source::default()], &[n]).with_stall_timeout(5.0);
+    let t0 = std::time::Instant::now();
+    let r = tokio::time::timeout(
+        Duration::from_secs(120),
+        run_transfer(conn, vec![t], &[n], SIZE, &outs, sched),
+    )
+    .await
+    .expect("a throttled transfer must converge, not livelock");
+    r.expect("the object must be delivered at a connection count the origin serves");
+    let elapsed_s = t0.elapsed().as_secs_f64();
+
+    let data = std::fs::read(&out).expect("output");
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(data.len() as u64, SIZE, "short file at {n} connections");
+    let bad = data
+        .iter()
+        .enumerate()
+        .find(|(i, b)| **b != byte_at(*i as u64));
+    assert!(
+        bad.is_none(),
+        "content mismatch at byte {:?} at {n} connections",
+        bad.map(|(i, _)| i)
+    );
+    ThrottledRun {
+        elapsed_s,
+        refusals: refusals.load(Ordering::SeqCst),
+        grants: grants.load(Ordering::SeqCst),
+    }
+}
+
+/// Like [`spawn_throttled_origin`], but a granted request waits before its first
+/// body byte while a refusal is answered at once — the ordering every real path
+/// with latency produces, and the one loopback hides.
+async fn spawn_slow_first_byte_origin(
+    refusals: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    grants: Arc<AtomicUsize>,
+    abandoned: Arc<AtomicUsize>,
+) -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = l.local_addr().expect("addr").port();
+    let inflight = Arc::new(AtomicUsize::new(0));
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = l.accept().await else {
+                return;
+            };
+            let (inflight, refusals, peak, grants, abandoned) = (
+                inflight.clone(),
+                refusals.clone(),
+                peak.clone(),
+                grants.clone(),
+                abandoned.clone(),
+            );
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).to_string();
+                let range = text
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                    .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
+                    .unwrap_or_default();
+                let spec = range.trim_start_matches("bytes=");
+                let (lo, hi) = spec.split_once('-').unwrap_or(("0", ""));
+                let lo: u64 = lo.parse().unwrap_or(0);
+                let hi: u64 = hi.parse().unwrap_or(SIZE - 1);
+
+                let n = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                if n > ALLOWED {
+                    inflight.fetch_sub(1, Ordering::SeqCst);
+                    refusals.fetch_add(1, Ordering::SeqCst);
+                    // Answered immediately: this is the round trip a refusal wins
+                    // against a granted response on a real path.
+                    let _ = s
+                        .write_all(
+                            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\n\
+                              Content-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    return;
+                }
+                peak.fetch_max(n, Ordering::SeqCst);
+                grants.fetch_add(1, Ordering::SeqCst);
+                let len = hi - lo + 1;
+                let head = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\n\
+                     Content-Length: {len}\r\nETag: \"throttled\"\r\n\
+                     Content-Range: bytes {lo}-{hi}/{SIZE}\r\n\r\n"
+                );
+                let _ = s.write_all(head.as_bytes()).await;
+                // The first byte costs a round trip the refusal did not.
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let mut off = lo;
+                while off <= hi {
+                    let end = (off + 32 * 1024 - 1).min(hi);
+                    let body: Vec<u8> = (off..=end).map(byte_at).collect();
+                    if s.write_all(&body).await.is_err() {
+                        // The client hung up on a range this origin had agreed to
+                        // serve: work granted and then thrown away.
+                        abandoned.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                    off = end + 1;
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                inflight.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    port
+}
+
+/// Not an assertion: a bench of the same origin at fixed connection counts, so the
+/// numbers the comments above quote can be reproduced. `--ignored` because it is a
+/// measurement, not a property.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn bench_fixed_counts_against_the_throttled_origin() {
+    for n in [1usize, 2, 4, 8] {
+        let refusals = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let grants = Arc::new(AtomicUsize::new(0));
+        let abandoned = Arc::new(AtomicUsize::new(0));
+        let port = spawn_slow_first_byte_origin(
+            refusals.clone(),
+            peak.clone(),
+            grants.clone(),
+            abandoned.clone(),
+        )
+        .await;
+        let conn = Arc::new(TlsCapableConnector::new().expect("client must build"));
+        let t = Target::direct("127.0.0.1", port, "/obj");
+        let out = std::env::temp_dir().join(format!("hydra_bench_{n}.bin"));
+        let outs = out.to_string_lossy().to_string();
+        let sched = Scheduler::new(SIZE, vec![Source::default()], &[n]).with_stall_timeout(5.0);
+        let t0 = std::time::Instant::now();
+        let r = tokio::time::timeout(
+            Duration::from_secs(120),
+            run_transfer(conn, vec![t], &[n], SIZE, &outs, sched),
+        )
+        .await
+        .expect("no livelock");
+        r.expect("delivered");
+        eprintln!(
+            "n={n} elapsed={:.2}s refusals={} grants={} abandoned={}",
+            t0.elapsed().as_secs_f64(),
+            refusals.load(Ordering::SeqCst),
+            grants.load(Ordering::SeqCst),
+            abandoned.load(Ordering::SeqCst)
+        );
+        let _ = std::fs::remove_file(&out);
+    }
+}
