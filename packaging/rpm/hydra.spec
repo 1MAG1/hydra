@@ -1,4 +1,4 @@
-%{!?_version: %global _version 0.3.8}
+%{!?_version: %global _version 0.3.12}
 
 Name:           hydra
 Version:        %{_version}
@@ -149,5 +149,8 @@ fi
 %{_prefix}/lib64/mozilla/native-messaging-hosts/com.hydra.host.json
 
 %changelog
+* Tue Aug 25 2026 Javad Rajabzadeh <ja7ad@live.com> - 0.3.12-1
+- Bump to version 0.3.12
+
 * Sat Aug 22 2026 Javad Rajabzadeh <ja7ad@live.com> - 0.3.8-1
 - Initial RPM release
