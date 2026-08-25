@@ -43,9 +43,8 @@ pub fn view(app: &App) -> El<'_> {
             } else {
                 crate::model::categorize(&name, &app.cfg.categories)
             };
-            cat.and_then(|c| app.cfg.categories.iter().find(|k| k.name == c))
-                .or(app.cfg.categories.first())
-                .map(|c| c.dir.clone())
+            app.cat_dir(cat.as_deref())
+                .or_else(|| app.cat_dir(None))
                 .unwrap_or_default()
         }
     };

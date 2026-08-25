@@ -256,6 +256,19 @@ fn save_to(app: &App) -> El<'_> {
             dlg_btn(tr("Browse"), Some(o(OptField::BrowseCatDir))),
         ]
         .spacing(8),
+        hinted(
+            checkbox(app.options.draft.no_category_dirs)
+                .label(tr("Do not create category folders — save everything in the default folder"))
+                .on_toggle(|b| o(OptField::NoCatDirs(b)))
+                .size(15.0)
+                .text_size(theme::FONT_SIZE)
+                .style(theme::check),
+            format!(
+                "{}\n{}",
+                tr("Off (default): a download is filed in its category folder, e.g. Downloads/Video."),
+                tr("On: the folders above are ignored and new downloads are saved directly in the General category folder. Downloads already on the list keep their folder."),
+            ),
+        ),
         checkbox(app.options.draft.remember_last_dir)
             .label(format!(
                 "{} \"{}\" {}",
