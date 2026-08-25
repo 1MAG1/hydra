@@ -189,6 +189,22 @@ impl Admission {
         best.clamp(1, self.max_conns)
     }
 
+    /// Lower the ceiling the search may reach.
+    ///
+    /// Raising it is deliberately not possible: the caller lowers this when the
+    /// ORIGIN has refused a request, and a ceiling learned from a refusal must not
+    /// be undone by the search that provoked it. Recovery from a momentary limit is
+    /// the transfer loop's business, not the controller's.
+    pub fn clamp_max(&mut self, max: usize) {
+        let max = max.max(1);
+        if max < self.max_conns {
+            self.max_conns = max;
+            if let Some(n) = self.settled {
+                self.settled = Some(n.min(max));
+            }
+        }
+    }
+
     /// Back-compatible entry point for callers that admit one connection at a time.
     pub fn observe(&mut self, goodput: f64) -> Admit {
         let level = self.samples.len() + 1;

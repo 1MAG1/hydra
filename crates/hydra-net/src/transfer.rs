@@ -16,6 +16,14 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 /// Drive a transfer to completion. Returns (elapsed seconds, requests issued).
+/// Ceiling on the upward-probe backoff multiplier.
+///
+/// Bounded so a transfer long enough to accumulate refusals never stops looking
+/// entirely: at the 10 s floor on `probe_interval` this caps the wait at ~5 min,
+/// which is rare enough to be free and short enough that a limit lifted mid
+/// transfer is still noticed.
+const MAX_PROBE_BACKOFF: f64 = 32.0;
+
 pub async fn run_transfer<C: Connector>(
     connector: Arc<C>,
     targets: Vec<Target>,
@@ -240,7 +248,40 @@ pub async fn run_transfer_cancellable<C: Connector>(
     // connection back. Without it the first burst caps the transfer permanently,
     // including for the far more common case of a limit that is momentary.
     let probe_interval = (20.0 * sched.worst_delta().max(0.25)).clamp(10.0, 60.0);
+    // Multiplier on that interval, doubled every time a probe is refused and halved
+    // every time one survives.
+    //
+    // A fixed interval treats every refusal as momentary. Against an origin whose
+    // limit is a standing configuration — nginx `limit_conn`, a CDN's per-address
+    // cap — the probe is refused every single time, so the transfer pays a wasted
+    // handshake, a refusal, and a re-halved ceiling once per interval for its whole
+    // life, and the ceiling never gets to sit still at the number that works.
+    // Backing off converges on leaving a real limit alone without giving up on a
+    // momentary one, which is the same argument the ceiling itself is built on.
+    let mut probe_backoff = 1.0f64;
     let mut next_probe_at = f64::INFINITY;
+    // Most connections seen streaming AT ONCE, over a recent stretch. This is the
+    // floor the ceiling may not fall below.
+    //
+    // "What is streaming right now" is the wrong floor for the same reason it was
+    // the wrong suspension test: a connection that has been granted its range but
+    // whose first body byte is still a round trip away counts as nothing. So a
+    // refusal that lands in the gap between one request finishing and the next
+    // one's first byte sees zero, floors at one, and halves a ceiling that was
+    // already correct. Observed on the throttled origin this is tuned against: the
+    // ceiling reached the right answer of 2 and was then driven to 1 by a refusal
+    // that arrived while both working connections happened to be between ranges,
+    // and a transfer that had found the origin's limit spent the rest of its life
+    // at half of it.
+    //
+    // A peak over a window is proof of a concurrency this origin HAS served, and
+    // it is the same class of evidence as the refusal itself. Two buckets rather
+    // than an all-time maximum so it decays: an origin that tightens its limit
+    // mid-transfer must be able to push the floor back down, which an all-time
+    // high-water mark would never allow.
+    let mut served_peak_cur = 0usize;
+    let mut served_peak_prev = 0usize;
+    let mut served_peak_rotate_at = probe_interval;
     // Bytes held when the last refusal landed. The probe is earned by PROGRESS,
     // not by the clock: widening a transfer that is not moving adds requests to a
     // source that is already failing to serve the ones it has.
@@ -441,7 +482,7 @@ pub async fn run_transfer_cancellable<C: Connector>(
                     // connections stream is the origin declining one more request,
                     // not the source going away, and tearing the working ones down
                     // throws away bytes that have to be pulled again.
-                    let delivering = (0..sched.n_conns())
+                    let streaming = (0..sched.n_conns())
                         .filter(|&j| {
                             j != conn
                                 && sched.conn_source(j) == src
@@ -451,7 +492,33 @@ pub async fn run_transfer_cancellable<C: Connector>(
                                     .unwrap_or(false)
                         })
                         .count();
-                    if delivering == 0 {
+                    // What is still ON THE WIRE for this source: a request that has
+                    // been sent and has neither failed nor finished.
+                    //
+                    // Suspending on `streaming == 0` alone is what made an origin
+                    // like `ash-speed.hetzner.com` — two connections per address,
+                    // the rest refused — collapse the whole transfer. Every request
+                    // in the opening burst leaves within milliseconds of the others,
+                    // and a 429 is a 162-byte body that comes back a round trip
+                    // ahead of the first body bytes of the 206s beside it. So at the
+                    // instant the first refusal is handled NOTHING has delivered
+                    // yet, `streaming` is 0, and the source stood down — aborting
+                    // the two requests the origin had just GRANTED, closing their
+                    // sockets, and paying both handshakes again on the retry.
+                    // Measured on a 100 MB object over that origin: 162 requests and
+                    // 6 m 57 s against 2 m 05 s for the same transfer at `-x 2`.
+                    //
+                    // A granted request is indistinguishable from a refused one
+                    // until it answers, so the honest test is whether anything is
+                    // still outstanding. While something is, this refusal is the
+                    // origin declining ONE more request; only when the last one has
+                    // failed too is it the source itself standing down.
+                    let outstanding = (0..sched.n_conns())
+                        .filter(|&j| {
+                            j != conn && sched.conn_source(j) == src && inflight.contains_key(&j)
+                        })
+                        .count();
+                    if streaming == 0 && outstanding == 0 {
                         // Nothing is getting through: the source itself stands
                         // down, and its in-flight fetches go with it, since their
                         // bytes would no longer be credited to any range.
@@ -475,12 +542,13 @@ pub async fn run_transfer_cancellable<C: Connector>(
                     // count this origin accepts, so a refusal is evidence about
                     // the excess, not about them.
                     if now >= cap_settled_until {
-                        let floor = delivering.max(1);
+                        let floor = streaming.max(served_peak_cur).max(served_peak_prev).max(1);
                         throttle_cap = (throttle_cap / 2).max(floor).min(sched.n_conns().max(1));
                         cap_settled_until = now + secs + sched.worst_delta().max(0.05);
                         if trace_errors {
                             eprintln!(
-                                "[trace] t={now:.2} throttled: {delivering} delivering, \
+                                "[trace] t={now:.2} throttled: {streaming} delivering, \
+                                 {outstanding} outstanding, floor {floor}, \
                                  concurrency ceiling -> {throttle_cap}"
                             );
                         }
@@ -488,7 +556,28 @@ pub async fn run_transfer_cancellable<C: Connector>(
                     if sched.active_limit() > throttle_cap {
                         sched.set_active_limit(throttle_cap);
                     }
-                    next_probe_at = now + probe_interval;
+                    // Assignment reserves work for connections that are still to be
+                    // admitted. Above the ceiling none are, so the reserve is work
+                    // nobody comes for and the transfer re-requests it a share at a
+                    // time — a round trip each, and against an origin that refuses,
+                    // a fresh handshake each.
+                    sched.set_conn_ceiling(throttle_cap);
+                    // The search must not ask for what the origin has just refused.
+                    // Without this the ramp keeps doubling toward a budget it can
+                    // never reach, and its warm-up gate waits out its whole deadline
+                    // at every level because the connections it is waiting for are
+                    // clamped away and never deliver.
+                    if let Some(r) = ramp.as_mut() {
+                        r.clamp_max(throttle_cap);
+                    }
+                    // Back off the upward probe as well. A ceiling that has been
+                    // refused once is likely to be refused again, and probing it on
+                    // a fixed interval spends one wasted request — a handshake, a
+                    // refusal, and a re-halved ceiling — every interval for the whole
+                    // transfer. Doubling the wait converges on leaving a real limit
+                    // alone while still recovering from a momentary one.
+                    probe_backoff = (probe_backoff * 2.0).min(MAX_PROBE_BACKOFF);
+                    next_probe_at = now + probe_interval * probe_backoff;
                     probe_held_mark = sched.bytes_held();
                 }
                 _ => sched.on_conn_error(conn, now, cool),
@@ -525,12 +614,18 @@ pub async fn run_transfer_cancellable<C: Connector>(
             let now = t0.elapsed().as_secs_f64();
             if now >= next_probe_at && sched.bytes_held() > probe_held_mark {
                 throttle_cap += 1;
+                // The probe that just went unrefused earns back half the patience
+                // the last refusal cost, so a limit that has genuinely lifted is
+                // climbed out of at something close to the base interval rather
+                // than at whatever the worst refusal streak left behind.
+                probe_backoff = (probe_backoff * 0.5).max(1.0);
                 // Under a ramp the limit is the ramp's to set; this only lifts the
                 // clamp it is measured against.
                 if ramp.is_none() {
                     sched.set_active_limit(throttle_cap);
                 }
-                next_probe_at = now + probe_interval;
+                sched.set_conn_ceiling(throttle_cap);
+                next_probe_at = now + probe_interval * probe_backoff;
                 probe_held_mark = sched.bytes_held();
                 if trace_errors {
                     eprintln!("[trace] t={now:.2} refusal-free: ceiling -> {throttle_cap}");
@@ -538,35 +633,54 @@ pub async fn run_transfer_cancellable<C: Connector>(
             }
         }
 
-        // 1b. feed the ramp the AGGREGATE delivery, and let it decide.
+        // 1b. count what is actually on the wire, then let the ramp decide.
+        //
+        // A connection counts as delivering once its cursor has moved off the start
+        // of its range: bytes have arrived on THIS request, so its handshake, its
+        // request and its first byte are all behind it. The scheduler's rate
+        // estimate is not the same test — it survives a connection going idle, so
+        // it would report a connection as warm before its replacement request has
+        // produced anything.
+        //
+        // Counted every tick rather than only under a ramp, because the refusal
+        // floor above needs the same number whether or not a search is running.
+        let now_tick = t0.elapsed().as_secs_f64();
+        let live = (0..sched.n_conns())
+            .filter(|&j| {
+                sched
+                    .conn_range(j)
+                    .map(|(lo, pos, _hi)| pos > lo)
+                    .unwrap_or(false)
+            })
+            .count();
+        served_peak_cur = served_peak_cur.max(live);
+        if now_tick >= served_peak_rotate_at {
+            served_peak_prev = served_peak_cur;
+            served_peak_cur = live;
+            served_peak_rotate_at = now_tick + probe_interval;
+        }
+
+        // Feed the ramp the AGGREGATE delivery.
         //
         // Aggregate rather than per-connection on purpose: on a saturated link each
         // connection's own rate falls as connections are added while the total stays
         // flat, so a per-connection view would read saturation as healthy scaling.
         if let Some(r) = ramp.as_mut() {
-            let now = t0.elapsed().as_secs_f64();
             let held = sched.bytes_held();
-            r.observe(held.saturating_sub(ramp_last_held), now);
+            r.observe(held.saturating_sub(ramp_last_held), now_tick);
             ramp_last_held = held;
-            // A connection counts as delivering once its cursor has moved off the
-            // start of its range: bytes have arrived on THIS request, so its
-            // handshake, its request and its first byte are all behind it. The
-            // scheduler's rate estimate is not the same test — it survives a
-            // connection going idle, so it would report a connection as warm
-            // before its replacement request has produced anything.
-            let live = (0..sched.n_conns())
-                .filter(|&j| {
-                    sched
-                        .conn_range(j)
-                        .map(|(lo, pos, _hi)| pos > lo)
-                        .unwrap_or(false)
-                })
-                .count();
             r.note_delivering(live);
-            match r.poll(now, sched.worst_delta().max(1e-3)) {
+            match r.poll(now_tick, sched.worst_delta().max(1e-3)) {
                 hya_core::Ramp::Raise(n) => sched.set_active_limit(n.min(throttle_cap)),
                 hya_core::Ramp::Settled(n) => {
-                    sched.set_active_limit(n.min(throttle_cap));
+                    let n = n.min(throttle_cap);
+                    sched.set_active_limit(n);
+                    // The search is over, so nothing is waiting to be admitted and
+                    // the reserve assignment was keeping for later admissions is
+                    // now just work the settled connections have to re-request a
+                    // share at a time. Collapsing the ceiling onto the settled
+                    // count lets them take maximal ranges again.
+                    sched.set_conn_ceiling(n);
                     // Stop polling: the search is over and re-running it would
                     // re-pay its cost on a decision already made.
                     ramp = None;

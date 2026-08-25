@@ -215,6 +215,24 @@ pub struct Scheduler {
     /// concurrency search can run on the real transfer rather than on probe
     /// traffic; see `set_active_limit`.
     active_limit: usize,
+    /// The largest `active_limit` this transfer can still reach.
+    ///
+    /// Distinct from `conns.len()`, which is the connection BUDGET, because the two
+    /// stopped meaning the same thing once the transport learned to lower its own
+    /// concurrency: an origin answering `429` teaches the transfer a ceiling well
+    /// below the budget, and nothing above that ceiling will ever be admitted.
+    ///
+    /// Assignment reads it. While concurrency can still grow, an idle connection is
+    /// handed a share of the remaining work rather than all of it, so the
+    /// connections admitted later find work waiting instead of having to steal.
+    /// Sizing that share against the budget when the ceiling is a fraction of it
+    /// hands out shares a fraction of the right size, and the transfer pays a
+    /// request — a round trip, and on a refused origin a fresh handshake — for
+    /// every one of them. Measured on a hermetic origin that serves two connections
+    /// and refuses the rest: 31 requests to deliver a 16 MB object at `-x 8`
+    /// against 2 at `-x 2`, and the difference was almost entirely first-byte
+    /// latency.
+    conn_ceiling: usize,
     /// When false, victim selection ignores detector health and ranks purely by
     /// projected ETA (the pre-detector behaviour). Exists so the detector's
     /// contribution can be A/B measured rather than assumed.
@@ -244,6 +262,7 @@ impl Scheduler {
             // Default: every connection active, so nothing changes for callers that
             // do not opt into the ramp.
             active_limit: usize::MAX,
+            conn_ceiling: usize::MAX,
             started: false,
             stats: Stats::default(),
         }
@@ -281,6 +300,22 @@ impl Scheduler {
     /// The current concurrency cap.
     pub fn active_limit(&self) -> usize {
         self.active_limit
+    }
+
+    /// Declare the largest concurrency this transfer can still reach.
+    ///
+    /// Lowered when the origin refuses requests, raised when a refusal-free stretch
+    /// earns a connection back. Assignment reserves work only for connections that
+    /// can actually arrive, so telling the scheduler the real ceiling is what stops
+    /// a throttled transfer from carving the object into budget-sized shares nobody
+    /// will ever come for.
+    pub fn set_conn_ceiling(&mut self, n: usize) {
+        self.conn_ceiling = n.clamp(1, self.conns.len().max(1));
+    }
+
+    /// The largest concurrency still reachable, never above the budget.
+    fn ceiling(&self) -> usize {
+        self.conn_ceiling.min(self.conns.len()).max(1)
     }
 
     /// When every source is deliberately suspended, the earliest time one returns.
@@ -889,9 +924,10 @@ impl Scheduler {
             // The cost of being wrong in this direction is one extra request later —
             // now nearly free on a pooled connection — against one repair per
             // admitted connection the other way.
-            let want = if self.active_limit < self.conns.len() {
+            let ceiling = self.ceiling();
+            let want = if self.active_limit < ceiling {
                 let remaining = self.unassigned.total();
-                let share = remaining / self.conns.len().max(1) as u64;
+                let share = remaining / ceiling as u64;
                 share.max(STEAL_QUANTUM * 4)
             } else {
                 u64::MAX
@@ -1040,7 +1076,7 @@ impl Scheduler {
         // request. If the ramp never grows, nothing is lost: the active connection
         // finishes its quota and work-conserving assignment gives it the next
         // piece, which connection reuse now makes nearly free.
-        let budget = self.conns.len().max(1);
+        let budget = self.ceiling();
         let mut quota: Vec<u64> = weights
             .iter()
             .map(|w| ((w / total) * (avail as f64 / budget as f64) * n as f64) as u64)
