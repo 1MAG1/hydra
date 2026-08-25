@@ -215,6 +215,23 @@ pub fn categorize(file: &str, cats: &[CategoryDef]) -> Option<String> {
     }
 }
 
+/// Folder a download filed under `cat` should be saved in.
+///
+/// With `flat` on (Options > Save to > "Do not create category folders")
+/// every category resolves to the first — General — folder, so no
+/// per-category subdirectory is ever created. `cat` of `None` means "not
+/// categorized", which also lands in General.
+///
+/// `None` comes back only when `cats` is empty or when `cat` names a
+/// category that no longer exists; callers decide whether to fall back or to
+/// leave the item's folder as it is.
+pub fn category_dir(cats: &[CategoryDef], cat: Option<&str>, flat: bool) -> Option<String> {
+    match cat.filter(|_| !flat) {
+        Some(c) => cats.iter().find(|k| k.name == c).map(|k| k.dir.clone()),
+        None => cats.first().map(|k| k.dir.clone()),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ProxyMode {
     None,
@@ -272,6 +289,13 @@ pub struct Settings {
     // Save to tab
     pub remember_last_dir: bool,
     pub server_file_date: bool,
+    /// Off (default): a download lands in its category's folder, so a fresh
+    /// install fills `~/Downloads` with `Video/`, `Documents/`, ... On: the
+    /// per-category folders are ignored and everything is saved straight
+    /// into the General category's folder (`~/Downloads` out of the box).
+    /// Only new downloads are affected; items already on the list keep the
+    /// folder they were added with.
+    pub no_category_dirs: bool,
     // Downloads tab
     pub show_file_info_dialog: bool,
     /// Start pulling bytes while the Download File Info dialog is open.
@@ -348,6 +372,7 @@ impl Default for Settings {
             show_exception_dialog: true,
             remember_last_dir: true,
             server_file_date: false,
+            no_category_dirs: false,
             show_file_info_dialog: true,
             bg_download: true,
             start_minimized: false,
@@ -744,5 +769,42 @@ pub fn save_quota(q: &DlQuota) {
     }
     if let Err(e) = txn.commit() {
         crate::log::error(&format!("download-limit counter save failed: {e}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cats() -> Vec<CategoryDef> {
+        vec![
+            CategoryDef {
+                name: "General".into(),
+                exts: vec![],
+                dir: "/dl".into(),
+            },
+            CategoryDef {
+                name: "Video".into(),
+                exts: vec!["mp4".into()],
+                dir: "/dl/Video".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn category_dir_uses_subfolder_unless_flat() {
+        let c = cats();
+        assert_eq!(
+            category_dir(&c, Some("Video"), false),
+            Some("/dl/Video".into())
+        );
+        // Flat: the category still classifies the file, but the folder is
+        // always General's.
+        assert_eq!(category_dir(&c, Some("Video"), true), Some("/dl".into()));
+        // Uncategorized, and a category that no longer exists.
+        assert_eq!(category_dir(&c, None, false), Some("/dl".into()));
+        assert_eq!(category_dir(&c, Some("Gone"), false), None);
+        assert_eq!(category_dir(&c, Some("Gone"), true), Some("/dl".into()));
+        assert_eq!(category_dir(&[], Some("Video"), false), None);
     }
 }

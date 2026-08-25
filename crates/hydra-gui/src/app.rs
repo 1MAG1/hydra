@@ -645,6 +645,7 @@ pub enum OptField {
     ExcDialog(bool),
     RememberLast(bool),
     ServerDate(bool),
+    NoCatDirs(bool),
     ShowFileInfo(bool),
     StartMinimized(bool),
     SpeedTab(bool),
@@ -821,6 +822,17 @@ impl App {
 
     pub fn selected_item(&self) -> Option<&DownloadItem> {
         self.selected.first().and_then(|id| self.item(*id))
+    }
+
+    /// Folder a download filed under `cat` saves into, honouring Options >
+    /// Save to > "Do not create category folders". `None` means the named
+    /// category is gone — the caller keeps whatever folder it already had.
+    pub fn cat_dir(&self, cat: Option<&str>) -> Option<String> {
+        crate::model::category_dir(
+            &self.cfg.categories,
+            cat,
+            self.cfg.settings.no_category_dirs,
+        )
     }
 
     /// Recompute the Permissions window's status dots.
@@ -1585,17 +1597,10 @@ impl App {
         self.state.next_id += 1;
         let file_name = engine::file_name_from_url(&url);
         let category = categorize(&file_name, &self.cfg.categories);
-        let save_dir = category
-            .as_deref()
-            .and_then(|c| self.cfg.categories.iter().find(|k| k.name == c))
-            .map(|c| c.dir.clone())
-            .unwrap_or_else(|| {
-                self.cfg
-                    .categories
-                    .first()
-                    .map(|c| c.dir.clone())
-                    .unwrap_or_else(|| ".".into())
-            });
+        let save_dir = self
+            .cat_dir(category.as_deref())
+            .or_else(|| self.cat_dir(None))
+            .unwrap_or_else(|| ".".into());
         let q_order = self
             .state
             .downloads
@@ -1851,12 +1856,7 @@ impl App {
                 }
                 if !self.file_info.cat_touched {
                     if let Some(cat) = categorize(&name, &self.cfg.categories) {
-                        let dir = self
-                            .cfg
-                            .categories
-                            .iter()
-                            .find(|c| c.name == cat)
-                            .map(|c| c.dir.clone());
+                        let dir = self.cat_dir(Some(&cat));
                         self.file_info.category = cat.clone();
                         if let (false, Some(dir)) = (self.file_info.dir_touched, dir.clone()) {
                             self.file_info.save_dir = dir;
@@ -2798,10 +2798,10 @@ impl App {
                 let name = cap_name
                     .clone()
                     .unwrap_or_else(|| engine::file_name_from_url(&url));
-                let dir = crate::model::categorize(&name, &self.cfg.categories)
-                    .and_then(|c| self.cfg.categories.iter().find(|k| k.name == c))
-                    .or(self.cfg.categories.first())
-                    .map(|c| c.dir.clone())
+                let cat = crate::model::categorize(&name, &self.cfg.categories);
+                let dir = self
+                    .cat_dir(cat.as_deref())
+                    .or_else(|| self.cat_dir(None))
                     .unwrap_or_default();
                 let on_disk = std::path::Path::new(&dir).join(&name);
                 let file = on_disk
@@ -2904,9 +2904,9 @@ impl App {
 
             // ---------------------------------------------------- file info
             Message::FiCategory(c) => {
-                if let Some(cat) = self.cfg.categories.iter().find(|k| k.name == c) {
+                if let Some(dir) = self.cat_dir(Some(&c)) {
                     if !self.file_info.dir_touched {
-                        self.file_info.save_dir = cat.dir.clone();
+                        self.file_info.save_dir = dir;
                     }
                 }
                 self.file_info.category = c;
@@ -2978,11 +2978,17 @@ impl App {
                 let start = matches!(message, Message::FiStartDownload);
                 let fi = self.file_info.clone();
                 if fi.remember {
-                    if let Some(cat) = self
-                        .cfg
-                        .categories
-                        .iter_mut()
-                        .find(|k| k.name == fi.category)
+                    // "Remember this folder" writes where the folder is
+                    // actually read from: the named category normally, and
+                    // the General one while category folders are switched
+                    // off — otherwise the tick would silently do nothing.
+                    let target = if self.cfg.settings.no_category_dirs {
+                        self.cfg.categories.first().map(|c| c.name.clone())
+                    } else {
+                        Some(fi.category.clone())
+                    };
+                    if let Some(cat) =
+                        target.and_then(|n| self.cfg.categories.iter_mut().find(|k| k.name == n))
                     {
                         cat.dir = fi.save_dir.clone();
                         self.save_config();
@@ -3682,10 +3688,7 @@ impl App {
                     let id = self.add_item(url, None, queue.clone());
                     if let Some(name) = probed.filter(|n| !n.is_empty()) {
                         let cat = categorize(&name, &self.cfg.categories);
-                        let dir = cat
-                            .as_deref()
-                            .and_then(|c| self.cfg.categories.iter().find(|k| k.name == c))
-                            .map(|k| k.dir.clone());
+                        let dir = self.cat_dir(cat.as_deref());
                         if let Some(d) = self.item_mut(id) {
                             d.file_name = name;
                             if let Some(c) = cat {
@@ -3697,12 +3700,7 @@ impl App {
                         }
                     }
                     if let Some(c) = &cat_override {
-                        let dir = self
-                            .cfg
-                            .categories
-                            .iter()
-                            .find(|k| &k.name == c)
-                            .map(|k| k.dir.clone());
+                        let dir = self.cat_dir(Some(c));
                         if let Some(d) = self.item_mut(id) {
                             d.category = Some(c.clone());
                             if let Some(dir) = dir {
@@ -4242,6 +4240,7 @@ impl App {
             OptField::ExcDialog(b) => s.show_exception_dialog = b,
             OptField::RememberLast(b) => s.remember_last_dir = b,
             OptField::ServerDate(b) => s.server_file_date = b,
+            OptField::NoCatDirs(b) => s.no_category_dirs = b,
             OptField::ShowFileInfo(b) => s.show_file_info_dialog = b,
             OptField::StartMinimized(b) => s.start_minimized = b,
             OptField::SpeedTab(b) => s.show_speed_tab = b,
