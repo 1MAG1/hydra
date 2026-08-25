@@ -6,9 +6,10 @@
 //! Classic Windows 11 dialogs are the reference: `#F0F0F0` dialog chrome, white
 //! content surfaces, `1px #ADADAD` buttons that light up `#E5F1FB`/`#0078D7`
 //! on hover, `#CCE8FF` selection, hairline `#E5E5E5` grid lines. Every style
-//! function branches on the palette so the View > Dark Mode toggle restyles
+//! function branches on the palette so the View > Theme setting restyles
 //! the same widgets without a second style set.
 
+use crate::model::ThemeMode;
 use iced::widget::{button, checkbox, container, pick_list, progress_bar, text_input};
 use iced::{Background, Border, Color, Theme};
 
@@ -24,6 +25,15 @@ pub const FONT_SIZE: f32 = 13.0;
 /// group from this, so the tick lines up with the setting on either.
 pub const FONT_CHOICES: [(&str, u16); 3] = [("Small", 12), ("Medium", 13), ("Large", 15)];
 
+/// The View > Theme entries: the label and the mode it stands for. Both menu
+/// surfaces (`ui::menu` in-window, `macos_menu` native) build their Theme
+/// group from this, so the tick lines up with the setting on either.
+pub const THEME_CHOICES: [(&str, ThemeMode); 3] = [
+    ("System Default", ThemeMode::System),
+    ("Light", ThemeMode::Light),
+    ("Dark", ThemeMode::Dark),
+];
+
 /// The window scale factor for a View > Font choice: the ratio of the chosen
 /// size to the [`FONT_SIZE`] the layout was drawn at (12 -> 0.92, 13 -> 1.0,
 /// 15 -> 1.15). iced multiplies the whole interface by it, so text, the rows
@@ -37,6 +47,24 @@ pub fn ui_scale(font_size: u16) -> f32 {
         return 1.0;
     }
     (f32::from(font_size) / FONT_SIZE).clamp(0.5, 2.0)
+}
+
+/// The OS appearance right now, for View > Theme > System Default.
+///
+/// iced reports the system theme too, but only once a window exists —
+/// `iced::system::theme()` answers `Mode::None` before that — and a session
+/// that starts in System Default must paint the right palette on its first
+/// frame rather than flash light and correct itself. Flips after startup
+/// arrive through `iced::system::theme_changes`; this is the starting value.
+pub fn system_is_dark() -> bool {
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        matches!(dark_light::detect(), Ok(dark_light::Mode::Dark))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        false
+    }
 }
 
 pub fn is_dark(theme: &Theme) -> bool {
