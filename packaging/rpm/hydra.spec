@@ -1,4 +1,4 @@
-%{!?_version: %global _version 0.3.12}
+%{!?_version: %global _version 0.3.13}
 
 Name:           hydra
 Version:        %{_version}
@@ -149,6 +149,16 @@ fi
 %{_prefix}/lib64/mozilla/native-messaging-hosts/com.hydra.host.json
 
 %changelog
+* Tue Aug 25 2026 Javad Rajabzadeh <ja7ad@live.com> - 0.3.13-1
+- Add system theme support (System Default, Light, Dark) and View menu theme selector
+- Add option under Options -> Save To to disable automatic category subdirectories
+- Add Hebrew and Portuguese (Brazil) GUI localizations
+- Add dedicated features documentation portal (docs/features.html)
+- Improve adaptive connection handling and recovery under origin throttling (429/503 limits)
+- Respect file types configuration for background downloads in File Info dialog
+- Update German, Korean, and Hebrew translations; reorder language selection menu
+- Packaging and CI build improvements
+
 * Tue Aug 25 2026 Javad Rajabzadeh <ja7ad@live.com> - 0.3.12-1
 - Bump to version 0.3.12
 

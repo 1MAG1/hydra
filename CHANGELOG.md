@@ -5,6 +5,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [0.3.13] - 2026-08-25
+
+### Added
+
+- **System Theme Support & Theme Selector (`hydra-gui`)**: Added full OS system theme detection and dynamic appearance switching. Replaced the binary *View → Dark Mode* toggle with a *View → Theme* submenu offering *System Default*, *Light*, and *Dark* modes across both in-window and native macOS menu bars, with automatic migration from legacy dark mode settings.
+- **Configurable Category Subdirectory Creation (`hydra-gui`)**: Added an option under *Options → Save To* (*"Do not create category folders — save everything in the default folder"*) to allow users to disable automatic creation of per-category subdirectories (e.g., `Downloads/Video`, `Downloads/Documents`) and save all new downloads directly into the general download directory.
+- **Hebrew & Portuguese (Brazil) Localizations (`hydra-gui`)**: Added full language catalogs for Hebrew (`he`) and Portuguese (Brazil) (`pt-BR`), bringing total supported GUI locales to 13.
+- **Dedicated Features Documentation Portal (`docs/features.html`, `docs/`)**: Added a comprehensive web features showcase page highlighting Hydra's segmented download engine, dynamic concurrency scaling, browser extensions, quotas, and CLI/FFI capabilities, accompanied by optimized visual assets and an `llms.txt` index.
+
+### Fixed
+
+- **Adaptive Connection Handling & Recovery under Origin Throttling (`hya-core`, `hya-net`)**: Prevented catastrophic slowdowns and excessive round-trips when servers enforce strict connection limits or return HTTP 429 (Too Many Requests) / 503 errors. Added `conn_ceiling` in `Scheduler` to size range shares against reachable concurrency rather than total budget; added `clamp_max` to `ConcurrencyRamp` to halt upward doubling toward refused levels; implemented exponential backoff on upward recovery probes; and floored concurrency ceilings at the windowed peak of active streaming connections.
+- **File Type Filtering for Background Downloads in File Info Dialog (`hydra-gui`)**: Fixed the *Download File Info* dialog prefetching behavior to respect the *Options → File types* configuration. Files with unlisted extensions will no longer trigger automatic background data fetching while the dialog is open unless explicitly started or manually enabled, falling back to lightweight link probing.
+
+### Changed & Refactored
+
+- **GUI Language Selection Menu Ordering (`hydra-gui`)**: Alphabetized language choices in the GUI settings and View menus by their English language names.
+- **Localization Updates (`hydra-gui`)**: Updated and completed translation strings for German (`de`), Korean (`ko`), and Hebrew (`he`), and synchronized new theme mode and category directory settings across all supported locales.
+
+---
+
 ## [0.3.12] - 2026-08-24
 
 ### Added
