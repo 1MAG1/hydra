@@ -27,9 +27,15 @@ static BUILTIN: &[(&str, &str, &str)] = &[
     ("es", "Español", include_str!("../assets/locale/es.json")),
     ("fa", "فارسی", include_str!("../assets/locale/fa.json")),
     ("fr", "Français", include_str!("../assets/locale/fr.json")),
+    ("he", "עברית", include_str!("../assets/locale/he.json")),
     ("ja", "日本語", include_str!("../assets/locale/ja.json")),
     ("ko", "한국어", include_str!("../assets/locale/ko.json")),
     ("nl", "Nederlands", include_str!("../assets/locale/nl.json")),
+    (
+        "pt-BR",
+        "Português (Brasil)",
+        include_str!("../assets/locale/pt-BR.json"),
+    ),
     ("ru", "Русский", include_str!("../assets/locale/ru.json")),
     ("zh", "简体中文", include_str!("../assets/locale/zh.json")),
 ];
