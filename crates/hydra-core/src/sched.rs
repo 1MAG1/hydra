@@ -367,6 +367,27 @@ impl Scheduler {
         self.conns.iter().filter(|c| c.busy()).count()
     }
 
+    /// Connections that count against `active_limit` right now: busy, or already
+    /// holding queued work one tick from starting.
+    ///
+    /// This is what "dormant" is measured against, not connection index. The
+    /// budget is a COUNT of connections in play, not a privilege attached to
+    /// low indices — a connection above `active_limit` that is still busy is
+    /// not "excess", it is simply already spending the budget it was granted
+    /// when it was admitted, and one at any index is free to spend it once
+    /// something else stops.
+    ///
+    /// Queued connections are counted for the same reason `on_bytes` and
+    /// divergence repair must not both admit into the same headroom in one
+    /// tick: a connection with `queued` set has already been promised a slot,
+    /// even though it has not opened a socket yet.
+    fn admitted(&self) -> usize {
+        self.conns
+            .iter()
+            .filter(|c| c.busy() || c.queued.is_some())
+            .count()
+    }
+
     /// Start with only `n` connections active, ramping up from there.
     pub fn with_active_limit(mut self, n: usize) -> Self {
         self.set_active_limit(n);
@@ -896,13 +917,47 @@ impl Scheduler {
 
         // ---- work-conserving assignment (Lemma 2) -------------------------
         //
-        // A connection above the active limit is DORMANT: it is skipped here, so it
-        // is never given work and never opens a socket. This is the whole mechanism
-        // behind the in-band concurrency ramp — raising the limit makes the next
-        // tick admit the connection through this ordinary path, and lowering it
-        // lets an already-busy connection finish its range and then go quiet, with
-        // no cancellation and no wasted bytes.
-        for j in 0..self.conns.len().min(self.active_limit) {
+        // A connection is DORMANT once the budget is spent: it is skipped here, so
+        // it is never given work and never opens a socket. This is the whole
+        // mechanism behind the in-band concurrency ramp — raising the limit makes
+        // the next tick admit a connection through this ordinary path, and
+        // lowering it lets an already-busy connection finish its range and then go
+        // quiet, with no cancellation and no wasted bytes.
+        //
+        // The budget is spent by COUNT (`admitted`), not by index. All connections
+        // are dispatched at once — a fixed `-x N`, or the opening burst before any
+        // refusal has taught the transfer anything — so which ones an origin
+        // happens to grant is not correlated with index at all. Gating eligibility
+        // on `j < active_limit` let a refusal-driven cap retire a connection the
+        // origin was actively serving just because its index was too high, while
+        // leaving a lower-index connection that was cooling down from its OWN
+        // refusal as the only thing still allowed to pick up new work — collapsing
+        // realised concurrency below what the origin would serve, which is the one
+        // thing this cap exists to prevent. See `admitted` for what counts.
+        // Candidates are visited proven connections first, unproven ones after —
+        // "proven" meaning `rate_est > 0.0`, which only a connection that has
+        // actually delivered bytes on this source carries; a reclaim resets it to
+        // zero. Plain index order reopens the exact bug above from the other
+        // side: the moment one of two settled, working connections finishes a
+        // chunk and goes idle for the one tick before this loop re-admits it, it
+        // is indistinguishable BY INDEX from a connection that has never
+        // delivered a byte and is only here because its OWN refusal cooldown
+        // happens to have expired on the same tick. Whichever has the lower
+        // index wins the freed slot — sometimes the untested one — and an origin
+        // that only ever grants the same two connections now refuses the
+        // newcomer, while the settled connection that actually earned the slot
+        // sits idle for another tick waiting its turn. Repeated over a transfer's
+        // life this is exactly the churn the ceiling exists to stop, just paid
+        // in requests instead of in stranded concurrency.
+        let mut order: Vec<usize> = (0..self.conns.len())
+            .filter(|&j| self.conns[j].rate_est > 0.0)
+            .collect();
+        order.extend((0..self.conns.len()).filter(|&j| self.conns[j].rate_est <= 0.0));
+        let mut admitted = self.admitted();
+        for j in order {
+            if admitted >= self.active_limit {
+                break;
+            }
             if self.conns[j].busy() || now < self.conns[j].setup_end {
                 continue;
             }
@@ -914,18 +969,33 @@ impl Scheduler {
             //
             // `u64::MAX` — take everything — is right once concurrency has settled:
             // maximal ranges mean the fewest requests, which is the whole point of
-            // range scheduling. It is wrong while the ramp is still growing, because
-            // the first idle connection would swallow the reserve that connections
-            // admitted later are supposed to pick up, and they would be left to
-            // STEAL from it. That is a repair per admission, and the repair
-            // undoes a split that had just been made for no reason.
+            // range scheduling. It is wrong while more admissions are still
+            // expected, because the first idle connection would swallow the
+            // reserve that connections admitted later are supposed to pick up, and
+            // they would be left to STEAL from it. That is a repair per admission,
+            // and the repair undoes a split that had just been made for no reason.
             //
-            // So while ramping, hand out a budget-sized share and leave the rest.
-            // The cost of being wrong in this direction is one extra request later —
-            // now nearly free on a pooled connection — against one repair per
-            // admitted connection the other way.
+            // So while room remains, hand out a budget-sized share and leave the
+            // rest. The cost of being wrong in this direction is one extra request
+            // later — now nearly free on a pooled connection — against one repair
+            // per admitted connection the other way.
+            //
+            // Whether room remains is `admitted` — a COUNT of connections actually
+            // in play — not `active_limit < ceiling`. The throttle path sets both
+            // to the same value in one step (see the transfer loop), which a
+            // comparison between the two can never see as "still growing" even
+            // though `admitted` can be well below `active_limit` right after that
+            // step: two connections were busy when the cap was learned, the
+            // budget just widened to four, and the other two seats are still
+            // empty because the connections that will fill them are cooling down
+            // from the refusal that taught the cap. `admitted` sees that room and
+            // `active_limit < ceiling` does not, so the first of the two survivors
+            // to finish took the entire remainder — twice, once per survivor, on
+            // every uneven finish for the rest of the transfer, since each grab
+            // provokes exactly the steal this branch exists to avoid. `+ 1`
+            // because `j` itself has not been counted into `admitted` yet.
             let ceiling = self.ceiling();
-            let want = if self.active_limit < ceiling {
+            let want = if admitted + 1 < self.active_limit {
                 let remaining = self.unassigned.total();
                 let share = remaining / ceiling as u64;
                 share.max(STEAL_QUANTUM * 4)
@@ -935,6 +1005,7 @@ impl Scheduler {
             if let Some(r) = self.unassigned.take_front(want) {
                 self.start(j, r, now);
                 acts.push(Action::Request { conn: j, range: r });
+                admitted += 1;
                 continue;
             }
             // Nothing unassigned: steal from the worst laggard.
@@ -992,6 +1063,7 @@ impl Scheduler {
                         conn: j,
                         range: stolen,
                     });
+                    admitted += 1;
                     self.stats.repairs += 1;
                 }
             }
@@ -1185,11 +1257,17 @@ impl Scheduler {
         // the collapse has not yet dragged down.
         let mut victim: Option<(usize, crate::detect::Health, f64)> = None;
         let mut taker: Option<(usize, f64)> = None;
-        // Dormant connections (above the active limit) are excluded from BOTH
-        // roles. As taker, admitting one would open a socket the concurrency ramp
-        // has not yet justified — quietly defeating the limit through the repair
-        // path. As victim, one cannot be: it holds no range.
-        for j in 0..self.conns.len().min(self.active_limit) {
+        // A dormant connection — idle, and not already counted in `admitted` —
+        // may only become a taker if the budget has room for it: as taker,
+        // admitting one would open a socket the concurrency ramp, or a refusal
+        // that has capped the transfer, has not justified — quietly defeating the
+        // limit through the repair path. An already-busy connection spends no new
+        // budget by taking on queued work, so it is never gated on room. Index
+        // plays no part: the budget is a count (`admitted`), not a privilege
+        // attached to low indices — see `admitted` for why that distinction is
+        // the fix, not decoration.
+        let room = self.admitted() < self.active_limit;
+        for j in 0..self.conns.len() {
             let c = &self.conns[j];
             if now < c.setup_end || now < self.sources[c.source].suspended_until {
                 continue;
@@ -1200,13 +1278,18 @@ impl Scheduler {
             } else {
                 crate::detect::Health::Healthy
             };
+            // As victim a connection needs no room check: it already holds a
+            // range, so it is not being newly admitted, wherever its index falls.
             if c.busy() && victim.map(|(_, vh, ve)| (h, e) > (vh, ve)).unwrap_or(true) {
                 victim = Some((j, h, e));
             }
             // A degraded connection must never be chosen as the TAKER: handing
             // work to a collapsing connection is the failure mode this whole
             // mechanism exists to prevent.
-            if !h.is_suspect_or_worse() && taker.map(|(_, te)| e < te).unwrap_or(true) {
+            if !h.is_suspect_or_worse()
+                && (c.busy() || room)
+                && taker.map(|(_, te)| e < te).unwrap_or(true)
+            {
                 taker = Some((j, e));
             }
         }
