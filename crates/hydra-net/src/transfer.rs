@@ -544,7 +544,15 @@ pub async fn run_transfer_cancellable<C: Connector>(
                     if now >= cap_settled_until {
                         let floor = streaming.max(served_peak_cur).max(served_peak_prev).max(1);
                         throttle_cap = (throttle_cap / 2).max(floor).min(sched.n_conns().max(1));
-                        cap_settled_until = now + secs + sched.worst_delta().max(0.05);
+                        // Exactly `secs`, matching the cooldown `on_conn_error` just
+                        // gave these connections: their retry is the next legitimate
+                        // round, and it must not arrive before the gate reopens. An
+                        // extra margin here (previously `+ sched.worst_delta()`) made
+                        // the gate outlast that cooldown, so the retry burst that was
+                        // supposed to confirm or correct this reduction was silently
+                        // dropped, and the ceiling was left wherever the first,
+                        // least-informed round put it.
+                        cap_settled_until = now + secs;
                         if trace_errors {
                             eprintln!(
                                 "[trace] t={now:.2} throttled: {streaming} delivering, \

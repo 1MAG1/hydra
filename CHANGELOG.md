@@ -12,7 +12,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **System Theme Support & Theme Selector (`hydra-gui`)**: Added full OS system theme detection and dynamic appearance switching. Replaced the binary *View → Dark Mode* toggle with a *View → Theme* submenu offering *System Default*, *Light*, and *Dark* modes across both in-window and native macOS menu bars, with automatic migration from legacy dark mode settings.
 - **Configurable Category Subdirectory Creation (`hydra-gui`)**: Added an option under *Options → Save To* (*"Do not create category folders — save everything in the default folder"*) to allow users to disable automatic creation of per-category subdirectories (e.g., `Downloads/Video`, `Downloads/Documents`) and save all new downloads directly into the general download directory.
 - **Hebrew & Portuguese (Brazil) Localizations (`hydra-gui`)**: Added full language catalogs for Hebrew (`he`) and Portuguese (Brazil) (`pt-BR`), bringing total supported GUI locales to 13.
-- **Dedicated Features Documentation Portal (`docs/features.html`, `docs/`)**: Added a comprehensive web features showcase page highlighting Hydra's segmented download engine, dynamic concurrency scaling, browser extensions, quotas, and CLI/FFI capabilities, accompanied by optimized visual assets and an `llms.txt` index.
 
 ### Fixed
 
