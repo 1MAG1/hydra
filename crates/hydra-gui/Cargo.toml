@@ -88,12 +88,6 @@ ksni = { version = "0.3", default-features = false, features = [
     "async-io",
     "blocking",
 ] }
-# Tray glyph color: white on dark panels, black on light — the same
-# system-theme pick the Windows backend makes, but through the XDG desktop
-# portal (org.freedesktop.appearance color-scheme), plus its change stream
-# so the glyph re-tints live when the theme flips. Default features select
-# zbus/async-io, the same zbus flavor ksni pins — never the tokio one.
-dark-light = "3"
 # "Hide from taskbar" on X11: the _NET_WM_STATE_SKIP_TASKBAR hint, which
 # winit does not expose. Default features only — the pure-Rust connection,
 # no C dependency. Must stay on the major winit itself uses (winit 0.30 ->
@@ -125,6 +119,21 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSWindow",
 ] }
 
+# System light/dark detection, on every platform the GUI ships a desktop
+# for. Two readers: the tray glyph — white on dark panels, black on light,
+# since Windows has no template-icon mechanism — and View > Theme > System
+# Default, which paints the first frame from it because iced only learns the
+# OS appearance once a window exists (`iced::system::theme` answers
+# `Mode::None` before that). Live flips after startup come from iced, not
+# from here.
+#
+# On Linux the answer comes from the XDG desktop portal
+# (org.freedesktop.appearance color-scheme), plus a change stream that
+# re-tints the tray glyph. Default features, deliberately: they select
+# zbus/async-io, the same zbus flavor ksni pins — never the tokio one.
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+dark-light = "3"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 # "Launch on startup" is an HKCU\...\CurrentVersion\Run value:
 # no console flash at logon, and Task Manager's Startup page
@@ -134,9 +143,6 @@ winreg = "0.56"
 # so blake3's C NEON path cannot build — the pure-Rust implementation is
 # feature-unified in for Windows targets only (the GUI never bulk-hashes).
 blake3 = { version = "1", features = ["pure"] }
-# System light/dark detection: Windows has no template-icon mechanism, so
-# the tray picks its white or black monochrome variant from the OS theme.
-dark-light = "3"
 
 [lints]
 workspace = true

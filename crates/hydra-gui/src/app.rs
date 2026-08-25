@@ -6,7 +6,7 @@
 use crate::engine::{self, Cmd, StartSpec};
 use crate::model::{
     self, categorize, ConfigFile, DlId, DlQuota, DlState, DownloadItem, ProxyMode, SiteLogin,
-    StateFile,
+    StateFile, ThemeMode,
 };
 use crate::sounds;
 use crate::{fmt, i18n};
@@ -101,7 +101,7 @@ pub enum MenuAction {
     Extensions,
     HideCategories,
     ArrangeBy(SortKey),
-    ToggleDark,
+    SetTheme(ThemeMode),
     FontSize(u16),
     Language(String),
     HomePage,
@@ -151,7 +151,7 @@ impl MenuAction {
             MenuAction::Extensions => "extensions".into(),
             MenuAction::HideCategories => "hide_cats".into(),
             MenuAction::ArrangeBy(k) => format!("arrange:{k:?}"),
-            MenuAction::ToggleDark => "dark".into(),
+            MenuAction::SetTheme(m) => format!("theme:{m:?}"),
             MenuAction::FontSize(s) => format!("font:{s}"),
             MenuAction::Language(l) => format!("lang:{l}"),
             MenuAction::HomePage => "homepage".into(),
@@ -188,6 +188,14 @@ impl MenuAction {
             };
             return Some(MenuAction::ArrangeBy(key));
         }
+        if let Some(m) = id.strip_prefix("theme:") {
+            let mode = match m {
+                "Light" => ThemeMode::Light,
+                "Dark" => ThemeMode::Dark,
+                _ => ThemeMode::System,
+            };
+            return Some(MenuAction::SetTheme(mode));
+        }
         if let Some(s) = id.strip_prefix("font:") {
             return s.parse().ok().map(MenuAction::FontSize);
         }
@@ -220,7 +228,6 @@ impl MenuAction {
             "options" => MenuAction::Options,
             "extensions" => MenuAction::Extensions,
             "hide_cats" => MenuAction::HideCategories,
-            "dark" => MenuAction::ToggleDark,
             "homepage" => MenuAction::HomePage,
             "about" => MenuAction::About,
             "permissions" => MenuAction::Permissions,
@@ -491,6 +498,9 @@ pub enum Message {
     /// glides each item's displayed progress toward the real fraction.
     AnimTick,
     NativeMenu(String),
+    /// The OS switched between light and dark appearance (or the startup
+    /// query answered). Only View > Theme > System Default acts on it.
+    SystemTheme(iced::theme::Mode),
     // main window chrome
     MenuOpen(MenuBarKind),
     /// Moving the pointer over a menu-bar title while another menu is already
@@ -808,6 +818,11 @@ pub struct App {
     pub cursor_cell: std::sync::Arc<crate::ui::probe::CursorCell>,
     /// Live results shown in the Permissions window.
     pub perm_status: crate::windows::permissions::PermStatus,
+    /// The OS appearance: read at startup (`theme::system_is_dark`) and kept
+    /// current by the `system::theme_changes` subscription. Only the System
+    /// Default entry of View > Theme paints from it, but it is tracked
+    /// whatever the setting says, so switching to it needs no round trip.
+    pub system_dark: bool,
     /// Main window origin/size on screen, tracked so dialogs open centred
     /// over the application rather than the monitor.
     pub main_pos: Option<Point>,
@@ -901,7 +916,7 @@ impl App {
     #[cfg(target_os = "macos")]
     fn native_menu_state(&self) -> crate::macos_menu::MenuState {
         crate::macos_menu::MenuState {
-            dark_mode: self.cfg.settings.dark_mode,
+            theme_mode: self.cfg.settings.theme(),
             show_categories: self.cfg.settings.show_categories,
             font_size: self.cfg.settings.font_size,
             language: {
@@ -2157,7 +2172,7 @@ impl App {
                     // menu bar to install into.
                     crate::macos_dock::sync(self.cfg.settings.hide_from_taskbar, true);
                     let state = crate::macos_menu::MenuState {
-                        dark_mode: self.cfg.settings.dark_mode,
+                        theme_mode: self.cfg.settings.theme(),
                         show_categories: self.cfg.settings.show_categories,
                         font_size: self.cfg.settings.font_size,
                         language: self.cfg.language.clone().unwrap_or_else(|| "en".into()),
@@ -2366,6 +2381,17 @@ impl App {
                     Some(a) => self.update(Message::Menu(a)),
                     None => Task::none(),
                 }
+            }
+            Message::SystemTheme(mode) => {
+                // `Mode::None` is "the platform did not say" — iced answers
+                // it until a window exists, and it must not overwrite the
+                // appearance read at startup.
+                match mode {
+                    iced::theme::Mode::Light => self.system_dark = false,
+                    iced::theme::Mode::Dark => self.system_dark = true,
+                    iced::theme::Mode::None => {}
+                }
+                Task::none()
             }
             Message::MenuOpen(kind) => {
                 self.open_menu = if self.open_menu == Some(kind) {
@@ -4064,10 +4090,16 @@ impl App {
                 Task::none()
             }
             MenuAction::ArrangeBy(key) => self.update(Message::SortBy(key)),
-            MenuAction::ToggleDark => {
-                self.cfg.settings.dark_mode = !self.cfg.settings.dark_mode;
-                self.save_config();
+            MenuAction::SetTheme(mode) => {
+                let changed = self.cfg.settings.theme() != mode;
+                self.cfg.settings.theme_mode = Some(mode);
+                // Like View > Font: even a click on the mode already in use
+                // has to be written back to the menu, because muda unticked
+                // it on the way in.
                 self.sync_native_menu();
+                if changed {
+                    self.save_config();
+                }
                 Task::none()
             }
             MenuAction::FontSize(size) => {

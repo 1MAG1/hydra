@@ -180,9 +180,17 @@ pub fn entries(kind: MenuBarKind, app: &App) -> Vec<Entry> {
                 .map(|(l, k)| Entry::item(tr(l), MenuAction::ArrangeBy(k)))
                 .collect(),
             ),
-            Entry::item(tr("Dark Mode support"), MenuAction::ToggleDark)
-                .check(app.cfg.settings.dark_mode)
-                .sep(),
+            Entry::sub(
+                tr("Theme"),
+                crate::theme::THEME_CHOICES
+                    .into_iter()
+                    .map(|(l, m)| {
+                        Entry::item(tr(l), MenuAction::SetTheme(m))
+                            .check(app.cfg.settings.theme() == m)
+                    })
+                    .collect(),
+            )
+            .sep(),
             Entry::sub(
                 tr("Font"),
                 crate::theme::FONT_CHOICES

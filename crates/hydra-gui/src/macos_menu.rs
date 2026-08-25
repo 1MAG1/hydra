@@ -19,7 +19,7 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu
 /// The toggle/selection state the menu bar must display.
 #[derive(Clone, Debug, Default)]
 pub struct MenuState {
-    pub dark_mode: bool,
+    pub theme_mode: crate::model::ThemeMode,
     pub show_categories: bool,
     pub font_size: u16,
     pub language: String,
@@ -33,8 +33,8 @@ struct Installed {
     /// these wrappers, and a language switch rebuilds from here.
     _menu: Menu,
     hide_categories: CheckMenuItem,
-    dark_mode: CheckMenuItem,
     speed_limiter: CheckMenuItem,
+    themes: Vec<(crate::model::ThemeMode, CheckMenuItem)>,
     fonts: Vec<(u16, CheckMenuItem)>,
     languages: Vec<(String, CheckMenuItem)>,
 }
@@ -157,8 +157,14 @@ pub fn reinstall(state: &MenuState, queues: &[String], languages: &[String]) {
         let _ = arrange.append(&item(label, MenuAction::ArrangeBy(key)));
     }
     let _ = view.append(&arrange);
-    let dark_mode = check("Dark Mode support", MenuAction::ToggleDark, state.dark_mode);
-    let _ = view.append(&dark_mode);
+    let theme_m = Submenu::new(tr("Theme"), true);
+    let mut themes = Vec::new();
+    for (label, mode) in crate::theme::THEME_CHOICES {
+        let it = check(label, MenuAction::SetTheme(mode), state.theme_mode == mode);
+        let _ = theme_m.append(&it);
+        themes.push((mode, it));
+    }
+    let _ = view.append(&theme_m);
     let font = Submenu::new(tr("Font"), true);
     let mut fonts = Vec::new();
     for (label, size) in crate::theme::FONT_CHOICES {
@@ -199,8 +205,8 @@ pub fn reinstall(state: &MenuState, queues: &[String], languages: &[String]) {
         *c.borrow_mut() = Some(Installed {
             _menu: menu,
             hide_categories,
-            dark_mode,
             speed_limiter,
+            themes,
             fonts,
             languages: langs,
         });
@@ -226,8 +232,10 @@ pub fn sync(state: &MenuState) -> bool {
         installed
             .hide_categories
             .set_checked(!state.show_categories);
-        installed.dark_mode.set_checked(state.dark_mode);
         installed.speed_limiter.set_checked(state.speed_limiter);
+        for (mode, item) in &installed.themes {
+            item.set_checked(*mode == state.theme_mode);
+        }
         for (size, item) in &installed.fonts {
             item.set_checked(*size == state.font_size);
         }

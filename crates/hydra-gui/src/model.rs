@@ -232,6 +232,18 @@ pub fn category_dir(cats: &[CategoryDef], cat: Option<&str>, flat: bool) -> Opti
     }
 }
 
+/// Which palette the interface paints with (View > Theme).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum ThemeMode {
+    /// Follow the OS appearance, and keep following it: a desktop that
+    /// switches to dark at sunset takes the interface with it, with no visit
+    /// to the menu.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ProxyMode {
     None,
@@ -339,7 +351,14 @@ pub struct Settings {
     // Sounds
     pub sounds: Vec<SoundRow>,
     // View state
-    pub dark_mode: bool,
+    /// Light, Dark, or System (follow the OS) — View > Theme. `None` marks a
+    /// config written before the setting existed; [`load_config`] resolves it
+    /// from the legacy `dark_mode` flag, so it is `Some` while running.
+    pub theme_mode: Option<ThemeMode>,
+    /// The old View > Dark Mode support checkbox. Read once at load, folded
+    /// into `theme_mode`, and dropped from the file on the next save — an
+    /// upgrade must not silently move a user off the palette they picked.
+    pub dark_mode: Option<bool>,
     pub show_categories: bool,
     pub font_size: u16,
     /// Global cap from Downloads > Speed Limiter, bytes/sec.
@@ -412,7 +431,8 @@ impl Default for Settings {
             .iter()
             .map(|e| SoundRow { event: e.to_string(), enabled: false, file: String::new() })
             .collect(),
-            dark_mode: false,
+            theme_mode: None,
+            dark_mode: None,
             show_categories: true,
             font_size: 13,
             global_speed_limit: None,
@@ -420,6 +440,15 @@ impl Default for Settings {
             column_widths: vec![],
             window_size: None,
         }
+    }
+}
+
+impl Settings {
+    /// The palette View > Theme is set to. A config that predates the
+    /// setting reads as [`ThemeMode::System`] here only if it also carried no
+    /// `dark_mode` flag — [`load_config`] folds that one in first.
+    pub fn theme(&self) -> ThemeMode {
+        self.theme_mode.unwrap_or_default()
     }
 }
 
@@ -619,7 +648,23 @@ pub fn load_config() -> ConfigFile {
     if cfg.settings.font_size == 0 {
         cfg.settings = Settings::default();
     }
+    migrate_theme_mode(&mut cfg.settings);
     cfg
+}
+
+/// View > Theme replaced the Dark Mode checkbox: a config written before it
+/// carries only `dark_mode`, and that pick stands. Only a config with neither
+/// key — a fresh install — starts out following the OS. The legacy key is
+/// dropped either way, so the next save writes just `theme_mode`.
+fn migrate_theme_mode(s: &mut Settings) {
+    if s.theme_mode.is_none() {
+        s.theme_mode = Some(match s.dark_mode {
+            Some(true) => ThemeMode::Dark,
+            Some(false) => ThemeMode::Light,
+            None => ThemeMode::System,
+        });
+    }
+    s.dark_mode = None;
 }
 
 pub fn save_config(cfg: &ConfigFile) {
@@ -789,6 +834,31 @@ mod tests {
                 dir: "/dl/Video".into(),
             },
         ]
+    }
+
+    #[test]
+    fn theme_mode_takes_over_from_the_dark_mode_flag() {
+        let mut old: Settings = toml::from_str("dark_mode = true").unwrap();
+        migrate_theme_mode(&mut old);
+        assert_eq!(old.theme(), ThemeMode::Dark);
+        // The flag is gone from the file after the next save.
+        assert_eq!(old.dark_mode, None);
+        assert!(!toml::to_string(&old).unwrap().contains("dark_mode"));
+
+        let mut old: Settings = toml::from_str("dark_mode = false").unwrap();
+        migrate_theme_mode(&mut old);
+        assert_eq!(old.theme(), ThemeMode::Light);
+
+        // Neither key: a fresh install follows the OS.
+        let mut fresh: Settings = toml::from_str("").unwrap();
+        migrate_theme_mode(&mut fresh);
+        assert_eq!(fresh.theme(), ThemeMode::System);
+
+        // A hand-edited config carrying both: the explicit setting wins.
+        let mut both: Settings =
+            toml::from_str("theme_mode = \"System\"\ndark_mode = true").unwrap();
+        migrate_theme_mode(&mut both);
+        assert_eq!(both.theme(), ThemeMode::System);
     }
 
     #[test]

@@ -146,6 +146,7 @@ fn boot() -> (App, Task<Message>) {
         perm_status: windows::permissions::PermStatus::default(),
         main_pos: None,
         main_size: iced::Size::new(0.0, 0.0),
+        system_dark: theme::system_is_dark(),
     };
 
     // Column widths from config, defaults otherwise.
@@ -277,7 +278,12 @@ fn title(app: &App, id: window::Id) -> String {
 }
 
 fn theme_of(app: &App, _id: window::Id) -> Theme {
-    if app.cfg.settings.dark_mode {
+    let dark = match app.cfg.settings.theme() {
+        model::ThemeMode::System => app.system_dark,
+        model::ThemeMode::Light => false,
+        model::ThemeMode::Dark => true,
+    };
+    if dark {
         Theme::Dark
     } else {
         Theme::Light
@@ -310,6 +316,11 @@ fn subscription(app: &App) -> Subscription<Message> {
             1
         }))
         .map(|_| Message::Tick),
+        // OS light/dark flips (View > Theme > System Default); the palette
+        // in force at startup is read directly, see `theme::system_is_dark`.
+        // Subscribed whatever the setting is, so switching to System Default
+        // never has to wait for the next flip to catch up with the desktop.
+        iced::system::theme_changes().map(Message::SystemTheme),
         window::close_events().map(Message::WindowClosed),
         window::close_requests().map(Message::WindowCloseRequested),
         // Modifier state for Cmd/Ctrl/Shift multi-selection, and global
