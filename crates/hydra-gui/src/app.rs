@@ -279,6 +279,9 @@ pub struct FileInfoState {
     /// New-download dialog (auto-started in the background, Cancel removes
     /// the item) vs Properties on an existing entry.
     pub is_new: bool,
+    /// The file type is not in Options > File types, so nothing may start
+    /// on its own: the background checkbox reads off until the user ticks it.
+    pub bg_blocked: bool,
     /// Fields the user edited; the background probe stops auto-filling them.
     pub name_touched: bool,
     pub cat_touched: bool,
@@ -2837,27 +2840,10 @@ impl App {
                         login: d.auth.clone().map(|a| a.0).unwrap_or_default(),
                         password: d.auth.clone().map(|a| a.1).unwrap_or_default(),
                         cookies: d.cookies.clone().unwrap_or_default(),
+                        bg_blocked: !self.auto_start_type(id),
                         ..FileInfoState::default()
                     };
-                    // Probes AND starts pulling bytes while this dialog
-                    // is open (optional via the dialog's own checkbox);
-                    // Start Download only reveals the progress.
-                    let bg = if self.cfg.settings.bg_download {
-                        self.start_download(id, false)
-                    } else {
-                        // Nothing is fetching behind the dialog, so nothing
-                        // would answer what this file is called or how big it
-                        // is: the fields would keep whatever the URL implied
-                        // until the user pressed Start. That is wrong for any
-                        // link whose name is not in its own path — a redirector
-                        // (`href.li/?<url>`) reads as `index.html` — so ask the
-                        // network the question the transfer would have asked.
-                        let ua = self.cfg.settings.user_agent.clone();
-                        let url = self.item(id).map(|d| d.url.clone()).unwrap_or_default();
-                        Task::perform(engine::probe_link(url, ua), move |meta| {
-                            Message::InfoProbed(id, meta)
-                        })
-                    };
+                    let bg = self.file_info_prefetch(id);
                     Task::batch([close, self.open_window(WinKind::FileInfo(id)), bg])
                 } else {
                     Task::batch([close, self.start_download(id, true)])
@@ -2928,6 +2914,9 @@ impl App {
                 self.save_config();
                 let dl = self.file_info.dl;
                 if self.file_info.is_new {
+                    // Ticking the box by hand is the user overruling the
+                    // file-type gate for this one download.
+                    self.file_info.bg_blocked = false;
                     let active = self.item(dl).map(|d| d.state.is_active()).unwrap_or(false);
                     if b && !active {
                         return self.start_download(dl, false);
@@ -3830,9 +3819,10 @@ impl App {
                         is_new: true,
                         url: d.url.clone(),
                         name_touched: true,
+                        bg_blocked: !self.auto_start_type(id),
                         ..FileInfoState::default()
                     };
-                    let bg = self.start_download(id, false);
+                    let bg = self.file_info_prefetch(id);
                     Task::batch([close, self.open_window(WinKind::FileInfo(id)), bg])
                 } else {
                     Task::batch([close, self.start_download(id, true)])
@@ -3846,6 +3836,35 @@ impl App {
                 window::close(id)
             }
         }
+    }
+
+    /// May this new download start on its own behind the File Info dialog?
+    /// Only for a file type still listed under Options > File types — a type
+    /// the user took out of that list waits for Start Download.
+    fn auto_start_type(&self, id: DlId) -> bool {
+        self.item(id)
+            .map(|d| auto_start_type(&d.file_name, &d.url, &self.cfg.settings.auto_types))
+            .unwrap_or(false)
+    }
+
+    /// What runs behind the new-download dialog: the transfer itself when
+    /// background download is on and the type is listed (Start Download then
+    /// only reveals the progress), otherwise a plain probe.
+    ///
+    /// Without either, nothing would answer what this file is called or how
+    /// big it is: the fields would keep whatever the URL implied until the
+    /// user pressed Start. That is wrong for any link whose name is not in
+    /// its own path — a redirector (`href.li/?<url>`) reads as `index.html`
+    /// — so ask the network the question the transfer would have asked.
+    fn file_info_prefetch(&mut self, id: DlId) -> Task<Message> {
+        if self.cfg.settings.bg_download && self.auto_start_type(id) {
+            return self.start_download(id, false);
+        }
+        let ua = self.cfg.settings.user_agent.clone();
+        let url = self.item(id).map(|d| d.url.clone()).unwrap_or_default();
+        Task::perform(engine::probe_link(url, ua), move |meta| {
+            Message::InfoProbed(id, meta)
+        })
     }
 
     fn parse_batch(&mut self) {
@@ -4449,13 +4468,7 @@ pub fn looks_downloadable(url: &str, auto_types: &str) -> bool {
     }
     let name = engine::file_name_from_url(url);
     if let Some((_, ext)) = name.rsplit_once('.') {
-        let ext = ext.to_ascii_uppercase();
-        // The list accepts commas, spaces or newlines as separators.
-        if auto_types
-            .split(|c: char| c.is_whitespace() || c == ',')
-            .filter(|t| !t.is_empty())
-            .any(|t| t.eq_ignore_ascii_case(&ext))
-        {
+        if type_listed(ext, auto_types) {
             return true;
         }
     }
@@ -4468,6 +4481,35 @@ pub fn looks_downloadable(url: &str, auto_types: &str) -> bool {
         "dl.google.com/",
     ];
     PATTERNS.iter().any(|p| url.contains(p))
+}
+
+/// Is this extension one of the types in Options > File types? The list
+/// accepts commas, spaces or newlines as separators.
+pub fn type_listed(ext: &str, auto_types: &str) -> bool {
+    auto_types
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|t| !t.is_empty())
+        .any(|t| t.eq_ignore_ascii_case(ext))
+}
+
+/// Auto-start policy for the "Download File Info" dialog. A type the user
+/// removed from Options > File types must not pull bytes on its own, so only
+/// a listed extension qualifies. A name that carries no extension at all
+/// cannot be judged by the list and stays allowed — the list filters types,
+/// it is not a whitelist of links.
+pub fn auto_start_type(file_name: &str, url: &str, auto_types: &str) -> bool {
+    let ext = file_name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_string())
+        .or_else(|| {
+            engine::file_name_from_url(url)
+                .rsplit_once('.')
+                .map(|(_, e)| e.to_string())
+        });
+    match ext {
+        Some(e) => type_listed(&e, auto_types),
+        None => true,
+    }
 }
 
 /// Directory comparison for collision checks: `/a/b` and `/a/b/` (or a `..`
@@ -4779,6 +4821,40 @@ mod tests {
             conns: vec![],
             status_line: String::new(),
         }
+    }
+
+    #[test]
+    fn auto_start_type_follows_the_file_types_list() {
+        const TYPES: &str = "ZIP, EXE MP4\nISO";
+        // Listed type: the dialog may pull bytes on its own.
+        assert!(auto_start_type(
+            "setup.exe",
+            "https://ex.com/setup.exe",
+            TYPES
+        ));
+        assert!(auto_start_type(
+            "disk.ISO",
+            "https://ex.com/disk.ISO",
+            TYPES
+        ));
+        // Removed from the list (no RAR here): nothing starts by itself.
+        assert!(!auto_start_type(
+            "IObit.Smart.Defrag.12.0.0.536.rar",
+            "https://dl.ex.com/soft/i/IObit.rar?123",
+            TYPES
+        ));
+        // The captured name wins over the URL's own suffix.
+        assert!(!auto_start_type(
+            "archive.rar",
+            "https://ex.com/download.zip",
+            TYPES
+        ));
+        // Nothing to judge: an extensionless link stays allowed.
+        assert!(auto_start_type(
+            "download",
+            "https://ex.com/download",
+            TYPES
+        ));
     }
 
     #[test]

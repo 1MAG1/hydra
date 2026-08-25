@@ -107,7 +107,9 @@ pub fn view(app: &App) -> El<'_> {
     ));
     if st.is_new {
         form = form.push(
-            checkbox(app.cfg.settings.bg_download)
+            // Off — and honestly so — for a file type that is not in
+            // Options > File types: nothing is running behind this dialog.
+            checkbox(app.cfg.settings.bg_download && !st.bg_blocked)
                 .label(tr("Download in background while choosing options"))
                 .on_toggle(Message::FiBgToggle)
                 .size(15.0)
