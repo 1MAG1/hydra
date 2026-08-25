@@ -1,0 +1,27 @@
+# Hydra Download Manager (HDM)
+
+> Hydra is an open-source, high-performance download manager, accelerator, and embeddable download engine for Windows, macOS, and Linux. It features adaptive concurrency, dynamic range stealing, statistical stall recovery, multi-source retrieval, direct positioned disk I/O, and a stable C ABI (`libhydra`).
+
+## Documentation & Pages
+
+- [Overview & Download](https://hydra.javad.dev/): Landing page with binary installers for Windows (x64/Arm64), macOS (Intel/Apple Silicon .dmg/.pkg), Linux (.deb/.rpm/tarball/PPA/COPR), and CLI installation scripts.
+- [Feature Deep Dive](https://hydra.javad.dev/features.html): Comprehensive architectural breakdown of all 28 core engine, storage, networking, embedding, and interface features.
+- [Changelog](https://hydra.javad.dev/changelog.html): Release history, version notes, new features, bug fixes, and breaking change tracking.
+- [Privacy Policy](https://hydra.javad.dev/privacy.html): Privacy commitments and permissions documentation for the desktop app and browser extensions.
+- [GitHub Repository](https://github.com/ja7ad/hydra): Source code, issue tracker, release assets, and contributor guidelines.
+
+## Architecture Highlights
+
+- **Adaptive Concurrency**: Dynamically balances connections and parallel HTTP/S/FTP streams across independent mirrors on the fly.
+- **Dynamic Range Stealing**: Automatically detects lagging connections and transparently reclaims unfinished byte ranges for faster peer connections.
+- **Statistical Stall Detection**: Uses statistical CUSUM estimators to flag and recover from degraded connections within seconds, long before socket timeouts trigger.
+- **Multi-Source Retrieval**: Downloads a single object simultaneously from multiple origins/mirrors, merging byte ranges directly into one file.
+- **Flat Resident Memory**: Direct positioned disk writes eliminate RAM buffering proportional to file size, maintaining constant ~8 MB RAM consumption from 10 MB to 10 TB.
+- **libhydra Native FFI**: Frozen C ABI (`hydra.h`) allowing seamless embedding into Go, Swift, Kotlin, Dart, Python, C#, and Zig.
+- **CLI & TUI Interfaces**: Scriptable terminal automation with `wget` and `curl` dialect compatibility, plus an interactive terminal queue manager.
+- **Browser Extensions**: Local WebSocket and native messaging bridges for Chrome, Edge, Firefox, and Safari.
+
+## Optional / Developer Resources
+
+- [C ABI Header (hydra.h)](https://github.com/ja7ad/hydra/blob/main/include/hydra.h): C declarations for embedding the download engine.
+- [Licensing Details](https://github.com/ja7ad/hydra/blob/main/LICENSING.md): Dual-licensed codebase (GPL-3.0-or-later for CLI/GUI application, MIT / Apache-2.0 for core libraries).
