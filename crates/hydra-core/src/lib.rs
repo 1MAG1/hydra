@@ -26,6 +26,7 @@ pub mod admission;
 pub mod detect;
 pub mod format;
 pub mod intervals;
+pub mod plan;
 pub mod ramp;
 pub mod sched;
 
@@ -36,5 +37,8 @@ pub use format::{
     Category, Detection, Evidence, Format,
 };
 pub use intervals::{IntervalSet, Range};
+pub use plan::{allocate, reserves, SourcePlan};
 pub use ramp::{ConcurrencyRamp, Ramp};
-pub use sched::{greedy_concurrency, Action, Capability, Scheduler, Source, Stats, STEAL_QUANTUM};
+pub use sched::{
+    greedy_concurrency, Action, Capability, Scheduler, Source, Stats, NO_PRIORITY, STEAL_QUANTUM,
+};

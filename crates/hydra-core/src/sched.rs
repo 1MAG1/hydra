@@ -73,6 +73,11 @@ pub enum Capability {
     Stream,
 }
 
+/// Preference value meaning "the publisher stated no preference".
+///
+/// The scale is RFC 5854's: 1 is best, larger is worse. See [`Source::priority`].
+pub const NO_PRIORITY: u32 = 999_999;
+
 #[derive(Clone, Debug)]
 pub struct Source {
     pub caps: Capability,
@@ -86,6 +91,37 @@ pub struct Source {
     pub suspended_until: f64,
     /// Consecutive stalls observed on this source; drives exponential backoff.
     pub consecutive_stalls: u32,
+    /// Publisher-stated preference: 1 is best, [`NO_PRIORITY`] means unranked.
+    ///
+    /// # Why this is a PRIOR and nothing more
+    ///
+    /// Everything else in this struct is measured. This is not: it is what a
+    /// mirror list (Metalink `priority`/`preference`, an RFC 6249 `Link ... pri=`)
+    /// says about a source before a single byte has moved. It is worth having
+    /// because the first split has to be made from *something*, and a
+    /// publisher's ranking is a better guess than an arbitrary order — it
+    /// usually encodes geography, bandwidth, and whether the host is a CDN or a
+    /// volunteer.
+    ///
+    /// It is worth having ONLY as a prior. A ranking cannot know that the
+    /// preferred mirror is currently overloaded, and this scheduler exists
+    /// precisely because that is discoverable at runtime and correctable for
+    /// free. So `priority` biases [`Scheduler::initial_split`] and nothing else:
+    /// once `gamma_est` and the per-connection rate estimates have real samples
+    /// in them, repair decisions are made on measurement, and a highly-ranked
+    /// mirror that is slow loses its work exactly as fast as an unranked one
+    /// would. Letting the prior persist would be strictly worse than having no
+    /// ranking at all, because it would defend the wrong source against
+    /// evidence.
+    pub priority: u32,
+    /// False once a source has been retired: it is out of the transfer for good.
+    ///
+    /// Distinct from `suspended_until`, which is a pause with an end. A retired
+    /// source is one a caller has replaced or abandoned — an unreachable host, a
+    /// mirror serving the wrong object — and it must never be handed work again,
+    /// however long the transfer runs. Conflating the two is how a dead mirror
+    /// gets retried every backoff for the life of the download.
+    pub live: bool,
 }
 
 impl Default for Source {
@@ -97,7 +133,35 @@ impl Default for Source {
             delta_est: 0.05,
             suspended_until: 0.0,
             consecutive_stalls: 0,
+            priority: NO_PRIORITY,
+            live: true,
         }
+    }
+}
+
+impl Source {
+    /// Relative share of the first split this source's ranking argues for.
+    ///
+    /// `1 / priority`, so rank 1 gets twice rank 2 and eight times rank 8, and
+    /// every unranked source gets the same small share as every other. The exact
+    /// curve is a judgement call and is deliberately gentle: it is a prior over a
+    /// quantity nobody has measured yet, and the correction costs one repair.
+    /// A steeper curve would concentrate the object on one mirror and turn the
+    /// publisher's guess into a single point of failure — the opposite of what a
+    /// mirror list is for.
+    pub fn priority_weight(&self) -> f64 {
+        1.0 / (self.priority.max(1) as f64)
+    }
+
+    /// May this source be given work right now?
+    ///
+    /// Retirement and suspension are separate conditions with one answer, and
+    /// every assignment path must ask the combined question. A path that checks
+    /// only `suspended_until` hands work to a retired mirror the moment its last
+    /// backoff expires — which is exactly the host a caller retired it for.
+    #[inline]
+    pub fn usable_at(&self, now: f64) -> bool {
+        self.live && now >= self.suspended_until
     }
 }
 
@@ -350,6 +414,14 @@ impl Scheduler {
     pub fn all_sources_suspended_until(&self, now: f64) -> Option<f64> {
         let mut earliest = f64::INFINITY;
         for s in &self.sources {
+            // A retired source is not "coming back at time t" — it is gone. Its
+            // (never-updated) `suspended_until` must not be reported as a time
+            // the transfer should wait for, or a caller that retires a dead
+            // mirror hears "everything resumes at 0.0" and treats real silence
+            // as planned.
+            if !s.live {
+                continue;
+            }
             if s.suspended_until <= now {
                 return None;
             }
@@ -656,6 +728,132 @@ impl Scheduler {
         for j in idxs {
             self.reclaim(j);
         }
+    }
+
+    // ------------------------------------------------------- source failover
+
+    /// Take a source out of the transfer permanently and reclaim its ranges.
+    ///
+    /// # Why permanent removal is a different operation from suspension
+    ///
+    /// [`suspend_source`](Self::suspend_source) is a pause: the source comes back
+    /// when the clock says so, which is right for a `429` or a transient stall.
+    /// Some failures are not pauses. A host that no longer resolves, a mirror
+    /// serving a different build, a TLS certificate that will not validate — none
+    /// of those get better on a timer, and retrying them costs a full setup every
+    /// backoff for the rest of the download.
+    ///
+    /// Retiring reclaims whatever the source's connections were holding, so those
+    /// bytes go back to the unassigned set and the surviving connections pick
+    /// them up through the ordinary work-conserving path. Nothing is stranded.
+    ///
+    /// Returns the connection indices that were freed, so the caller can tear
+    /// down their sockets. Retiring the LAST live source is permitted — a
+    /// transfer with nowhere left to fetch from has to be able to say so, and
+    /// [`live_sources`](Self::live_sources) returning zero is how the caller
+    /// learns it — but it is never something the scheduler does on its own.
+    pub fn retire_source(&mut self, src: usize) -> Vec<usize> {
+        let Some(s) = self.sources.get_mut(src) else {
+            return Vec::new();
+        };
+        if !s.live {
+            return Vec::new();
+        }
+        s.live = false;
+        let idxs: Vec<usize> = (0..self.conns.len())
+            .filter(|&j| self.conns[j].source == src)
+            .collect();
+        for &j in &idxs {
+            self.reclaim(j);
+        }
+        idxs
+    }
+
+    /// Point a retired source's connections at a replacement mirror.
+    ///
+    /// # The reserve bench
+    ///
+    /// This is what a mirror list is worth. A Metalink for a distribution image
+    /// commonly names fifteen to twenty mirrors, while politeness and physics
+    /// together justify perhaps four connections — so most of the list is not a
+    /// source, it is a *reserve*. Without a way to substitute, those reserves are
+    /// decoration: the transfer either survives on the mirrors it opened with or
+    /// it does not.
+    ///
+    /// Substituting in place, rather than growing the connection set, is what
+    /// keeps the aggregate socket count equal to what politeness authorised. The
+    /// replaced source's connections are reused as they are — same indices, same
+    /// detector state reset — so the caller's own per-connection bookkeeping
+    /// (hostnames for the progress view, per-connection targets) stays index-
+    /// aligned with the scheduler's.
+    ///
+    /// The replacement starts with the incoming `Source`'s estimates and a clean
+    /// stall count. Carrying the dead mirror's `gamma_est` across would price the
+    /// new host by the old one's failure and bias the very next repair against
+    /// it.
+    ///
+    /// Returns the connection indices now belonging to the replacement, empty if
+    /// `src` does not exist.
+    pub fn replace_source(&mut self, src: usize, mut replacement: Source) -> Vec<usize> {
+        if src >= self.sources.len() {
+            return Vec::new();
+        }
+        // Reclaim first: whatever the outgoing source held must go back to the
+        // unassigned set before its connections are relabelled, or those bytes
+        // are owned by a connection that will never be asked for them again.
+        let idxs: Vec<usize> = (0..self.conns.len())
+            .filter(|&j| self.conns[j].source == src)
+            .collect();
+        for &j in &idxs {
+            self.reclaim(j);
+        }
+        replacement.live = true;
+        replacement.consecutive_stalls = 0;
+        replacement.suspended_until = 0.0;
+        self.sources[src] = replacement;
+        for &j in &idxs {
+            let c = &mut self.conns[j];
+            // A fresh detector: the collapse grade belongs to the host that
+            // earned it, and inheriting it would have the new mirror graded
+            // Suspect before its first byte — which bars it from ever being
+            // chosen as a repair taker.
+            c.detector = crate::detect::CollapseDetector::default();
+            c.rate_est = 0.0;
+            c.stalled = false;
+        }
+        idxs
+    }
+
+    /// Sources that have not been retired.
+    pub fn live_sources(&self) -> usize {
+        self.sources.iter().filter(|s| s.live).count()
+    }
+
+    /// Is this source still in the transfer?
+    pub fn source_is_live(&self, src: usize) -> bool {
+        self.sources.get(src).is_some_and(|s| s.live)
+    }
+
+    /// Consecutive stalls charged against a source, for a caller deciding
+    /// whether to substitute a reserve mirror for it.
+    pub fn source_stalls(&self, src: usize) -> u32 {
+        self.sources
+            .get(src)
+            .map(|s| s.consecutive_stalls)
+            .unwrap_or(0)
+    }
+
+    /// The publisher-stated preference a source was created with.
+    pub fn source_priority(&self, src: usize) -> u32 {
+        self.sources
+            .get(src)
+            .map(|s| s.priority)
+            .unwrap_or(NO_PRIORITY)
+    }
+
+    /// How many sources this transfer was built with, live or retired.
+    pub fn n_sources(&self) -> usize {
+        self.sources.len()
     }
 
     /// A connection's transport failed: reclaim its range NOW, and hold that
@@ -989,7 +1187,7 @@ impl Scheduler {
                 let c = &self.conns[k];
                 !c.busy()
                     && c.queued.is_none()
-                    && (now < c.setup_end || now < self.sources[c.source].suspended_until)
+                    && (now < c.setup_end || !self.sources[c.source].usable_at(now))
             })
             .count();
         let mut admitted = self.admitted();
@@ -1001,7 +1199,7 @@ impl Scheduler {
                 continue;
             }
             let src = self.conns[j].source;
-            if now < self.sources[src].suspended_until {
+            if !self.sources[src].usable_at(now) {
                 continue;
             }
             // How much to hand this connection.
@@ -1162,12 +1360,19 @@ impl Scheduler {
             .iter()
             .take(n)
             .map(|c| {
-                let g = self.sources[c.source].gamma_est;
-                if g > 0.0 {
-                    g
+                let src = &self.sources[c.source];
+                let g = if src.gamma_est > 0.0 {
+                    src.gamma_est
                 } else {
                     1.0
-                }
+                };
+                // The publisher's ranking enters HERE and only here. This is the
+                // one moment in the transfer at which nothing has been measured,
+                // so a stated preference is the best information available; from
+                // the next tick onward `gamma_est` and the per-connection rate
+                // estimates are real samples and the prior is not consulted
+                // again. See `Source::priority`.
+                g * src.priority_weight()
             })
             .collect();
         let total: f64 = weights.iter().sum();
@@ -1266,7 +1471,7 @@ impl Scheduler {
         let (live_count, agg) = self
             .conns
             .iter()
-            .filter(|c| now >= self.sources[c.source].suspended_until)
+            .filter(|c| self.sources[c.source].usable_at(now))
             .fold((0usize, 0.0f64), |(k, sum), c| {
                 (k + 1, sum + c.rate_est.max(0.0))
             });
@@ -1324,7 +1529,7 @@ impl Scheduler {
         let room = self.admitted() < self.active_limit;
         for j in 0..self.conns.len() {
             let c = &self.conns[j];
-            if now < c.setup_end || now < self.sources[c.source].suspended_until {
+            if now < c.setup_end || !self.sources[c.source].usable_at(now) {
                 continue;
             }
             let e = c.eta();
@@ -1571,6 +1776,162 @@ mod tests {
             "surviving source never picked up the reclaimed work"
         );
         assert!(s.is_complete(), "held {} of 100000", s.bytes_held());
+    }
+
+    #[test]
+    fn a_retired_source_never_gets_work_again_and_its_bytes_are_not_stranded() {
+        // Suspension is a pause; retirement is not. A host that no longer
+        // resolves does not get better on a timer, and retrying it costs a full
+        // setup every backoff for the rest of the download.
+        let mut s = Scheduler::new(100_000, vec![src(1e5), src(1e5)], &[1, 1]);
+        s.tick(0.0);
+        let freed = s.retire_source(0);
+        assert_eq!(freed, vec![0], "the dead source's connections come back");
+        assert_eq!(s.live_sources(), 1);
+        assert!(!s.source_is_live(0));
+        assert!(s.coverage_holds(), "reclaimed bytes must be accounted for");
+
+        let mut now = 0.2;
+        for _ in 0..20_000 {
+            let acts = s.tick(now);
+            assert!(
+                !acts.iter().any(
+                    |a| matches!(a, Action::Request { conn, .. } if s.conns[*conn].source == 0)
+                ),
+                "a retired source was handed work at t={now}"
+            );
+            s.on_bytes(1, 1000, now, 0.01);
+            now += 0.01;
+            assert!(s.coverage_holds());
+            assert!(s.liveness_holds());
+            if s.is_complete() {
+                break;
+            }
+        }
+        // The whole object still arrives: retirement reclaims, it does not strand.
+        assert!(s.is_complete(), "held {} of 100000", s.bytes_held());
+        // Retiring twice is a no-op rather than a second reclaim.
+        assert!(s.retire_source(0).is_empty());
+    }
+
+    #[test]
+    fn a_retired_source_is_not_reported_as_a_planned_pause() {
+        // `all_sources_suspended_until` tells the transport that silence is
+        // deliberate. A retired source has no return time, and reporting its
+        // never-updated `suspended_until` of 0.0 would answer "everything is
+        // available now" while nothing is.
+        let mut s = Scheduler::new(1000, vec![src(1e5), src(1e5)], &[1, 1]);
+        s.tick(0.0);
+        s.retire_source(0);
+        s.suspend_source(1, 10.0);
+        assert_eq!(
+            s.all_sources_suspended_until(1.0),
+            Some(10.0),
+            "the only LIVE source's return time is the answer"
+        );
+        // With every live source gone there is no return time at all.
+        s.retire_source(1);
+        assert_eq!(s.live_sources(), 0);
+        assert_eq!(s.all_sources_suspended_until(1.0), None);
+    }
+
+    #[test]
+    fn a_replacement_mirror_reuses_the_connections_the_dead_one_held() {
+        // The reserve bench: a mirror list names far more sources than
+        // politeness authorises sockets for. Substituting in place is what keeps
+        // the aggregate socket count equal to what was authorised.
+        let mut s = Scheduler::new(100_000, vec![src(1e5), src(1e5)], &[2, 2]);
+        s.tick(0.0);
+        let before = s.n_conns();
+        let moved = s.replace_source(
+            0,
+            Source {
+                priority: 3,
+                ..src(2e5)
+            },
+        );
+        assert_eq!(moved, vec![0, 1], "the same connection indices, relabelled");
+        assert_eq!(s.n_conns(), before, "no new sockets are authorised");
+        assert_eq!(s.n_sources(), 2);
+        assert!(s.source_is_live(0));
+        assert_eq!(s.source_priority(0), 3);
+        assert!(s.coverage_holds());
+
+        // The replacement is not graded by the dead host's failure: a connection
+        // inheriting a Suspect grade could never be chosen as a repair taker.
+        for j in moved {
+            assert_eq!(s.conn_health(j), crate::detect::Health::Healthy);
+            assert_eq!(s.conn_rate(j), 0.0);
+        }
+
+        let mut now = 0.2;
+        for _ in 0..20_000 {
+            s.tick(now);
+            for j in 0..s.n_conns() {
+                s.on_bytes(j, 500, now, 0.01);
+            }
+            now += 0.01;
+            assert!(s.coverage_holds());
+            if s.is_complete() {
+                break;
+            }
+        }
+        assert!(s.is_complete(), "held {} of 100000", s.bytes_held());
+    }
+
+    #[test]
+    fn a_stated_priority_biases_the_first_split_and_nothing_after_it() {
+        // The prior is worth having because the first split has to be made from
+        // something. It is worth having ONLY as a prior: a ranking cannot know
+        // the preferred mirror is overloaded, and defending it against evidence
+        // would be strictly worse than having no ranking at all.
+        let ranked = |p: u32| Source {
+            priority: p,
+            ..src(1e5)
+        };
+        let mut s = Scheduler::new(120_000, vec![ranked(1), ranked(4)], &[1, 1]);
+        let acts = s.tick(0.0);
+        let mut got = [0u64; 2];
+        for a in &acts {
+            if let Action::Request { conn, range } = a {
+                got[s.conn_source(*conn)] += range.hi - range.lo;
+            }
+        }
+        assert!(
+            got[0] > got[1],
+            "rank 1 must open with more than rank 4: {got:?}"
+        );
+
+        // Unranked sources split as they did before priorities existed, so
+        // nothing changes for a caller that states none.
+        let mut flat = Scheduler::new(120_000, vec![src(1e5), src(1e5)], &[1, 1]);
+        let acts = flat.tick(0.0);
+        let mut even = [0u64; 2];
+        for a in &acts {
+            if let Action::Request { conn, range } = a {
+                even[flat.conn_source(*conn)] += range.hi - range.lo;
+            }
+        }
+        assert_eq!(even[0], even[1], "no ranking must mean no bias: {even:?}");
+
+        // And the prior does not survive contact with measurement: give the
+        // top-ranked source nothing and the transfer still finishes off the
+        // other one.
+        let mut now = 0.2;
+        for _ in 0..40_000 {
+            s.tick(now);
+            s.on_bytes(1, 400, now, 0.01);
+            now += 0.01;
+            assert!(s.coverage_holds());
+            if s.is_complete() {
+                break;
+            }
+        }
+        assert!(
+            s.is_complete(),
+            "a silent top-ranked mirror must not hold the transfer: held {}",
+            s.bytes_held()
+        );
     }
 
     #[test]
