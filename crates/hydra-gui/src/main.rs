@@ -27,6 +27,7 @@ mod macos_menu;
 mod macos_surface;
 mod menubus;
 mod model;
+mod scan;
 mod sounds;
 mod theme;
 mod tray;
@@ -119,6 +120,7 @@ fn boot() -> (App, Task<Message>) {
         add_url: app::AddUrlState::default(),
         file_info: app::FileInfoState::default(),
         prog: std::collections::HashMap::new(),
+        scans: std::collections::HashMap::new(),
         options: app::OptionsState::default(),
         updater: app::UpdateUiState::default(),
         sch: app::SchState::default(),
@@ -310,6 +312,7 @@ fn subscription(app: &App) -> Subscription<Message> {
         Subscription::run(engine_events).map(Message::Engine),
         Subscription::run(native_menu_events).map(Message::NativeMenu),
         Subscription::run(ext_events).map(Message::Ext),
+        Subscription::run(scan_events).map(Message::Scan),
         iced::time::every(std::time::Duration::from_secs(if power_save {
             3
         } else {
@@ -366,7 +369,9 @@ fn subscription(app: &App) -> Subscription<Message> {
     // The glide tick exists only while something is moving; an idle list
     // costs zero redraws. Power save drops the animation entirely — the bar
     // then steps at the engine's event rate.
-    if !power_save && app.state.downloads.iter().any(|d| d.state.is_active()) {
+    // The marquee of a running virus scan needs the same tick even when no
+    // transfer is left moving, so it is part of the condition.
+    if !power_save && (app.state.downloads.iter().any(|d| d.state.is_active()) || app.scanning()) {
         subs.push(
             iced::time::every(std::time::Duration::from_millis(80)).map(|_| Message::AnimTick),
         );
@@ -392,6 +397,19 @@ fn engine_events() -> impl iced::futures::Stream<Item = engine::Event> {
 /// Browser-extension captures arriving over the extbus loopback socket.
 fn ext_events() -> impl iced::futures::Stream<Item = extbus::ExtEvent> {
     iced::futures::stream::unfold(extbus::take_events(), |rx| async move {
+        match rx {
+            Some(mut r) => {
+                let ev = r.recv().await?;
+                Some((ev, Some(r)))
+            }
+            None => iced::futures::future::pending().await,
+        }
+    })
+}
+
+/// Console output of the virus scanner running over a finished file.
+fn scan_events() -> impl iced::futures::Stream<Item = scan::ScanEvent> {
+    iced::futures::stream::unfold(scan::take_events(), |rx| async move {
         match rx {
             Some(mut r) => {
                 let ev = r.recv().await?;

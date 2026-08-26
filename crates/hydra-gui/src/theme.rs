@@ -496,6 +496,36 @@ pub fn progress(theme: &Theme) -> progress_bar::Style {
     }
 }
 
+/// Track of the indeterminate virus-scan bar: the same well the determinate
+/// progress bar draws, so the swap is invisible except for the motion.
+pub fn scan_track(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(if is_dark(theme) {
+            c(0x3A3A3A)
+        } else {
+            c(0xE0E0E0)
+        })),
+        border: border(
+            if is_dark(theme) {
+                c(GRID_DARK)
+            } else {
+                c(0xC8C8C8)
+            },
+            1.0,
+            0.0,
+        ),
+        ..Default::default()
+    }
+}
+
+/// The block sliding inside [`scan_track`].
+pub fn scan_block(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(c(PROGRESS_GREEN))),
+        ..Default::default()
+    }
+}
+
 pub fn picker(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
     let dark = is_dark(theme);
     pick_list::Style {
