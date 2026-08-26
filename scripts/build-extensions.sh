@@ -170,7 +170,7 @@ verify_archive() { # <archive>
 import sys, zipfile
 print('\n'.join(zipfile.ZipFile(sys.argv[1]).namelist()))" "$archive")
   for required in manifest.json background.js content.js popup.html popup.js \
-                  popup.css welcome.html icons/icon48.png; do
+                  popup.css welcome.html welcome.js icons/icon48.png; do
     case $'\n'"$entries"$'\n' in
       *$'\n'"$required"$'\n'*) ;;
       *)
