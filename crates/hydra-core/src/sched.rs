@@ -209,6 +209,13 @@ pub struct Scheduler {
     /// each time, to hold at most `n_conns` indices. Reusing one buffer costs a field
     /// and removes the allocation from the hot loop.
     scratch_idx: Vec<usize>,
+    /// Reused index buffer for the per-tick assignment visit order.
+    ///
+    /// Separate from `scratch_idx` because the stalled scan above is still
+    /// holding that one when this is built, and for the same reason it exists:
+    /// this runs every tick, and a fresh `Vec` per tick is the allocation the
+    /// module header promises not to make.
+    scratch_order: Vec<usize>,
     theta_scale: f64,
     stall_timeout: f64,
     /// How many connections may hold work at once. Adjustable mid-transfer so the
@@ -256,6 +263,7 @@ impl Scheduler {
             conns,
             sources,
             scratch_idx: Vec::new(),
+            scratch_order: Vec::new(),
             theta_scale: 1.0,
             stall_timeout: 1.0,
             health_ranking: true,
@@ -360,6 +368,15 @@ impl Scheduler {
     /// budget, work must remain here for connections admitted later to pick up.
     pub fn unassigned_is_empty(&self) -> bool {
         self.unassigned.is_empty()
+    }
+
+    /// How many bytes are still unclaimed by any connection.
+    ///
+    /// The same contract as [`Self::unassigned_is_empty`], measured rather than
+    /// merely asserted: a reserve that has been whittled down to one sliver is
+    /// not empty and is not a reserve either.
+    pub fn unassigned_total(&self) -> u64 {
+        self.unassigned.total()
     }
 
     /// How many connections currently hold a range.
@@ -934,6 +951,7 @@ impl Scheduler {
         // refusal as the only thing still allowed to pick up new work — collapsing
         // realised concurrency below what the origin would serve, which is the one
         // thing this cap exists to prevent. See `admitted` for what counts.
+        //
         // Candidates are visited proven connections first, unproven ones after —
         // "proven" meaning `rate_est > 0.0`, which only a connection that has
         // actually delivered bytes on this source carries; a reclaim resets it to
@@ -949,12 +967,33 @@ impl Scheduler {
         // sits idle for another tick waiting its turn. Repeated over a transfer's
         // life this is exactly the churn the ceiling exists to stop, just paid
         // in requests instead of in stranded concurrency.
-        let mut order: Vec<usize> = (0..self.conns.len())
-            .filter(|&j| self.conns[j].rate_est > 0.0)
-            .collect();
-        order.extend((0..self.conns.len()).filter(|&j| self.conns[j].rate_est <= 0.0));
+        let mut order = std::mem::take(&mut self.scratch_order);
+        order.clear();
+        // One predicate and its exact complement, rather than `> 0.0` and
+        // `<= 0.0`: the two passes must partition the connections, and BOTH of
+        // those comparisons are false for a NaN rate. A connection that fell into
+        // neither would be dropped from the visit order entirely — never assigned
+        // work, and never reclaimed into service either, since reclaim only fires
+        // on connections that HOLD a range. Silent permanent idleness is not a
+        // failure mode worth leaving to the float rules.
+        let proven = |c: &Conn| c.rate_est > 0.0;
+        order.extend((0..self.conns.len()).filter(|&j| proven(&self.conns[j])));
+        order.extend((0..self.conns.len()).filter(|&j| !proven(&self.conns[j])));
+        // Connections that will want work on a LATER tick: idle, holding nothing,
+        // and held back by their own cooldown or a suspended source rather than by
+        // anything this pass can resolve. These are who the reserve below is for.
+        // Counted once: assigning work in the loop only turns reachable
+        // connections busy, and those were never in this set.
+        let waiting = (0..self.conns.len())
+            .filter(|&k| {
+                let c = &self.conns[k];
+                !c.busy()
+                    && c.queued.is_none()
+                    && (now < c.setup_end || now < self.sources[c.source].suspended_until)
+            })
+            .count();
         let mut admitted = self.admitted();
-        for j in order {
+        for &j in &order {
             if admitted >= self.active_limit {
                 break;
             }
@@ -980,22 +1019,37 @@ impl Scheduler {
             // later — now nearly free on a pooled connection — against one repair
             // per admitted connection the other way.
             //
-            // Whether room remains is `admitted` — a COUNT of connections actually
-            // in play — not `active_limit < ceiling`. The throttle path sets both
-            // to the same value in one step (see the transfer loop), which a
-            // comparison between the two can never see as "still growing" even
-            // though `admitted` can be well below `active_limit` right after that
-            // step: two connections were busy when the cap was learned, the
-            // budget just widened to four, and the other two seats are still
-            // empty because the connections that will fill them are cooling down
-            // from the refusal that taught the cap. `admitted` sees that room and
-            // `active_limit < ceiling` does not, so the first of the two survivors
-            // to finish took the entire remainder — twice, once per survivor, on
-            // every uneven finish for the rest of the transfer, since each grab
-            // provokes exactly the steal this branch exists to avoid. `+ 1`
-            // because `j` itself has not been counted into `admitted` yet.
+            // Reserve only for connections THIS LOOP CANNOT REACH. An idle
+            // connection that is merely further down the visit order is not one
+            // of them — it gets its work in this same pass, so holding a share
+            // back for it just splits one request into two.
+            //
+            // Two things put a connection out of reach:
+            //
+            // * the ramp has not admitted it yet — `active_limit < ceiling`. This
+            //   is every `--adaptive` transfer, which starts at one connection
+            //   with the rest of the budget ahead of it. Without this clause the
+            //   reserve `initial_split` holds back is swallowed on the first tick
+            //   after that connection drains its quota, and every later admission
+            //   can only steal — see
+            //   `a_ramping_connection_that_drains_its_quota_does_not_swallow_the_reserve`.
+            //
+            // * it is `waiting`: idle, but held off by its own cooldown or a
+            //   suspended source, with a seat under the current limit still free.
+            //   This is the throttled case — the cap has just widened on a
+            //   successful probe, and the connections that will fill the new seats
+            //   are still cooling down from the refusal that taught the old one.
+            //   `+ 1` because `j` itself is not yet counted in `admitted`.
+            //
+            // Testing `admitted` against `active_limit` ALONE is wrong in a way no
+            // existing test caught: `active_limit` is `usize::MAX` for every caller
+            // that never opted into the ramp, so the comparison is vacuously true,
+            // the share path swallows the fixed `-x N` case whole, and the maximal
+            // branch below becomes unreachable. Hence `limit`, and hence
+            // `settled_concurrency_hands_out_maximal_ranges_not_shares`.
             let ceiling = self.ceiling();
-            let want = if admitted + 1 < self.active_limit {
+            let limit = self.active_limit.min(self.conns.len());
+            let want = if self.active_limit < ceiling || (waiting > 0 && admitted + 1 < limit) {
                 let remaining = self.unassigned.total();
                 let share = remaining / ceiling as u64;
                 share.max(STEAL_QUANTUM * 4)
@@ -1071,10 +1125,11 @@ impl Scheduler {
         }
 
         self.stats.bytes_held = self.held;
-        // Hand the scratch buffer back so its capacity survives to the next tick.
+        // Hand the scratch buffers back so their capacity survives to the next tick.
         // Without this the `mem::take` above would leave an empty Vec in the field and
         // the next tick would allocate again — the reuse would be nominal only.
         self.scratch_idx = stalled;
+        self.scratch_order = order;
         acts
     }
 
@@ -1826,6 +1881,132 @@ mod tests {
         assert_eq!(
             sc.stats.repairs, repairs_before,
             "admitting a connection must not cost a repair"
+        );
+        assert!(sc.coverage_holds() && sc.liveness_holds());
+    }
+
+    /// The reserve must survive the ramping connection RUNNING OUT OF WORK.
+    ///
+    /// [`a_ramping_transfer_finds_unassigned_work_instead_of_stealing`] pins the
+    /// reserve as `initial_split` leaves it, and never lets the one active
+    /// connection finish what it was given. That is the easy half. The half that
+    /// actually decides whether a ramped transfer is fast is what work-conserving
+    /// assignment hands out on the tick AFTER the active connection drains its
+    /// quota — which, with the ramp still at one connection, is the common case on
+    /// any object larger than a few of those quotas.
+    ///
+    /// Getting it wrong looks exactly like never having reserved at all: the idle
+    /// connection takes `u64::MAX`, the reserve `initial_split` carefully held back
+    /// is swallowed whole, and every connection the ramp admits afterwards finds
+    /// nothing unassigned and must steal — the ~21 s against 6.3 s regression the
+    /// sibling test above quotes, arrived at one tick later.
+    ///
+    /// The invariant, stated where it belongs: while the ramp can still grow, no
+    /// single assignment may consume the reserve, whoever asks and whenever.
+    #[test]
+    fn a_ramping_connection_that_drains_its_quota_does_not_swallow_the_reserve() {
+        const S: u64 = 40_000_000;
+        let sources = vec![Source {
+            gamma_est: 2e6,
+            delta_est: 0.05,
+            ..Default::default()
+        }];
+        let mut sc = Scheduler::new(S, sources, &[8]).with_active_limit(1);
+        sc.tick(0.0);
+        let (lo, _, hi) = sc
+            .conn_range(0)
+            .expect("the active connection holds a range");
+        let quota = hi - lo;
+        assert!(
+            quota < S,
+            "initial_split handed the whole object to one connection"
+        );
+
+        // Drain that quota completely, so the connection goes idle with the ramp
+        // still at one and the reserve still untouched.
+        let mut now = 0.0;
+        now += 0.1;
+        sc.on_bytes(0, quota, now, 0.1);
+        assert!(
+            sc.conn_range(0).is_none(),
+            "the connection should have finished its range"
+        );
+
+        // The tick that re-assigns it. This is the one under test.
+        now += 0.1;
+        sc.tick(now);
+        assert!(
+            !sc.unassigned_is_empty(),
+            "the idle connection took the entire remainder while the ramp was still \
+             at one: every connection admitted later can only steal, which costs a \
+             repair each"
+        );
+
+        // And the reserve must still be big enough to matter — not a token sliver
+        // left by a rounding accident.
+        let held_back = sc.unassigned_total();
+        assert!(
+            held_back > (S - quota) / 2,
+            "only {held_back} of {} remaining bytes stayed unassigned: the reserve \
+             is nominal, and connections admitted later will still have to steal",
+            S - quota
+        );
+        assert!(sc.coverage_holds() && sc.liveness_holds());
+    }
+
+    /// Settled concurrency must hand out MAXIMAL ranges, not shares.
+    ///
+    /// The reserve exists for connections that are still to be admitted. A caller
+    /// that never opted into the ramp has none: `active_limit` is left at
+    /// `usize::MAX` ("every connection active"), nothing is waiting in the wings,
+    /// and holding work back only guarantees the connection that was given a
+    /// share has to come back for the rest — a request per share, where range
+    /// scheduling exists to make it one.
+    ///
+    /// This pins the sentinel specifically. Any test of the reserve condition
+    /// written as `admitted < active_limit` is comparing against `usize::MAX` for
+    /// this caller, is therefore always true, and silently turns every fixed
+    /// `-x N` transfer into the share path with no test noticing — the maximal
+    /// branch becomes unreachable outside the ramp.
+    #[test]
+    fn settled_concurrency_hands_out_maximal_ranges_not_shares() {
+        const S: u64 = 40_000_000;
+        let sources = vec![Source {
+            gamma_est: 2e6,
+            delta_est: 0.05,
+            ..Default::default()
+        }];
+        // No `with_active_limit`: the default, fixed-concurrency caller.
+        let mut sc = Scheduler::new(S, sources, &[4]);
+        sc.tick(0.0);
+        assert_eq!(
+            sc.active_limit(),
+            usize::MAX,
+            "this test is about the usize::MAX sentinel; it is not being used"
+        );
+
+        // Hand two connections' ranges back, so there is unassigned work and two
+        // idle connections to give it to. Their ranges are adjacent, so they
+        // coalesce into one block.
+        sc.on_conn_error(2, 0.0, 0.0);
+        sc.on_conn_error(3, 0.0, 0.0);
+        let reserve = sc.unassigned_total();
+        assert!(reserve > 0, "nothing was handed back");
+
+        let acts = sc.tick(0.1);
+        let biggest = acts
+            .iter()
+            .filter_map(|a| match a {
+                Action::Request { range, .. } => Some(range.hi - range.lo),
+                _ => None,
+            })
+            .max()
+            .expect("an idle connection must be given the returned work");
+        assert_eq!(
+            biggest, reserve,
+            "the idle connection was handed {biggest} of {reserve} available bytes: \
+             concurrency has settled and nothing is waiting to be admitted, so \
+             holding a reserve back only buys a second request for the same work"
         );
         assert!(sc.coverage_holds() && sc.liveness_holds());
     }

@@ -249,15 +249,17 @@ async fn concurrency_the_origin_refuses_costs_nothing() {
     );
     // The same failure seen as requests rather than as clock. Eight connections
     // against a two-connection origin needs a handful more requests than one does,
-    // not an order of magnitude more — the original bug measured in the hundreds.
-    // 24 is generous over the measured range (6-17 across 30+ runs on this
-    // machine): the two settled connections occasionally lose a race on which of
-    // them a freed slot goes to when a chunk finishes and a refusal-cooled
-    // connection becomes eligible on the same tick, costing one spurious refusal
-    // and retry. That is real tail variance from real network timing, not the
-    // request-a-share-at-a-time failure this assertion exists to catch.
+    // not an order of magnitude more.
+    //
+    // Do not loosen this to make a run go green. It was raised to 24 once, to
+    // absorb grant counts of 17-22 that were not tail variance at all but a
+    // scheduler regression: `active_limit` is `usize::MAX` for a caller that never
+    // opted into the ramp, so a reserve test written against it was vacuously
+    // true, maximal-range assignment became unreachable, and every transfer
+    // re-requested its work a share at a time — the exact failure this line is
+    // here to catch, hidden by the line itself. Measured 6-11 with that fixed.
     assert!(
-        wide.grants <= 24,
+        wide.grants <= 16,
         "{} granted requests to deliver the object at eight connections against {} \
          at one: the transfer is re-requesting work a share at a time",
         wide.grants,
