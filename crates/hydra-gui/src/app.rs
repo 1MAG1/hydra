@@ -312,6 +312,49 @@ pub struct ProgState {
     pub remember_limit: bool,
 }
 
+/// A virus scan over one finished file: what the scanner has printed so far,
+/// and the verdict once it exits. Lives beside the download rather than in
+/// it — a scan belongs to this session, not to the persisted item.
+#[derive(Debug, Default)]
+pub struct ScanState {
+    /// Console output, oldest first (see `scan::MAX_LINES` for the cap).
+    pub log: Vec<String>,
+    /// The last line came in as a terminal redraw, so the next redraw
+    /// overwrites it instead of piling up behind it.
+    redraw_tail: bool,
+    /// `None` while the scanner is still running.
+    pub outcome: Option<crate::scan::Outcome>,
+    /// Marquee position of the indeterminate bar, ping-ponging over 0..2;
+    /// advanced by `AnimTick`.
+    pub phase: f32,
+}
+
+impl ScanState {
+    /// Append one console line, or overwrite the previous one when both it
+    /// and this one were drawn over the same terminal row.
+    pub fn push(&mut self, text: String, redraw: bool) {
+        match self.log.last_mut() {
+            Some(last) if redraw && self.redraw_tail => *last = text,
+            _ => self.log.push(text),
+        }
+        self.redraw_tail = redraw;
+    }
+
+    pub fn running(&self) -> bool {
+        self.outcome.is_none()
+    }
+
+    /// 0..1 sweep of the marquee block, folded from the 0..2 phase so the
+    /// block travels back the way it came instead of jumping to the start.
+    pub fn sweep(&self) -> f32 {
+        if self.phase <= 1.0 {
+            self.phase
+        } else {
+            2.0 - self.phase
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OptTab {
     General,
@@ -577,6 +620,14 @@ pub enum Message {
     ProgLimitOn(DlId, bool),
     ProgLimitKb(DlId, String),
     ProgLimitRemember(DlId, bool),
+    /// Skip the virus scan running over the finished file.
+    ProgScanSkip(DlId),
+    /// Infected (or unscannable): keep the file, close the dialog.
+    ProgScanKeep(DlId),
+    /// Infected (or unscannable): take the file off the list and the disk.
+    ProgScanDelete(DlId),
+    /// Console line / verdict from the virus scanner.
+    Scan(crate::scan::ScanEvent),
     // complete dialog
     OpenFile(DlId),
     OpenFolder(DlId),
@@ -749,6 +800,8 @@ pub struct App {
     pub add_url: AddUrlState,
     pub file_info: FileInfoState,
     pub prog: HashMap<DlId, ProgState>,
+    /// Virus scans in flight (and verdicts still on screen), by download.
+    pub scans: HashMap<DlId, ScanState>,
     pub options: OptionsState,
     pub updater: UpdateUiState,
     pub sch: SchState,
@@ -836,6 +889,11 @@ impl App {
 
     pub fn item_mut(&mut self, id: DlId) -> Option<&mut DownloadItem> {
         self.state.downloads.iter_mut().find(|d| d.id == id)
+    }
+
+    /// A virus scanner is still working on some file.
+    pub fn scanning(&self) -> bool {
+        self.scans.values().any(|s| s.running())
     }
 
     pub fn selected_item(&self) -> Option<&DownloadItem> {
@@ -1431,6 +1489,10 @@ impl App {
         }
         let user_agent = self.cfg.settings.user_agent.clone();
         let adaptive = self.cfg.settings.adaptive_conns;
+        // Re-downloading over a file a scan flagged: the old verdict and its
+        // log describe bytes that are being replaced.
+        crate::scan::skip(id);
+        self.scans.remove(&id);
         let Some(d) = self.item_mut(id) else {
             return Task::none();
         };
@@ -1597,6 +1659,10 @@ impl App {
         self.state.downloads.retain(|d| d.id != id);
         self.selected.retain(|x| *x != id);
         self.prog.remove(&id);
+        // A scanner still holding the file the row just took with it has
+        // nothing left to report.
+        crate::scan::skip(id);
+        self.scans.remove(&id);
         self.save_state();
     }
 
@@ -1658,6 +1724,56 @@ impl App {
         });
         self.save_state();
         id
+    }
+
+    // -------------------------------------------------------- virus scan
+
+    /// Hand a finished file to the configured scanner. `true` when a scan
+    /// really started — the caller then defers the completion tail
+    /// ([`Self::finish_completion`]) until the verdict arrives.
+    fn start_virus_scan(&mut self, id: DlId) -> bool {
+        let program = self.cfg.settings.virus_scanner.trim().to_string();
+        if program.is_empty() {
+            return false;
+        }
+        let Some(path) = self.item(id).map(|d| d.full_path()) else {
+            return false;
+        };
+        // A scanner path that no longer resolves must not swallow the
+        // completion tail: the file is downloaded either way.
+        if !std::path::Path::new(&program).is_file() {
+            crate::log::warn(&format!("virus scanner not found: {program}"));
+            return false;
+        }
+        let args = self.cfg.settings.virus_args.clone();
+        let mut st = ScanState::default();
+        st.push(i18n::tr("Start scanning downloaded data..."), false);
+        self.scans.insert(id, st);
+        if let Some(d) = self.item_mut(id) {
+            d.status_line = i18n::tr("Virus scanning...");
+            // The connection rows describe a transfer that is over; the
+            // details panel shows the scanner log in their place.
+            d.conns.clear();
+        }
+        crate::scan::start(id, &program, &args, &path.to_string_lossy());
+        true
+    }
+
+    /// The tail every finished download ends with: chime, close the progress
+    /// dialog, pop the complete dialog. Runs straight away when no scanner is
+    /// configured, and after a clean (or skipped) scan otherwise.
+    fn finish_completion(&mut self, id: DlId) -> Task<Message> {
+        if let Some(row) = self.cfg.settings.sounds.first().filter(|r| r.enabled) {
+            sounds::play(
+                (!row.file.is_empty()).then(|| row.file.clone()),
+                sounds::Event::DownloadComplete,
+            );
+        }
+        let mut task = self.close_window(WinKind::Progress(id));
+        if self.cfg.settings.show_complete_dialog {
+            task = Task::batch([task, self.open_window(WinKind::Complete(id))]);
+        }
+        task
     }
 
     // --------------------------------------------------------------- queues
@@ -2009,16 +2125,13 @@ impl App {
                 {
                     fi_close = self.close_window(WinKind::FileInfo(id));
                 }
-                if let Some(row) = self.cfg.settings.sounds.first().filter(|r| r.enabled) {
-                    sounds::play(
-                        (!row.file.is_empty()).then(|| row.file.clone()),
-                        sounds::Event::DownloadComplete,
-                    );
+                // With a scanner configured the file goes to it first: the
+                // progress dialog stays open showing the scan, and the chime
+                // plus complete dialog wait for the verdict.
+                if self.start_virus_scan(id) {
+                    return Task::batch([fi_close, self.queue_tick()]);
                 }
-                let mut task = self.close_window(WinKind::Progress(id));
-                if self.cfg.settings.show_complete_dialog {
-                    task = Task::batch([task, self.open_window(WinKind::Complete(id))]);
-                }
+                let task = self.finish_completion(id);
                 Task::batch([fi_close, task, self.queue_tick()])
             }
             engine::Event::Stopped { id, done, held } => {
@@ -2353,6 +2466,11 @@ impl App {
                 }
             }
             Message::AnimTick => {
+                // The indeterminate scan bar: one sweep every ~1.6 s, folded
+                // at 2.0 so the block returns instead of snapping back.
+                for st in self.scans.values_mut().filter(|s| s.running()) {
+                    st.phase = (st.phase + 0.05) % 2.0;
+                }
                 for d in &mut self.state.downloads {
                     let target = d.progress();
                     let diff = target - d.disp_progress;
@@ -3165,6 +3283,77 @@ impl App {
                 self.save_config();
                 Task::none()
             }
+            Message::ProgScanSkip(id) => {
+                // Instant, not "ask the scanner to stop and wait": the file
+                // is downloaded, the user said move on. The killed process
+                // reports nothing back — its Done is never sent.
+                crate::scan::skip(id);
+                self.scans.remove(&id);
+                if let Some(d) = self.item_mut(id) {
+                    d.status_line = i18n::tr("Complete");
+                }
+                self.finish_completion(id)
+            }
+            Message::ProgScanKeep(id) => {
+                // The verdict has been read: drop it and let the dialog go.
+                // The file stays exactly where the download left it.
+                self.scans.remove(&id);
+                self.close_window(WinKind::Progress(id))
+            }
+            Message::ProgScanDelete(id) => {
+                self.scans.remove(&id);
+                let close = self.close_window(WinKind::Progress(id));
+                // Straight through, no confirmation: the user is answering a
+                // dialog that already names the file and the signature.
+                self.remove_item_opts(id, true);
+                close
+            }
+            Message::Scan(ev) => match ev {
+                crate::scan::ScanEvent::Line { id, text, redraw } => {
+                    if let Some(st) = self.scans.get_mut(&id) {
+                        st.push(text, redraw);
+                    }
+                    Task::none()
+                }
+                crate::scan::ScanEvent::Done(id, outcome) => {
+                    // Skip removed the entry already; a late verdict for a
+                    // scan nobody is waiting on is dropped.
+                    if !self.scans.contains_key(&id) {
+                        return Task::none();
+                    }
+                    let (status, keep_open) = match &outcome {
+                        crate::scan::Outcome::Clean => (i18n::tr("No virus found"), false),
+                        crate::scan::Outcome::Infected(sig) if sig.is_empty() => {
+                            (i18n::tr("Virus detected"), true)
+                        }
+                        crate::scan::Outcome::Infected(sig) => {
+                            (format!("{}: {sig}", i18n::tr("Virus detected")), true)
+                        }
+                        crate::scan::Outcome::Failed(e) => {
+                            (format!("{}: {e}", i18n::tr("Virus scan failed")), true)
+                        }
+                    };
+                    if let Some(st) = self.scans.get_mut(&id) {
+                        st.push(status.clone(), false);
+                        st.outcome = Some(outcome);
+                    }
+                    if let Some(d) = self.item_mut(id) {
+                        d.status_line = status;
+                    }
+                    if keep_open {
+                        // The downloaded file is kept: an infected (or
+                        // unscannable) file is reported, never deleted behind
+                        // the user's back. The dialog stays up with the log.
+                        crate::log::log(&format!("#{id} virus scan: kept, dialog left open"));
+                        return Task::none();
+                    }
+                    self.scans.remove(&id);
+                    if let Some(d) = self.item_mut(id) {
+                        d.status_line = i18n::tr("Complete");
+                    }
+                    self.finish_completion(id)
+                }
+            },
             Message::ProgLimitOn(id, on) => {
                 self.prog.entry(id).or_default().limit_on = on;
                 let kb: u64 = self
