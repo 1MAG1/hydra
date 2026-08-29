@@ -2045,6 +2045,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "system_shutdown",
  "tokio",
  "toml",
  "tray-icon",
@@ -4900,6 +4901,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "system_shutdown"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29396e5e1b637d102ec5037bf7fbb8da78264fa299101ced9ce827756b1bac02"
+dependencies = [
+ "windows 0.62.2",
+ "zbus",
 ]
 
 [[package]]

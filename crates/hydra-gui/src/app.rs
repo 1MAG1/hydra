@@ -5,8 +5,8 @@
 
 use crate::engine::{self, Cmd, StartSpec};
 use crate::model::{
-    self, categorize, ConfigFile, DlId, DlQuota, DlState, DownloadItem, ProxyMode, SiteLogin,
-    StateFile, ThemeMode,
+    self, categorize, ConfigFile, DlId, DlQuota, DlState, DownloadItem, PowerAction, ProxyMode,
+    SiteLogin, StateFile, ThemeMode,
 };
 use crate::sounds;
 use crate::{fmt, i18n};
@@ -620,6 +620,8 @@ pub enum Message {
     ProgLimitOn(DlId, bool),
     ProgLimitKb(DlId, String),
     ProgLimitRemember(DlId, bool),
+    ProgShutdownAfter(DlId, bool),
+    ProgShutdownAction(DlId, PowerAction),
     /// Skip the virus scan running over the finished file.
     ProgScanSkip(DlId),
     /// Infected (or unscannable): keep the file, close the dialog.
@@ -770,6 +772,8 @@ pub enum SchField {
     OpenFileEnabled(bool),
     OpenFile(String),
     ExitDone(bool),
+    ShutdownDone(bool),
+    ShutdownAction(PowerAction),
     FilesAtOnce(String),
 }
 
@@ -1721,6 +1725,8 @@ impl App {
             eta_secs: None,
             conns: vec![],
             status_line: String::new(),
+            shutdown_after: false,
+            shutdown_action: PowerAction::default(),
         });
         self.save_state();
         id
@@ -1769,9 +1775,22 @@ impl App {
                 sounds::Event::DownloadComplete,
             );
         }
-        let mut task = self.close_window(WinKind::Progress(id));
+        let task = self.close_window(WinKind::Progress(id));
+        // Shutting down makes the complete dialog moot — flush state first,
+        // since the OS call may end the process almost immediately.
+        if let Some(action) = self
+            .item(id)
+            .filter(|d| d.shutdown_after)
+            .map(|d| d.shutdown_action)
+        {
+            self.save_state();
+            self.save_config();
+            self.flush_saves();
+            run_power_action(action);
+            return Task::batch([task, iced::exit()]);
+        }
         if self.cfg.settings.show_complete_dialog {
-            task = Task::batch([task, self.open_window(WinKind::Complete(id))]);
+            return Task::batch([task, self.open_window(WinKind::Complete(id))]);
         }
         task
     }
@@ -1847,6 +1866,7 @@ impl App {
             .map(|q| q.name.clone())
             .collect();
         let mut exit_app = false;
+        let mut power_action: Option<PowerAction> = None;
         for name in &finished {
             let mut acted = false;
             if let Some(q) = self.cfg.queues.iter_mut().find(|q| q.name == *name) {
@@ -1860,6 +1880,9 @@ impl App {
                     if sc.exit_when_done {
                         exit_app = true;
                     }
+                    if sc.shutdown_when_done {
+                        power_action = Some(sc.shutdown_action);
+                    }
                 }
             }
             if acted {
@@ -1872,10 +1895,13 @@ impl App {
                 crate::log::info(&format!("queue finished: {name}"));
             }
         }
-        if exit_app {
+        if exit_app || power_action.is_some() {
             self.save_state();
             self.save_config();
             self.flush_saves();
+            if let Some(action) = power_action {
+                run_power_action(action);
+            }
             return Task::batch([Task::batch(tasks), iced::exit()]);
         }
         Task::batch(tasks)
@@ -3389,6 +3415,20 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ProgShutdownAfter(id, b) => {
+                if let Some(d) = self.item_mut(id) {
+                    d.shutdown_after = b;
+                }
+                self.save_state();
+                Task::none()
+            }
+            Message::ProgShutdownAction(id, action) => {
+                if let Some(d) = self.item_mut(id) {
+                    d.shutdown_action = action;
+                }
+                self.save_state();
+                Task::none()
+            }
 
             // ----------------------------------------------------- complete
             Message::OpenFile(id) => {
@@ -4632,6 +4672,8 @@ impl App {
             SchField::OpenFileEnabled(b) => s.open_file_enabled = b,
             SchField::OpenFile(v) => s.open_file = v,
             SchField::ExitDone(b) => s.exit_when_done = b,
+            SchField::ShutdownDone(b) => s.shutdown_when_done = b,
+            SchField::ShutdownAction(a) => s.shutdown_action = a,
             SchField::FilesAtOnce(v) => {
                 if let Ok(n) = v.parse::<u32>() {
                     q.files_at_once = n.clamp(1, 16);
@@ -4655,6 +4697,19 @@ fn sort_keyed<'a, K: Ord>(v: &mut [&'a DownloadItem], asc: bool, key: impl Fn(&D
     keyed.sort_by(|a, b| if asc { a.0.cmp(&b.0) } else { b.0.cmp(&a.0) });
     for (slot, (_, d)) in v.iter_mut().zip(keyed) {
         *slot = d;
+    }
+}
+
+/// Shuts down or logs off the machine for a "when done" action. Errors (no
+/// permission, an unsupported desktop session) only get a log line — by the
+/// time this runs, the queue or download it was guarding is already done.
+fn run_power_action(action: PowerAction) {
+    let result = match action {
+        PowerAction::Shutdown => system_shutdown::shutdown(),
+        PowerAction::LogOff => system_shutdown::logout(),
+    };
+    if let Err(e) = result {
+        crate::log::warn(&format!("power action {action:?} failed: {e}"));
     }
 }
 
@@ -5040,6 +5095,8 @@ mod tests {
             eta_secs: None,
             conns: vec![],
             status_line: String::new(),
+            shutdown_after: false,
+            shutdown_action: PowerAction::default(),
         }
     }
 

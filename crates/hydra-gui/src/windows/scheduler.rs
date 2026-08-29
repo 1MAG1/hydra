@@ -5,7 +5,7 @@
 //! queue" tabs on the right.
 
 use crate::app::{App, El, Message, SchField, SchTab, WinKind};
-use crate::model::{DlState, QueueDef};
+use crate::model::{DlState, PowerAction, QueueDef};
 use crate::windows::{dlg_btn, dlg_btn_primary};
 use crate::{fmt, i18n::tr, icons, theme};
 use iced::widget::{
@@ -113,7 +113,7 @@ fn schedule_tab<'a>(q: &'a QueueDef) -> El<'a> {
         day_cols = day_cols.push(c);
     }
 
-    column![
+    let mut col = column![
         row![
             radio(tr("One-time downloading"), false, Some(sc.periodic), |v| {
                 s(SchField::Periodic(v))
@@ -215,9 +215,40 @@ fn schedule_tab<'a>(q: &'a QueueDef) -> El<'a> {
             .size(15.0)
             .text_size(theme::FONT_SIZE)
             .style(theme::check),
+        checkbox(sc.shutdown_when_done)
+            .label(tr("Shut down / log off computer when done"))
+            .on_toggle(|b| s(SchField::ShutdownDone(b)))
+            .size(15.0)
+            .text_size(theme::FONT_SIZE)
+            .style(theme::check),
     ]
-    .spacing(10)
-    .into()
+    .spacing(10);
+
+    if sc.shutdown_when_done {
+        col = col.push(
+            row![
+                radio(
+                    tr("Shutdown"),
+                    PowerAction::Shutdown,
+                    Some(sc.shutdown_action),
+                    |v| s(SchField::ShutdownAction(v)),
+                )
+                .size(15.0)
+                .text_size(theme::FONT_SIZE),
+                radio(
+                    tr("Log off"),
+                    PowerAction::LogOff,
+                    Some(sc.shutdown_action),
+                    |v| s(SchField::ShutdownAction(v)),
+                )
+                .size(15.0)
+                .text_size(theme::FONT_SIZE),
+            ]
+            .spacing(30),
+        );
+    }
+
+    col.into()
 }
 
 fn files_tab(app: &App) -> El<'_> {
