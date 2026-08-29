@@ -190,12 +190,190 @@ pub async fn run_transfer_cancellable<C: Connector>(
     conns_per_target: &[usize],
     size: u64,
     sink: Arc<SparseSink>,
-    mut sched: Scheduler,
+    sched: Scheduler,
     tick_ms: u64,
     observe: &mut (dyn FnMut(&Scheduler, u64) + Send),
     pace: Pace,
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> io::Result<(f64, u64)> {
+    run_transfer_with_reserves(
+        connector,
+        targets,
+        conns_per_target,
+        size,
+        sink,
+        sched,
+        tick_ms,
+        observe,
+        pace,
+        cancel,
+        Bench::default(),
+        None,
+    )
+    .await
+}
+
+/// Called after a reserve mirror takes a failed source's place.
+///
+/// A named alias rather than the type spelled inline: the signature is already
+/// twelve arguments long, and `Option<&mut (dyn FnMut(usize, &Reserve) + Send)>`
+/// in the middle of it obscures which argument is which.
+pub type OnSubstitute<'a> = Option<&'a mut (dyn FnMut(usize, &Reserve) + Send)>;
+
+/// The mirrors a transfer can fall back on, and how they arrive.
+///
+/// # Why the bench is a STREAM and not a snapshot
+///
+/// Filling it needs a probe per mirror, and those probes are paid entirely
+/// before the first byte — so a transfer that waits for the whole list waits
+/// for its slowest host to answer a HEAD, in order to learn about mirrors it
+/// will not touch unless something fails. Measured against a real twelve-mirror
+/// Fedora document, that was 2.0 s of dead time in front of a 5 s transfer.
+///
+/// Splitting the two lets the caller start as soon as it has enough mirrors to
+/// SEAT — which is the only thing the scheduler needs up front — and keep
+/// probing the rest while bytes move. Reserves that arrive late are just as
+/// useful as reserves that arrived early: nothing consults the bench until a
+/// source fails.
+#[derive(Debug, Default)]
+pub struct Bench {
+    /// Reserves known before the transfer starts, best-ranked first.
+    pub ready: Vec<Reserve>,
+    /// Reserves still being probed, delivered as they are admitted.
+    ///
+    /// Drained on every tick. `None` is a caller that has everything already,
+    /// which is exactly the previous behaviour.
+    pub late: Option<mpsc::UnboundedReceiver<Reserve>>,
+}
+
+impl Bench {
+    /// A bench that is complete before the transfer begins.
+    pub fn fixed(ready: Vec<Reserve>) -> Self {
+        Bench { ready, late: None }
+    }
+}
+
+/// A mirror held back from the transfer, ready to replace one that fails.
+#[derive(Clone, Debug)]
+pub struct Reserve {
+    pub target: Target,
+    /// Ranking and any ceiling the source stated about itself.
+    pub plan: hya_core::SourcePlan,
+    /// Host name, for the caller's progress view after a substitution.
+    pub host: String,
+}
+
+/// Consecutive failures charged to one SOURCE before it is replaced.
+///
+/// Two, not one: a single 5xx from one node of a CDN, or one refused connection
+/// during a deploy, is worth another attempt on the same host — substituting on
+/// the first error would burn the bench on transient faults and leave nothing
+/// for the failure that is real. Two consecutive failures with no byte of
+/// progress in between is no longer transient.
+const SOURCE_FAILS_BEFORE_SUBSTITUTION: u32 = 2;
+
+/// Consecutive scheduler-observed stalls before a source is replaced.
+///
+/// Higher than the error threshold because a stall is weaker evidence: an error
+/// is the source saying something, while a stall is only the absence of bytes,
+/// which a congested path produces too. Three rounds of reclaim-and-retry with
+/// nothing arriving is the point at which a different host is the better bet.
+const SOURCE_STALLS_BEFORE_SUBSTITUTION: u32 = 3;
+
+/// How many times slower than the FASTEST source a mirror must be before its
+/// sockets are worth moving to a reserve.
+///
+/// # Why this threshold is so far out
+///
+/// The scheduler already handles a merely-slow source, and handles it better
+/// than a swap would: repair reassigns BYTES away from it continuously, on
+/// measurement, at the cost of nothing but a range boundary. Substituting is the
+/// blunter instrument — it pays a fresh connection setup and throws away
+/// everything measured about the host — so it is only worth doing when the
+/// source has stopped being a meaningful contributor at all.
+///
+/// Eight-to-one is that point. A mirror at half the speed of the best one is
+/// still carrying a third of the transfer; a mirror at an eighth is carrying
+/// almost none of it while holding sockets politeness counted against the
+/// aggregate. Below that ratio the reserve is the better bet even after paying
+/// for the handshake.
+const LAGGARD_RATIO: f64 = 8.0;
+
+/// ...and it must stay that slow for this long, continuously.
+///
+/// A rate estimate dips for reasons that are not the mirror's fault: a range
+/// boundary, a repair, one slow read, a moment of congestion on the client's own
+/// link. Ten seconds is many rate samples — the estimate is windowed and
+/// smoothed before it is ever read here — so none of those survive it, while it
+/// is still short enough to act on inside a transfer with minutes left to run.
+const LAGGARD_SECONDS: f64 = 10.0;
+
+/// Seconds of transfer that must remain before a swap can repay its handshake.
+///
+/// The cost of substituting is one connection setup on a host nothing is known
+/// about; the gain is the difference between the reserve's rate and the
+/// laggard's, for however long is left. Expressed in TIME rather than in bytes
+/// because that is the form both sides of the comparison are in: a fixed byte
+/// threshold means something different on a 200 KB/s link than on a gigabit one,
+/// and would either never fire on the slow path or fire pointlessly on the fast
+/// one.
+const LAGGARD_MIN_PAYOFF_SECONDS: f64 = 5.0;
+
+/// As [`run_transfer_cancellable`], with a bench of reserve mirrors.
+///
+/// # What the bench is for
+///
+/// A mirror list names far more sources than politeness authorises sockets for —
+/// a distribution image's Metalink commonly lists fifteen to twenty hosts
+/// against four connections. Without substitution the surplus is decoration: the
+/// transfer survives on the mirrors it opened with or it does not, and a client
+/// holding nineteen working URLs fails because four of them went away.
+///
+/// A source is replaced when it has failed [`SOURCE_FAILS_BEFORE_SUBSTITUTION`]
+/// times consecutively with no progress in between, or stalled
+/// [`SOURCE_STALLS_BEFORE_SUBSTITUTION`] times — the second case being the one a
+/// pure error count misses, because a black-holing mirror never returns an error
+/// at all. Substitution happens IN PLACE: the failed source's connections are
+/// relabelled rather than added to, so the socket count stays what politeness
+/// authorised, and the caller's per-source bookkeeping stays index-aligned.
+///
+/// `on_substitute(source_index, new_target)` is called after each swap, because
+/// a progress view that keeps naming the dead host is worse than one that shows
+/// no host at all: it attributes the replacement's throughput to a machine that
+/// is not serving it.
+///
+/// An empty bench is exactly the previous behaviour, which is how every existing
+/// entry point calls this.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_transfer_with_reserves<C: Connector>(
+    connector: Arc<C>,
+    targets: Vec<Target>,
+    conns_per_target: &[usize],
+    size: u64,
+    sink: Arc<SparseSink>,
+    mut sched: Scheduler,
+    tick_ms: u64,
+    observe: &mut (dyn FnMut(&Scheduler, u64) + Send),
+    pace: Pace,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    reserves: Bench,
+    mut on_substitute: OnSubstitute<'_>,
+) -> io::Result<(f64, u64)> {
+    let mut targets = targets;
+    let Bench {
+        ready,
+        late: mut late_reserves,
+    } = reserves;
+    let mut bench: std::collections::VecDeque<Reserve> = ready.into();
+    // Failures charged to each SOURCE, not to each connection. A source with
+    // four connections failing once each is a dead host, not four unlucky
+    // sockets, and a per-connection counter never sees it.
+    let mut src_fail: Vec<u32> = vec![0; conns_per_target.len().max(1)];
+    // When each source first fell below `LAGGARD_RATIO`, cleared the moment it
+    // recovers. A clock rather than a counter because the evidence being asked
+    // for is duration: "slow right now" is noise, "slow for twenty seconds" is a
+    // measurement.
+    let mut laggard_since: Vec<Option<f64>> = vec![None; conns_per_target.len().max(1)];
     let (tx, mut rx) = mpsc::unbounded_channel::<Arrival>();
     // Fetch outcomes, reported by every spawned task as it ends.
     //
@@ -308,6 +486,92 @@ pub async fn run_transfer_cancellable<C: Connector>(
     // theory says it costs — see `crate::Watermark`.
     let mut bounds: std::collections::HashMap<usize, crate::Watermark> =
         std::collections::HashMap::new();
+
+    // Draw the next reserve mirror and put it in a failed source's place.
+    //
+    // A macro rather than a closure because it needs `&mut` on the scheduler,
+    // the target list, the bench, and all three per-connection maps at once —
+    // which a closure would have to borrow for its whole lifetime, and the
+    // surrounding loop needs them too.
+    //
+    // In place, not in addition: the failed source's connection indices are
+    // reused, so the socket count stays what politeness authorised and the
+    // caller's per-source bookkeeping keeps its alignment.
+    // Take everything a still-running probe has admitted since the last look.
+    //
+    // Cheap and non-blocking: a `try_recv` loop over a channel that is usually
+    // empty. Called on every tick AND immediately before a substitution, so a
+    // reserve that arrived microseconds ago is available to the failure that
+    // needs it rather than to the one after.
+    macro_rules! collect_late {
+        () => {{
+            if let Some(rx) = late_reserves.as_mut() {
+                loop {
+                    match rx.try_recv() {
+                        Ok(r) => bench.push_back(r),
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        // The prober is done. Dropping the receiver stops the
+                        // per-tick work for the rest of the transfer.
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            late_reserves = None;
+                            break;
+                        }
+                    }
+                }
+            }
+        }};
+    }
+
+    macro_rules! substitute_source {
+        ($src:expr) => {{
+            let src: usize = $src;
+            collect_late!();
+            match bench.pop_front() {
+                None => false,
+                Some(r) => {
+                    // Stop the dead source on the WIRE before the scheduler
+                    // reclaims its ranges. A task left running would keep
+                    // delivering bytes for a range that now belongs to somebody
+                    // else, which is the duplicate-traffic failure `Watermark`
+                    // exists to prevent, in a different disguise.
+                    for j in 0..sched.n_conns() {
+                        if sched.conn_source(j) == src {
+                            if let Some(h) = inflight.remove(&j) {
+                                h.abort();
+                            }
+                            bounds.remove(&j);
+                            gen_of.remove(&j);
+                        }
+                    }
+                    // The setup cost carries over — it is a property of this
+                    // client's path, not of the dead host — but nothing else
+                    // does. Inheriting the failed mirror's rate estimate would
+                    // price the replacement by the failure it is replacing.
+                    sched.replace_source(
+                        src,
+                        hya_core::Source {
+                            priority: r.plan.priority,
+                            delta_est: sched.worst_delta().max(1e-3),
+                            ..Default::default()
+                        },
+                    );
+                    if let Some(slot) = targets.get_mut(src) {
+                        *slot = r.target.clone();
+                    }
+                    if let Some(f) = src_fail.get_mut(src) {
+                        *f = 0;
+                    }
+                    if let Some(l) = laggard_since.get_mut(src) {
+                        *l = None;
+                    }
+                    if let Some(cb) = on_substitute.as_deref_mut() {
+                        cb(src, &r);
+                    }
+                    true
+                }
+            }
+        }};
+    }
 
     // One pool for the whole transfer, shared by every connection. This is the
     // case connection reuse was missing from most: `n` ranges against one origin
@@ -437,12 +701,24 @@ pub async fn run_transfer_cancellable<C: Connector>(
             gen_of.remove(&conn);
             inflight.remove(&conn);
             bounds.remove(&conn);
-            let Err(e) = res else { continue };
+            let Err(e) = res else {
+                // A completed range is proof this source works. Without this the
+                // counter is "failures ever" rather than "failures in a row", and
+                // two transient faults an hour apart would spend a reserve.
+                if let Some(f) = src_fail.get_mut(sched.conn_source(conn)) {
+                    *f = 0;
+                }
+                continue;
+            };
             let now = t0.elapsed().as_secs_f64();
             if trace_errors {
                 eprintln!("[trace] t={now:.2} conn {conn}: {} — {e}", e.kind());
             }
             fail_streak = fail_streak.saturating_add(1);
+            let failed_src = sched.conn_source(conn);
+            if let Some(f) = src_fail.get_mut(failed_src) {
+                *f = f.saturating_add(1);
+            }
             let kind = e.kind();
             // A server that ignores `Range`, mislabels a `Content-Range`, answers
             // with a status this client cannot use, or redirects a transfer that
@@ -590,6 +866,21 @@ pub async fn run_transfer_cancellable<C: Connector>(
                 }
                 _ => sched.on_conn_error(conn, now, cool),
             }
+            // The bench, consulted BEFORE the transfer is failed. A dead or
+            // hostile source is precisely what a mirror list is for, and giving
+            // up while holding fifteen working URLs is the failure this whole
+            // path exists to remove.
+            if src_fail.get(failed_src).copied().unwrap_or(0) >= SOURCE_FAILS_BEFORE_SUBSTITUTION
+                && substitute_source!(failed_src)
+            {
+                // The streaks describe the source that just left. Carrying them
+                // onto its replacement would abort the transfer on the new
+                // mirror's first hiccup.
+                fail_streak = 0;
+                hard_streak = 0;
+                last_error = Some(e);
+                continue;
+            }
             if hard_streak >= 3 {
                 for (_, h) in inflight.drain() {
                     h.abort();
@@ -706,6 +997,86 @@ pub async fn run_transfer_cancellable<C: Connector>(
             // unobserved, a byte-exact file reported as incomplete.
             observe(&sched, sched.bytes_held());
             break;
+        }
+
+        // 1b2. take in whatever the background prober has admitted.
+        //
+        // Before the two substitution rules below, because both are gated on
+        // the bench being non-empty: a reserve that arrived during this tick is
+        // exactly as good as one that was there at the start, and making it wait
+        // a round would mean a source failing at the wrong moment finds an empty
+        // bench and fails the transfer.
+        collect_late!();
+
+        // 1c. replace a source that has gone SILENT rather than wrong.
+        //
+        // A black-holing mirror — one that accepts connections and sends nothing
+        // — never returns an error, so the failure count above never sees it.
+        // The scheduler's own stall accounting does, and it is the only signal
+        // there is for this case. Checked before the tick so the reclaimed
+        // ranges are reassigned to the replacement in the same round rather than
+        // handed straight back to the source that is not answering.
+        if !bench.is_empty() {
+            for src in 0..sched.n_sources() {
+                if sched.source_is_live(src)
+                    && sched.source_stalls(src) >= SOURCE_STALLS_BEFORE_SUBSTITUTION
+                {
+                    substitute_source!(src);
+                }
+            }
+        }
+
+        // 1d. replace a source that is WORKING and hopeless.
+        //
+        // Distinct from both cases above: this mirror answers, delivers bytes,
+        // and never errors — it is simply so much slower than the others that
+        // the sockets it holds are worth more on a different host. That is not a
+        // fault the error count or the stall count can see, and the ranking the
+        // publisher supplied cannot see it either: a document says which mirrors
+        // it EXPECTS to serve well, and the whole reason this scheduler measures
+        // is that the expectation is often wrong.
+        //
+        // Deliberately conservative — a wide ratio, a long window, and only
+        // while there is enough of the object left for a fresh handshake to pay
+        // for itself. Repair already moves bytes away from a slow source
+        // continuously and for free; swapping is the blunter instrument and is
+        // reserved for a source that has stopped contributing at all.
+        if !bench.is_empty() && sched.live_sources() > 1 {
+            let now = t0.elapsed().as_secs_f64();
+            let mut rate = vec![0.0f64; sched.n_sources()];
+            for j in 0..sched.n_conns() {
+                let src = sched.conn_source(j);
+                if let Some(slot) = rate.get_mut(src) {
+                    *slot += sched.conn_rate(j).max(0.0);
+                }
+            }
+            let best = rate.iter().copied().fold(0.0f64, f64::max);
+            let remaining = size.saturating_sub(sched.bytes_held()) as f64;
+            // Enough left to be worth a setup. Near the end of a transfer the
+            // slow source is finishing its last range and replacing it would
+            // cost a handshake to save nothing.
+            let worth_it = best > 0.0 && remaining / best > LAGGARD_MIN_PAYOFF_SECONDS;
+            for src in 0..sched.n_sources() {
+                if !sched.source_is_live(src) {
+                    continue;
+                }
+                let lagging = worth_it && rate[src] * LAGGARD_RATIO < best;
+                match (lagging, laggard_since[src]) {
+                    (false, _) => laggard_since[src] = None,
+                    (true, None) => laggard_since[src] = Some(now),
+                    (true, Some(since)) if now - since >= LAGGARD_SECONDS => {
+                        if trace_errors {
+                            eprintln!(
+                                "[trace] t={now:.2} source {src}: {:.0} B/s against {best:.0} B/s for {:.0}s — replacing",
+                                rate[src],
+                                now - since
+                            );
+                        }
+                        substitute_source!(src);
+                    }
+                    (true, Some(_)) => {}
+                }
+            }
         }
 
         // 2. let the scheduler decide, and act on what it returns

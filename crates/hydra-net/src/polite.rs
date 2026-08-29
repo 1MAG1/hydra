@@ -104,6 +104,26 @@ impl Politeness {
         }
         out
     }
+
+    /// Split `requested` connections across RANKED sources.
+    ///
+    /// The same two ceilings as [`Self::split`], plus whatever each source states
+    /// about itself — see [`hya_core::plan::allocate`], which is where the
+    /// arithmetic lives so that it is identical under the simulator and under
+    /// real HTTP.
+    ///
+    /// [`Self::split`] remains the right call when the sources are
+    /// interchangeable and nothing is known about them; this one exists because
+    /// a mirror list is not that. A Metalink ranks its mirrors and some of them
+    /// state their own connection ceilings, and an even split throws both away.
+    pub fn split_plan(&self, requested: usize, sources: &[hya_core::SourcePlan]) -> Vec<usize> {
+        hya_core::plan::allocate(
+            sources,
+            requested,
+            if self.conservative { 1 } else { self.per_host },
+            self.total,
+        )
+    }
 }
 
 /// Parse a `Retry-After` header value into a delay.
