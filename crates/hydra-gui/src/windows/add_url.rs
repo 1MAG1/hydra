@@ -75,6 +75,16 @@ pub fn view(app: &App) -> El<'_> {
             .size(theme::FONT_SIZE)
             .color(iced::Color::from_rgb8(0xC0, 0x2B, 0x2B))
             .into(),
+        None if !st.address.trim().is_empty()
+            && crate::app::site_blocked(st.address.trim(), &app.cfg.settings.dont_start_sites) =>
+        {
+            text(tr(
+                "This site is on the auto-start block list; it will be added, not started.",
+            ))
+            .size(theme::FONT_SIZE)
+            .color(iced::Color::from_rgb8(0xC0, 0x2B, 0x2B))
+            .into()
+        }
         None => iced::widget::space::horizontal().height(0.0).into(),
     };
 

@@ -375,5 +375,8 @@
   "shift+": "Mayúsculas+",
   "✕": "✕",
   "⬆": "⬆",
-  "⬇": "⬇"
+  "⬇": "⬇",
+  "Contribute on GitHub": "Contribute on GitHub",
+  "blocked site": "blocked site",
+  "This site is on the auto-start block list; it will be added, not started.": "This site is on the auto-start block list; it will be added, not started."
 }

@@ -59,7 +59,16 @@ pub fn view(app: &App) -> El<'_> {
         ]
         .spacing(4),
     );
+    let blocked_color = iced::Color::from_rgb8(0xC0, 0x2B, 0x2B);
     for (i, (url, on)) in st.checks.iter().enumerate() {
+        let blocked = crate::app::site_blocked(url, &app.cfg.settings.dont_start_sites);
+        let from_text = if blocked {
+            text(format!("{url} ({})", tr("blocked site")))
+                .size(theme::FONT_SIZE)
+                .color(blocked_color)
+        } else {
+            text(url.clone()).size(theme::FONT_SIZE)
+        };
         checks = checks.push(
             row![
                 container(
@@ -82,9 +91,7 @@ pub fn view(app: &App) -> El<'_> {
                     .size(theme::FONT_SIZE)
                 )
                 .width(70.0),
-                container(text(url.clone()).size(theme::FONT_SIZE))
-                    .width(Length::Fill)
-                    .clip(true),
+                container(from_text).width(Length::Fill).clip(true),
                 container(text(save_to_for(url)).size(theme::FONT_SIZE))
                     .width(220.0)
                     .clip(true),

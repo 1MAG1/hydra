@@ -41,26 +41,25 @@ fn queue_list(app: &App) -> El<'_> {
             );
             continue;
         }
-        // Double-click renames — stock queues (Main/Synchronization) excluded
-        // in the handler.
+        // Double-click renames — the pair is timed in the `SchQueue` handler,
+        // not by a `mouse_area`: this button captures the mouse event, so an
+        // enclosing area's `on_double_click` would never be reached. Stock
+        // queues (Main/Synchronization) are excluded in the handler.
         list = list.push(
-            mouse_area(
-                button(
-                    row![
-                        svg(icons::queues()).width(16.0).height(16.0),
-                        text(tr(&q.name)).size(theme::FONT_SIZE),
-                        iced::widget::space::horizontal(),
-                        text(if q.running { "▶" } else { "" }).size(theme::FONT_SIZE - 2.0),
-                    ]
-                    .spacing(6)
-                    .align_y(iced::Alignment::Center),
-                )
-                .padding([3, 6])
-                .width(Length::Fill)
-                .style(theme::btn_row(selected))
-                .on_press(Message::SchQueue(q.name.clone())),
+            button(
+                row![
+                    svg(icons::queues()).width(16.0).height(16.0),
+                    text(tr(&q.name)).size(theme::FONT_SIZE),
+                    iced::widget::space::horizontal(),
+                    text(if q.running { "▶" } else { "" }).size(theme::FONT_SIZE - 2.0),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
             )
-            .on_double_click(Message::SchNameEdit),
+            .padding([3, 6])
+            .width(Length::Fill)
+            .style(theme::btn_row(selected))
+            .on_press(Message::SchQueue(q.name.clone())),
         );
     }
     column![

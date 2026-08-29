@@ -6,7 +6,7 @@
 
 use crate::app::{App, El, Message, TreeSel};
 use crate::{i18n::tr, icons, theme};
-use iced::widget::{button, column, container, row, scrollable, svg, text};
+use iced::widget::{button, column, container, row, scrollable, svg, text, text_input};
 use iced::Length;
 
 pub fn cat_icon(name: &str) -> svg::Handle {
@@ -48,6 +48,58 @@ fn node<'a>(
     r = r
         .push(svg(icon).width(17.0).height(17.0))
         .push(text(label).size(theme::FONT_SIZE));
+    button(r)
+        .padding([2, 2])
+        .width(Length::Fill)
+        .style(theme::btn_row(selected))
+        .on_press(Message::TreeSelect(sel))
+        .into()
+}
+
+/// A queue row: like [`node`], but a user-created queue also answers a
+/// double-click by switching into an inline rename field. Whether the row
+/// may rename at all is decided by the queue's `builtin` flag in the
+/// `TreeQueueRenameStart` handler, so the two stock queues (Main download
+/// queue / Synchronization queue) simply never enter the edit state.
+fn queue_node<'a>(app: &App, name: &str) -> El<'a> {
+    let sel = TreeSel::Queue(name.to_string());
+    let selected = app.tree_sel == sel;
+    let pad = iced::Padding {
+        left: 2.0 * 18.0 + 4.0,
+        ..iced::Padding::ZERO
+    };
+    if app.renaming_queue.as_deref() == Some(name) {
+        return container(
+            row![
+                iced::widget::space::horizontal().width(14.0),
+                svg(icons::queues()).width(17.0).height(17.0),
+                text_input("", &app.queue_rename_draft)
+                    .id("tree-queue-rename")
+                    .on_input(Message::TreeQueueRenameDraft)
+                    .on_submit(Message::TreeQueueRenameCommit)
+                    .size(theme::FONT_SIZE)
+                    .style(theme::input)
+                    .width(Length::Fill),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center)
+            .padding(pad),
+        )
+        .padding([2, 2])
+        .width(Length::Fill)
+        .into();
+    }
+    let r = row![
+        iced::widget::space::horizontal().width(14.0),
+        svg(icons::queues()).width(17.0).height(17.0),
+        text(tr(name)).size(theme::FONT_SIZE),
+    ]
+    .spacing(4)
+    .align_y(iced::Alignment::Center)
+    .padding(pad);
+    // The double-click that starts a rename is timed in the `TreeSelect`
+    // handler rather than by a `mouse_area`: this button captures the mouse
+    // event, so an enclosing area's `on_double_click` would never be reached.
     button(r)
         .padding([2, 2])
         .width(Length::Fill)
@@ -146,14 +198,7 @@ pub fn view(app: &App) -> El<'_> {
     ));
     if app.tree_open[3] {
         for q in &app.cfg.queues {
-            col = col.push(node(
-                app,
-                2,
-                None,
-                icons::queues(),
-                tr(&q.name),
-                TreeSel::Queue(q.name.clone()),
-            ));
+            col = col.push(queue_node(app, &q.name));
         }
     }
 
