@@ -94,6 +94,13 @@ pub struct DownloadItem {
     pub conns: Vec<ConnRow>,
     #[serde(skip)]
     pub status_line: String,
+    /// Shut down or log off the computer once this download (and any virus
+    /// scan) finishes — the per-download analogue of a queue's
+    /// [`Schedule::shutdown_when_done`].
+    #[serde(default)]
+    pub shutdown_after: bool,
+    #[serde(default)]
+    pub shutdown_action: PowerAction,
 }
 
 impl DownloadItem {
@@ -250,6 +257,16 @@ pub enum ProxyMode {
     System,
     Script,
     Manual,
+}
+
+/// What "when done" should do to the machine — a queue's
+/// [`Schedule::shutdown_when_done`] or a download's
+/// [`DownloadItem::shutdown_after`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum PowerAction {
+    #[default]
+    Shutdown,
+    LogOff,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -470,6 +487,13 @@ pub struct Schedule {
     pub open_file_enabled: bool,
     pub open_file: String,
     pub exit_when_done: bool,
+    /// Shut down or log off the computer once every file in the queue has
+    /// downloaded — checked in the same "when done" pass as
+    /// `exit_when_done`.
+    #[serde(default)]
+    pub shutdown_when_done: bool,
+    #[serde(default)]
+    pub shutdown_action: PowerAction,
 }
 
 impl Default for Schedule {
@@ -488,6 +512,8 @@ impl Default for Schedule {
             open_file_enabled: false,
             open_file: String::new(),
             exit_when_done: false,
+            shutdown_when_done: false,
+            shutdown_action: PowerAction::default(),
         }
     }
 }
