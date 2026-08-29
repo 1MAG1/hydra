@@ -192,6 +192,7 @@ pub fn reinstall(state: &MenuState, queues: &[String], languages: &[String]) {
     let help = Submenu::new(tr("Help"), true);
     let _ = help.append_items(&[
         &item("Hydra Home Page", MenuAction::HomePage),
+        &item("Contribute on GitHub", MenuAction::Contribute),
         &item("Keyboard Shortcuts", MenuAction::Shortcuts),
         &item("Permissions", MenuAction::Permissions),
         &item("Check for updates", MenuAction::CheckUpdates),
