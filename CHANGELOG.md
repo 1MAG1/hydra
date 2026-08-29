@@ -5,6 +5,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [0.3.14] - 2026-08-29
+
+### Added
+
+- **Post-Download Antivirus Scanning (`hydra-gui`)**: Added integrated antivirus scanning for completed downloads. When configured under *Options → Downloads* with a virus scanner executable and arguments (supporting `%1` file path substitution), finished files are scanned prior to final completion. The progress window displays live scanner console output, an indeterminate marquee progress bar during scans, explicit status verdicts (*Clean*, *Infected*, or *Scan Error*), and interactive decision buttons (*Skip*, *Keep file*, or *Delete file*).
+- **Automated Computer Shutdown and Logout (`hydra-gui`)**: Added support for automatically shutting down or logging off the computer when downloads finish. Can be enabled on individual downloads in the *Progress → Completion* tab, or scheduled for entire download queues in the *Scheduler* window upon completing all queued tasks.
+- **Traditional Chinese Localization (`hydra-gui`)**: Added full Traditional Chinese (`zh-Hant`) language catalog, bringing total supported GUI locales to 14.
+- **Site Block List Auto-Start Warning & Guarding (`hydra-gui`)**: Added domain and subdomain pattern matching against the *Don't start downloading automatically from following sites* block list. Displays an inline warning banner in the *Add URL* dialog for matching sites, and ensures URLs from blocked sites are added in a paused/queued state rather than auto-starting across single, batch, and browser extension captures.
+- **Inline Double-Click Queue Renaming (`hydra-gui`)**: Added ability to rename custom download queues by double-clicking them directly in either the Categories sidebar or the Scheduler queue list, with protection for built-in queues (*Main download queue* and *Synchronization queue*).
+
+### Fixed
+
+- **Connection Admission by Live Count under Throttling (`hya-core`, `hya-net`)**: Fixed scheduler concurrency management under server rate-limiting and HTTP 429/503 errors. Replaced index-based slot gating with live admitted connection counts (`admitted()`), ensuring active high-index connections are not prematurely retired while lower-index connections cool down. Prioritized proven connections over unproven ones when reallocating freed slots to eliminate connection thrashing.
+- **Work-Conserving Assignment Reserve Preservation (`hya-core`)**: Restored the unassigned work reserve during concurrency ramping so idle connections draining their quotas do not prematurely consume the remaining file chunks, preventing costly range stealing and repair cycles for subsequent connections while preserving maximal-range assignments for settled fixed-concurrency transfers.
+- **Throttling Cooldown Synchronization (`hya-net`)**: Synchronized the scheduler's settling gate duration (`cap_settled_until`) with connection backoff timers, ensuring upward concurrency probing and retry bursts are properly evaluated rather than dropped.
+- **FFI Config Struct Bounds Safety (`hydra-ffi`)**: Fixed struct size offset validation in `engine_cfg` conversion to prevent invalid unaligned pointer reads when inspecting header flags.
+- **GUI Double-Click Event Handling (`hydra-gui`)**: Replaced intercepted mouse area events on button rows with internal double-click interval tracking, resolving issues where double-clicks were not detected on queue items.
+
+### Changed & Refactored
+
+- **Path-Scoped Site Login Credential Resolution (`hydra-gui`)**: Improved site credential lookup under *Options → Sites Logins* to support host, subdomain wildcard (`*.example.com`), and longest-path prefix matching (e.g. `example.com/private` taking precedence over `example.com`).
+- **Multi-Language Localization Updates (`hydra-gui`)**: Comprehensive updates and refinements to German (`de`), Korean (`ko`), and Spanish (`es`) translations, along with synchronized missing status and column strings across all 14 supported locales.
+
+---
+
 ## [0.3.13] - 2026-08-25
 
 ### Added

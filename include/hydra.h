@@ -224,7 +224,7 @@
 /**
  * Minor version component of `HYDRA_FFI_VERSION`.
  */
-#define HYDRA_FFI_VERSION_MINOR 1
+#define HYDRA_FFI_VERSION_MINOR 2
 
 /**
  * Patch version component of `HYDRA_FFI_VERSION`.
@@ -243,7 +243,7 @@
  * If the two disagree, this header is not the one that library was built
  * from.
  */
-#define HYDRA_FFI_VERSION "0.1.0"
+#define HYDRA_FFI_VERSION "0.2.0"
 
 /**
  * Numeric version encoded as `major * 1_000_000 + minor * 1_000 + patch` for preprocessor checks.

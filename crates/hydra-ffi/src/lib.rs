@@ -81,7 +81,7 @@ pub const HYDRA_FFI_VERSION: &str = "0.1.0";
 /// Major version component of `HYDRA_FFI_VERSION`.
 pub const HYDRA_FFI_VERSION_MAJOR: u32 = 0;
 /// Minor version component of `HYDRA_FFI_VERSION`.
-pub const HYDRA_FFI_VERSION_MINOR: u32 = 1;
+pub const HYDRA_FFI_VERSION_MINOR: u32 = 2;
 /// Patch version component of `HYDRA_FFI_VERSION`.
 pub const HYDRA_FFI_VERSION_PATCH: u32 = 0;
 
