@@ -44,10 +44,13 @@ text = open(src, encoding="utf-8").read()
 text = re.sub(r"\[`([^`]+)`\]", r"\1", text)
 text = text.replace("crate::exports::", "").replace("crate::", "")
 
-# cbindgen cannot emit a string constant (it refuses `Lit::Str`), so the one
-# string version macro is injected here, read from Cargo.toml. That keeps the
-# header's value tied to the crate's rather than to a literal someone has to
-# remember to update.
+# The version macros are injected here rather than emitted by cbindgen.
+# `crates/hydra-ffi/Cargo.toml` is the single place the version is written: the
+# Rust constants derive from it through `env!("CARGO_PKG_VERSION*")`, which
+# cbindgen cannot evaluate (and it refuses `Lit::Str` for the string one in any
+# case), so the values are read straight from the manifest here. Doing it this
+# way is what stops the header from carrying a literal somebody has to remember
+# to bump.
 version = None
 for line in open(manifest, encoding="utf-8"):
     m = re.match(r'^version\s*=\s*"([^"]+)"', line)
@@ -57,28 +60,49 @@ for line in open(manifest, encoding="utf-8"):
 if version is None:
     sys.exit("error: no version in " + manifest)
 
-anchor = "#define HYDRA_FFI_VERSION_PATCH"
+# A pre-release suffix (`0.2.0-rc1`) is not part of the numeric triple.
+parts = version.split("-")[0].split(".")
+if len(parts) != 3 or not all(p.isdigit() for p in parts):
+    sys.exit("error: %r in %s is not a numeric major.minor.patch version"
+             % (version, manifest))
+major, minor, patch = parts
+
+# The numeric macros land immediately before HYDRA_FFI_VERSION_NUMBER, which
+# cbindgen DOES emit (its expression is literal arithmetic over these three) and
+# which is unusable until they exist.
+anchor = "#define HYDRA_FFI_VERSION_NUMBER"
 if anchor not in text:
     sys.exit("error: %r is missing from the generated header; the injection "
-             "point for HYDRA_FFI_VERSION has moved" % anchor)
+             "point for the version macros has moved" % anchor)
 line = [l for l in text.split("\n") if l.startswith(anchor)][0]
-text = text.replace(
-    line,
-    line
-    + "\n\n/**\n * The library version this header was generated from.\n"
-      " *\n"
-      " * The LIBRARY version, not the ABI version: it moves on every release,\n"
-      " * including ones that change nothing a binding can observe. Compare\n"
-      " * HYDRA_FFI_ABI_VERSION to decide whether a header and a library are\n"
-      " * compatible; use this to report what you linked against.\n"
-      " *\n"
-      " * hydra_ffi_version_string() returns the value compiled into the library.\n"
-      " * If the two disagree, this header is not the one that library was built\n"
-      " * from.\n"
-      " */\n"
-      '#define HYDRA_FFI_VERSION "%s"' % version,
-    1,
+# The doc comment cbindgen would have written for each constant, kept here
+# because the constants themselves no longer reach it.
+block = ""
+for name, value, doc in (
+    ("HYDRA_FFI_VERSION_MAJOR", major, "Major version component of `HYDRA_FFI_VERSION`."),
+    ("HYDRA_FFI_VERSION_MINOR", minor, "Minor version component of `HYDRA_FFI_VERSION`."),
+    ("HYDRA_FFI_VERSION_PATCH", patch, "Patch version component of `HYDRA_FFI_VERSION`."),
+):
+    block += "/**\n * %s\n */\n#define %s %s\n\n" % (doc, name, value)
+block += (
+    "/**\n * The library version this header was generated from.\n"
+    " *\n"
+    " * The LIBRARY version, not the ABI version: it moves on every release,\n"
+    " * including ones that change nothing a binding can observe. Compare\n"
+    " * HYDRA_FFI_ABI_VERSION to decide whether a header and a library are\n"
+    " * compatible; use this to report what you linked against.\n"
+    " *\n"
+    " * hydra_ffi_version_string() returns the value compiled into the library.\n"
+    " * If the two disagree, this header is not the one that library was built\n"
+    " * from.\n"
+    " */\n"
+    '#define HYDRA_FFI_VERSION "%s"\n\n' % version
 )
+# cbindgen's own doc comment for HYDRA_FFI_VERSION_NUMBER sits directly above
+# the anchor line; the injected block goes above that comment, not between it
+# and its macro.
+doc_open = text.rindex("/**", 0, text.index(line))
+text = text[:doc_open] + block + text[doc_open:]
 
 # The layout assertions go at the FOOT of the header, inside the include guard:
 # they need every type declared, and cbindgen has no hook that lands there.
