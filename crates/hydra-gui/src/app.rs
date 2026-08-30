@@ -791,6 +791,7 @@ pub enum OptField {
     CheckUpdates(bool),
     BetaChannel(bool),
     StartInTray(bool),
+    CloseToTray(bool),
     /// Only where the Dock/taskbar checkbox exists (macOS, Windows, Linux).
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     HideTaskbar(bool),
@@ -2625,11 +2626,13 @@ impl App {
                         self.save_state();
                         self.save_config();
                         self.flush_saves();
-                        if crate::tray::is_active() {
+                        if self.cfg.settings.close_to_tray && crate::tray::is_active() {
                             // Hydra lives on in the system tray; Exit is in
                             // the tray menu (and the app menu on macOS).
                             // Without a tray there would be no way back to
-                            // the app, so closing quits instead.
+                            // the app, so closing quits instead — and so it
+                            // does when Options > General turns close-to-tray
+                            // off, which asks for a plain quit.
                             self.main_id = None;
                             Task::none()
                         } else {
@@ -5069,6 +5072,7 @@ impl App {
             OptField::CheckUpdates(b) => s.check_updates_on_startup = b,
             OptField::BetaChannel(b) => s.beta_channel = b,
             OptField::StartInTray(b) => s.start_in_tray = b,
+            OptField::CloseToTray(b) => s.close_to_tray = b,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             OptField::HideTaskbar(b) => s.hide_from_taskbar = b,
             OptField::PowerSave(b) => {
