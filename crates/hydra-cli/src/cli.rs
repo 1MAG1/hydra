@@ -885,6 +885,12 @@ pub enum Command {
         /// bash | zsh | fish | elvish | powershell
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+
+        /// Command the script completes. Defaults to `hydra`; pass `hya` for
+        /// the short name the installers link next to it, which needs its own
+        /// script because a completion script names the command it serves.
+        #[arg(long = "bin-name", value_name = "NAME")]
+        bin_name: Option<String>,
     },
 
     /// Check whether a newer hydra release is available.
@@ -962,6 +968,12 @@ pub enum Command {
         /// Print the destination path and script without writing anything.
         #[arg(long)]
         dry_run: bool,
+
+        /// Command the script completes. Defaults to `hydra`; pass `hya` for
+        /// the short name the installers link next to it, which needs its own
+        /// script because a completion script names the command it serves.
+        #[arg(long = "bin-name", value_name = "NAME")]
+        bin_name: Option<String>,
     },
 }
 

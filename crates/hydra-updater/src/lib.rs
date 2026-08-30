@@ -964,11 +964,59 @@ pub fn apply_with(
         };
         replace_file(&path, &dest)?;
         report.replaced.push(name.to_string_lossy().into_owned());
+        if name == cli_file_name() {
+            match refresh_cli_alias(&dest) {
+                Ok(true) => report.notes.push(format!("{CLI_ALIAS} refreshed")),
+                Ok(false) => {}
+                Err(e) => report
+                    .notes
+                    .push(format!("{CLI_ALIAS} refresh failed: {e}")),
+            }
+        }
     }
     if let Some(bundle) = &bundle {
         finish_bundle(bundle, opts.version.as_deref(), &mut report);
     }
     Ok(report)
+}
+
+/// The short second name every Hydra installer puts next to the CLI, because
+/// `hydra` is also THC-Hydra and three letters types better.
+pub const CLI_ALIAS: &str = if cfg!(windows) { "hya.exe" } else { "hya" };
+
+/// The CLI's file name in a release archive.
+fn cli_file_name() -> &'static str {
+    if cfg!(windows) {
+        "hydra.exe"
+    } else {
+        "hydra"
+    }
+}
+
+/// Put the `hya` shorthand back in step with the CLI at `cli`, which was just
+/// replaced.
+///
+/// On Unix the installers link it (`hya -> hydra`), so it follows the new
+/// binary on its own and this does nothing. Windows hands out a symlink only
+/// to an elevated shell or with Developer Mode on, so `install.ps1` may have
+/// left a hard link or a plain copy — and both still carry the OLD bits after
+/// [`try_replace`] renamed the file aside and wrote a new one in its place.
+///
+/// Only an alias that is already there is touched: an install that never had
+/// the short name does not gain one from an update.
+fn refresh_cli_alias(cli: &Path) -> io::Result<bool> {
+    let Some(alias) = cli.parent().map(|d| d.join(CLI_ALIAS)) else {
+        return Ok(false);
+    };
+    // symlink_metadata, so a link is seen as a link rather than followed.
+    match std::fs::symlink_metadata(&alias) {
+        Ok(meta) if meta.file_type().is_symlink() => Ok(false),
+        Ok(_) => {
+            replace_file(cli, &alias)?;
+            Ok(true)
+        }
+        Err(_) => Ok(false),
+    }
 }
 
 /// Where a release file lands inside a macOS application bundle, or `None`
@@ -1532,6 +1580,54 @@ mod tests {
             "new gui"
         );
         assert!(!plain.join("hydra").exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_copied_cli_alias_is_refreshed_but_a_linked_one_is_left_alone() {
+        // Windows may only be able to give `hya` the CLI's bits rather than
+        // its name, and those bits go stale the moment `hydra` is replaced.
+        let tmp = std::env::temp_dir().join(format!("hydra-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let src = tmp.join("src");
+        let bin = tmp.join("bin");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let cli = cli_file_name();
+        std::fs::write(src.join(cli), b"new cli").unwrap();
+        std::fs::write(bin.join(cli), b"old cli").unwrap();
+        std::fs::write(bin.join(CLI_ALIAS), b"old cli").unwrap();
+
+        let report = apply(&src, &bin).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(bin.join(CLI_ALIAS)).unwrap(),
+            "new cli"
+        );
+        assert!(report.notes.iter().any(|n| n.contains(CLI_ALIAS)));
+
+        // A symlinked alias resolves through the name, so it is already
+        // current — and rewriting it would turn it into a second copy.
+        #[cfg(unix)]
+        {
+            std::fs::write(src.join(cli), b"newer cli").unwrap();
+            std::fs::remove_file(bin.join(CLI_ALIAS)).unwrap();
+            std::os::unix::fs::symlink(cli, bin.join(CLI_ALIAS)).unwrap();
+            apply(&src, &bin).unwrap();
+            assert!(std::fs::symlink_metadata(bin.join(CLI_ALIAS))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(
+                std::fs::read_to_string(bin.join(CLI_ALIAS)).unwrap(),
+                "newer cli"
+            );
+        }
+
+        // An install that never had the short name does not gain one.
+        std::fs::remove_file(bin.join(CLI_ALIAS)).unwrap();
+        apply(&src, &bin).unwrap();
+        assert!(!bin.join(CLI_ALIAS).exists());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

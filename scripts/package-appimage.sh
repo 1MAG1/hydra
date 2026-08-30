@@ -366,6 +366,7 @@ unintegrate() {
 # Which binary does this invocation want?
 #   --hydra-exec NAME   explicit (how the generated host wrapper re-enters)
 #   $ARGV0              the name the image was called by, for a symlink farm
+#                       (`hya` is the CLI's short name, same as everywhere else)
 #   otherwise           the GUI
 TARGET=hydra-gui
 case "${1:-}" in
@@ -396,7 +397,7 @@ case "${1:-}" in
     echo "$EXTS"; exit 0 ;;
   *)
     case "$(basename "${ARGV0:-hydra-gui}")" in
-      hydra|hydra-cli) TARGET=hydra ;;
+      hydra|hydra-cli|hya) TARGET=hydra ;;
       hydra-host) TARGET=hydra-host ;;
       hydra-updater) TARGET=hydra-updater ;;
     esac

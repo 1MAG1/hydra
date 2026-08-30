@@ -450,8 +450,9 @@ async fn async_main() -> std::process::ExitCode {
         Some(cli::Command::Update { json, beta }) => {
             return update::run(*json, *beta).await;
         }
-        Some(cli::Command::Completions { shell }) => {
-            print!("{}", completions::render(*shell));
+        Some(cli::Command::Completions { shell, bin_name }) => {
+            let bin = bin_name.as_deref().unwrap_or(completions::DEFAULT_BIN);
+            print!("{}", completions::render(*shell, bin));
             return std::process::ExitCode::SUCCESS;
         }
         Some(cli::Command::CompatLink {
@@ -528,7 +529,9 @@ async fn async_main() -> std::process::ExitCode {
             shell,
             system,
             dry_run,
+            bin_name,
         }) => {
+            let bin = bin_name.as_deref().unwrap_or(completions::DEFAULT_BIN);
             let shell = match shell.or_else(completions::detect_shell) {
                 Some(s) => s,
                 None => {
@@ -539,15 +542,18 @@ async fn async_main() -> std::process::ExitCode {
                     return std::process::ExitCode::from(2);
                 }
             };
-            match completions::install(shell, *system, *dry_run) {
+            match completions::install(shell, *system, *dry_run, bin) {
                 Ok(dest) => {
                     if *dry_run {
                         println!(
-                            "would install {shell} completions to {}",
+                            "would install {shell} completions for {bin} to {}",
                             dest.path.display()
                         );
                     } else {
-                        println!("installed {shell} completions to {}", dest.path.display());
+                        println!(
+                            "installed {shell} completions for {bin} to {}",
+                            dest.path.display()
+                        );
                     }
                     if let Some(step) = dest.remaining_step {
                         println!("remaining step: {step}");
