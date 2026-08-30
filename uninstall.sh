@@ -114,7 +114,7 @@ fi
 # Man pages, by exact name: a glob like hydra*.1 could hit the unrelated
 # THC hydra(1) if it shares the prefix.
 MAN_PAGES=(hydra.1 hydra-interactive.1 hydra-checksum.1 hydra-parity.1
-           hydra-formats.1 hydra-bench.1 hydra-completions.1)
+           hydra-formats.1 hydra-bench.1 hydra-completions.1 hydra-host.1)
 
 # Binaries + share dir + man pages from the tarball install.
 if [ -n "$PREFIX" ]; then PREFIXES=("$PREFIX"); else PREFIXES=(/usr/local "$USER_HOME/.local"); fi

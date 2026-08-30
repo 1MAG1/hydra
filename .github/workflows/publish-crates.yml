@@ -11,6 +11,7 @@ on:
     paths:
       - "crates/hydra-core/Cargo.toml"
       - "crates/hydra-net/Cargo.toml"
+      - "crates/hydra-stream/Cargo.toml"
       - ".github/workflows/publish-crates.yml"
   workflow_dispatch:
 
