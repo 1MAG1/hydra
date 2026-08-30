@@ -181,8 +181,11 @@ Extensions.
 - `referer` and per-download `user_agent` are transmitted and logged, but
   the engine does not yet send them (StartSpec has no header support);
   cookies **are** applied.
-- Segmented streams (HLS `.m3u8` / DASH) are deliberately not sniffed —
-  Hydra downloads files, it does not mux segment streams.
+- Streams whose manifest declares DRM (Widevine, PlayReady, FairPlay,
+  common encryption) are listed as protected and are never sent — Hydra
+  does not circumvent DRM. Live HLS/DASH under any encryption is refused by
+  the engine for the same reason keys make it impossible to record honestly.
+
 ## Do I need `hydra-host` on every OS?
 
 Only for one job: **starting Hydra when it is not already running.** Every
