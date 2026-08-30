@@ -1,4 +1,13 @@
-%{!?_version: %global _version 0.3.13}
+# The version is rendered in by scripts/render-rpm-spec.sh, which takes it from
+# [workspace.package] in Cargo.toml (or from the release tag). It cannot be left
+# to `rpmbuild --define _version ...`: Copr imports this spec and the tarball
+# into dist-git and re-runs `rpmbuild -bs` in mock without our defines, so a spec
+# that carried no version of its own fell back to a stale built-in default and
+# looked for a tarball that was never built ("Bad file: hydra-<old>.tar.gz").
+#
+# Build from a rendered copy, not from this file directly:
+#   scripts/render-rpm-spec.sh > /tmp/rpmbuild/SPECS/hydra.spec
+%global _version @HYDRA_VERSION@
 
 Name:           hydra
 Version:        %{_version}
