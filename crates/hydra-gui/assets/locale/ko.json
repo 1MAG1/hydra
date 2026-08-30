@@ -406,5 +406,7 @@
   "Recording, segments:": "Recording, segments:",
   "Finishing the recording...": "Finishing the recording...",
   "Combining video and audio...": "Combining video and audio...",
-  "Recorded": "Recorded"
+  "Recorded": "Recorded",
+  "Close to system tray": "Close to system tray",
+  "Closing the main window leaves Hydra running in the tray, where queues and transfers carry on; open it again from the tray icon. Off: closing the window exits Hydra.": "Closing the main window leaves Hydra running in the tray, where queues and transfers carry on; open it again from the tray icon. Off: closing the window exits Hydra."
 }

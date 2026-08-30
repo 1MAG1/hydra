@@ -359,6 +359,12 @@ pub struct Settings {
     pub beta_channel: bool,
     /// Autostart launches come up in the tray without opening the window.
     pub start_in_tray: bool,
+    /// Closing the main window leaves Hydra running in the system tray
+    /// (default) instead of quitting, so queues and transfers carry on.
+    /// Off: the close button ends the session the way File > Exit does.
+    /// Ignored when no tray icon could be installed — without one there
+    /// would be no way back into the app, so closing always quits then.
+    pub close_to_tray: bool,
     /// Fewer wakeups everywhere: slower UI refresh, no glide animation,
     /// coarser engine ticks. Transfer speed is unaffected.
     pub power_save: bool,
@@ -456,6 +462,7 @@ impl Default for Settings {
             check_updates_on_startup: true,
             beta_channel: false,
             start_in_tray: true,
+            close_to_tray: true,
             power_save: false,
             hide_from_taskbar: false,
             gpu_render: false,
