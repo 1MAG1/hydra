@@ -37,6 +37,7 @@ static BUILTIN: &[(&str, &str, &str)] = &[
         include_str!("../assets/locale/pt-BR.json"),
     ),
     ("ru", "Русский", include_str!("../assets/locale/ru.json")),
+    ("tr", "Türkçe", include_str!("../assets/locale/tr.json")),
     ("zh", "简体中文", include_str!("../assets/locale/zh.json")),
     (
         "zh-Hant",
