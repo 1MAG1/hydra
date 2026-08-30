@@ -154,6 +154,7 @@
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "מאפשר ל-Hydra לשמור בכל תיקייה ללא בקשת הרשאה לכל תיקייה בנפרד. הוסף את Hydra בעזרת כפתור ה-+, הפעל את האפשרות, ואז הפעל מחדש את האפליקציה. לא חובה לשימוש רגיל.",
   "Light": "בהיר",
   "Limit off: transfers are not counted.": "הגבלה כבויה: העברות אינן נספרות.",
+  "Log off": "Log off",
   "Login": "התחברות",
   "Login item": "פריט התחברות",
   "MBytes every": "מגה-בייט (MB) בכל",
@@ -266,6 +267,8 @@
   "Shows a Hide-tab button inside the Speed Limiter and Options-on-completion tabs.": "מציג כפתור להסתרת כרטיסייה בתוך הכרטיסיות 'מגביל מהירות' ו'אפשרויות בעת השלמה'.",
   "Shows or hides the Options-on-completion tab of the progress window.": "מציג או מסתיר את כרטיסיית 'אפשרויות בעת השלמה' בחלון ההתקדמות.",
   "Shows or hides the Speed Limiter tab of the progress window.": "מציג או מסתיר את כרטיסיית 'מגביל מהירות' בחלון ההתקדמות.",
+  "Shut down / log off computer when done": "Shut down / log off computer when done",
+  "Shutdown": "Shutdown",
   "Site/path": "אתר/נתיב",
   "Sites Logins": "התחברויות לאתרים",
   "Size": "גודל",
@@ -372,5 +375,8 @@
   "shift+": "shift+",
   "✕": "✕",
   "⬆": "⬆",
-  "⬇": "⬇"
+  "⬇": "⬇",
+  "Contribute on GitHub": "Contribute on GitHub",
+  "blocked site": "blocked site",
+  "This site is on the auto-start block list; it will be added, not started.": "This site is on the auto-start block list; it will be added, not started."
 }

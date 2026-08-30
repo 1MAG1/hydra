@@ -6,11 +6,11 @@
 //! progress by connections" strip, and the per-connection table.
 
 use crate::app::{App, El, Message, ProgTab, ScanState};
-use crate::model::{DlState, DownloadItem};
+use crate::model::{DlState, DownloadItem, PowerAction};
 use crate::windows::{dlg_btn, dlg_btn_primary};
 use crate::{fmt, i18n::tr, theme};
 use iced::widget::{
-    button, checkbox, column, container, progress_bar, row, scrollable, text, text_input,
+    button, checkbox, column, container, progress_bar, radio, row, scrollable, text, text_input,
 };
 use iced::Length;
 
@@ -142,7 +142,7 @@ fn speed_tab<'a>(app: &'a App, d: &'a DownloadItem) -> El<'a> {
 }
 
 fn completion_tab<'a>(app: &'a App, d: &'a DownloadItem) -> El<'a> {
-    column![
+    let mut col = column![
         row![
             text(tr("Save To:")).size(theme::FONT_SIZE).width(70.0),
             text(d.full_path().to_string_lossy().into_owned()).size(theme::FONT_SIZE),
@@ -158,14 +158,47 @@ fn completion_tab<'a>(app: &'a App, d: &'a DownloadItem) -> El<'a> {
         ))
         .size(theme::FONT_SIZE)
         .color(theme::dim_text(&iced::Theme::Light)),
-        if app.cfg.settings.show_hide_buttons {
-            crate::windows::dlg_btn(tr("Hide tab"), Some(Message::ProgHideTab(d.id, 2)))
-        } else {
-            iced::widget::space::horizontal().height(0.0).into()
-        },
+        checkbox(d.shutdown_after)
+            .label(tr("Shut down / log off computer when done"))
+            .on_toggle(move |b| Message::ProgShutdownAfter(d.id, b))
+            .size(15.0)
+            .text_size(theme::FONT_SIZE)
+            .style(theme::check),
     ]
-    .spacing(10)
-    .into()
+    .spacing(10);
+
+    if d.shutdown_after {
+        col = col.push(
+            row![
+                radio(
+                    tr("Shutdown"),
+                    PowerAction::Shutdown,
+                    Some(d.shutdown_action),
+                    move |v| Message::ProgShutdownAction(d.id, v),
+                )
+                .size(15.0)
+                .text_size(theme::FONT_SIZE),
+                radio(
+                    tr("Log off"),
+                    PowerAction::LogOff,
+                    Some(d.shutdown_action),
+                    move |v| Message::ProgShutdownAction(d.id, v),
+                )
+                .size(15.0)
+                .text_size(theme::FONT_SIZE),
+            ]
+            .spacing(30),
+        );
+    }
+
+    if app.cfg.settings.show_hide_buttons {
+        col = col.push(crate::windows::dlg_btn(
+            tr("Hide tab"),
+            Some(Message::ProgHideTab(d.id, 2)),
+        ));
+    }
+
+    col.into()
 }
 
 /// The indeterminate bar shown while the virus scanner works: iced's

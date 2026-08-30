@@ -154,6 +154,7 @@
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.",
   "Light": "Light",
   "Limit off: transfers are not counted.": "Limit off: transfers are not counted.",
+  "Log off": "Log off",
   "Login": "Login",
   "Login item": "Login item",
   "MBytes every": "MBytes every",
@@ -266,6 +267,8 @@
   "Shows a Hide-tab button inside the Speed Limiter and Options-on-completion tabs.": "Shows a Hide-tab button inside the Speed Limiter and Options-on-completion tabs.",
   "Shows or hides the Options-on-completion tab of the progress window.": "Shows or hides the Options-on-completion tab of the progress window.",
   "Shows or hides the Speed Limiter tab of the progress window.": "Shows or hides the Speed Limiter tab of the progress window.",
+  "Shut down / log off computer when done": "Shut down / log off computer when done",
+  "Shutdown": "Shutdown",
   "Site/path": "Site/path",
   "Sites Logins": "Sites Logins",
   "Size": "Size",
@@ -372,5 +375,8 @@
   "shift+": "shift+",
   "✕": "✕",
   "⬆": "⬆",
-  "⬇": "⬇"
+  "⬇": "⬇",
+  "Contribute on GitHub": "Contribute on GitHub",
+  "blocked site": "blocked site",
+  "This site is on the auto-start block list; it will be added, not started.": "This site is on the auto-start block list; it will be added, not started."
 }

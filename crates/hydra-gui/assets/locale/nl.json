@@ -154,6 +154,7 @@
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "Hiermee kan Hydra in elke map opslaan zonder prompts per map. Voeg Hydra toe met de +-knop, schakel het in en herstart de app. Niet vereist voor normaal gebruik.",
   "Light": "Light",
   "Limit off: transfers are not counted.": "Limiet uit: overdrachten worden niet geteld.",
+  "Log off": "Log off",
   "Login": "Inloggen",
   "Login item": "Inlogonderdeel",
   "MBytes every": "MB elke",
@@ -266,6 +267,8 @@
   "Shows a Hide-tab button inside the Speed Limiter and Options-on-completion tabs.": "Toont een tabblad-verbergknop binnen de tabbladen Snelheidsbegrenzer en Opties bij voltooiing.",
   "Shows or hides the Options-on-completion tab of the progress window.": "Toont of verbergt het tabblad Opties bij voltooiing in het voortgangsvenster.",
   "Shows or hides the Speed Limiter tab of the progress window.": "Toont of verbergt het tabblad Snelheidsbegrenzer in het voortgangsvenster.",
+  "Shut down / log off computer when done": "Shut down / log off computer when done",
+  "Shutdown": "Shutdown",
   "Site/path": "Site/pad",
   "Sites Logins": "Site-aanmeldingen",
   "Size": "Grootte",
@@ -372,5 +375,8 @@
   "shift+": "shift+",
   "✕": "✕",
   "⬆": "⬆",
-  "⬇": "⬇"
+  "⬇": "⬇",
+  "Contribute on GitHub": "Contribute on GitHub",
+  "blocked site": "blocked site",
+  "This site is on the auto-start block list; it will be added, not started.": "This site is on the auto-start block list; it will be added, not started."
 }

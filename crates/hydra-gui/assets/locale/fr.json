@@ -154,6 +154,7 @@
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "Permet à Hydra d'enregistrer dans n'importe quel dossier sans invite par dossier. Ajoutez Hydra avec le bouton +, activez-le, puis relancez l'application. Non requis pour une utilisation normale.",
   "Light": "Light",
   "Limit off: transfers are not counted.": "Limite désactivée : les transferts ne sont pas comptés.",
+  "Log off": "Log off",
   "Login": "Identifiant",
   "Login item": "Élément d'ouverture",
   "MBytes every": "Mo toutes les",
@@ -266,6 +267,8 @@
   "Shows a Hide-tab button inside the Speed Limiter and Options-on-completion tabs.": "Affiche un bouton Masquer l'onglet dans les onglets Limiteur de vitesse et Options de fin.",
   "Shows or hides the Options-on-completion tab of the progress window.": "Affiche ou masque l'onglet Options de fin de la fenêtre de progression.",
   "Shows or hides the Speed Limiter tab of the progress window.": "Affiche ou masque l'onglet Limiteur de vitesse de la fenêtre de progression.",
+  "Shut down / log off computer when done": "Shut down / log off computer when done",
+  "Shutdown": "Shutdown",
   "Site/path": "Site/chemin",
   "Sites Logins": "Identifiants des sites",
   "Size": "Taille",
@@ -372,5 +375,8 @@
   "shift+": "shift+",
   "✕": "✕",
   "⬆": "⬆",
-  "⬇": "⬇"
+  "⬇": "⬇",
+  "Contribute on GitHub": "Contribute on GitHub",
+  "blocked site": "blocked site",
+  "This site is on the auto-start block list; it will be added, not started.": "This site is on the auto-start block list; it will be added, not started."
 }

@@ -48,8 +48,8 @@ Or, as a binary Swift package:
 // or, for a released archive:
 .binaryTarget(
     name: "Hydra",
-    url: "https://github.com/ja7ad/hydra/releases/download/v0.3.1/libhydra-0.1.0-apple.zip",
-    checksum: "<swift package compute-checksum libhydra-0.1.0-apple.zip>")
+    url: "https://github.com/ja7ad/hydra/releases/download/<tag>/libhydra-<version>-apple.zip",
+    checksum: "<swift package compute-checksum libhydra-<version>-apple.zip>")
 ```
 
 The framework carries a module map, so Swift can `import Hydra` with no bridging

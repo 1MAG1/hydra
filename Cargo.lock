@@ -1979,7 +1979,7 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "hya-cli"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2007,7 +2007,7 @@ dependencies = [
 
 [[package]]
 name = "hya-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "hya-core",
@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "hya-gui"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "blake3",
  "chrono",
@@ -2045,6 +2045,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "system_shutdown",
  "tokio",
  "toml",
  "tray-icon",
@@ -2054,7 +2055,7 @@ dependencies = [
 
 [[package]]
 name = "hya-host"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "serde_json",
 ]
@@ -2080,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "hya-updater"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "blake3",
  "clap",
@@ -4900,6 +4901,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "system_shutdown"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29396e5e1b637d102ec5037bf7fbb8da78264fa299101ced9ce827756b1bac02"
+dependencies = [
+ "windows 0.62.2",
+ "zbus",
 ]
 
 [[package]]

@@ -102,10 +102,7 @@ pub(crate) unsafe fn engine_cfg(p: *const hydra_engine_config_t) -> Result<Engin
     out.worker_threads = c.worker_threads.min(1024) as usize;
     out.max_bytes_per_second = c.max_bytes_per_second;
 
-    let reaches = |off: usize| {
-        // SAFETY: reads size field from valid header prefix.
-        (unsafe { (p as *const u32).read_unaligned() } as usize) >= off
-    };
+    let reaches = |off: usize| (c.size as usize) >= off;
     let flags_off = std::mem::offset_of!(hydra_engine_config_t, reserved0) + 1;
     if reaches(flags_off) {
         out.adaptive_concurrency = c.adaptive_concurrency != 0;

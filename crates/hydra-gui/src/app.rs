@@ -5,8 +5,8 @@
 
 use crate::engine::{self, Cmd, StartSpec};
 use crate::model::{
-    self, categorize, ConfigFile, DlId, DlQuota, DlState, DownloadItem, ProxyMode, SiteLogin,
-    StateFile, ThemeMode,
+    self, categorize, ConfigFile, DlId, DlQuota, DlState, DownloadItem, PowerAction, ProxyMode,
+    SiteLogin, StateFile, ThemeMode,
 };
 use crate::sounds;
 use crate::{fmt, i18n};
@@ -105,6 +105,7 @@ pub enum MenuAction {
     FontSize(u16),
     Language(String),
     HomePage,
+    Contribute,
     About,
     Permissions,
     MoveToQueue(String),
@@ -155,6 +156,7 @@ impl MenuAction {
             MenuAction::FontSize(s) => format!("font:{s}"),
             MenuAction::Language(l) => format!("lang:{l}"),
             MenuAction::HomePage => "homepage".into(),
+            MenuAction::Contribute => "contribute".into(),
             MenuAction::About => "about".into(),
             MenuAction::Permissions => "permissions".into(),
             MenuAction::MoveToQueue(q) => format!("move_q:{q}"),
@@ -229,6 +231,7 @@ impl MenuAction {
             "extensions" => MenuAction::Extensions,
             "hide_cats" => MenuAction::HideCategories,
             "homepage" => MenuAction::HomePage,
+            "contribute" => MenuAction::Contribute,
             "about" => MenuAction::About,
             "permissions" => MenuAction::Permissions,
             "rm_q" => MenuAction::RemoveFromQueue,
@@ -557,6 +560,12 @@ pub enum Message {
     Menu(MenuAction),
     TreeSelect(TreeSel),
     TreeToggle(u8),
+    /// Double-click on a user-created queue's sidebar row: switch it into
+    /// an inline rename field. Stock queues (Main/Synchronization) ignore
+    /// this.
+    TreeQueueRenameStart(String),
+    TreeQueueRenameDraft(String),
+    TreeQueueRenameCommit,
     RowClick(DlId),
     RowRightClick(DlId),
     /// Sample the pointer while a rubber-band or a column resize is in
@@ -620,6 +629,8 @@ pub enum Message {
     ProgLimitOn(DlId, bool),
     ProgLimitKb(DlId, String),
     ProgLimitRemember(DlId, bool),
+    ProgShutdownAfter(DlId, bool),
+    ProgShutdownAction(DlId, PowerAction),
     /// Skip the virus scan running over the finished file.
     ProgScanSkip(DlId),
     /// Infected (or unscannable): keep the file, close the dialog.
@@ -770,6 +781,8 @@ pub enum SchField {
     OpenFileEnabled(bool),
     OpenFile(String),
     ExitDone(bool),
+    ShutdownDone(bool),
+    ShutdownAction(PowerAction),
     FilesAtOnce(String),
 }
 
@@ -791,11 +804,23 @@ pub struct App {
     pub resizing: Option<(usize, f32, f32)>,
     pub tree_sel: TreeSel,
     pub tree_open: [bool; 4], // all, unfinished, finished, queues
+    /// Sidebar inline rename: the queue currently being renamed, if any,
+    /// and its draft text. The draft is committed on Enter and dropped on
+    /// Escape or on selecting another row; an empty, duplicate or stock
+    /// name is refused and leaves the queue as it was.
+    pub renaming_queue: Option<String>,
+    pub queue_rename_draft: String,
     pub open_menu: Option<MenuBarKind>,
     pub open_submenu: Option<usize>,
     pub cursor: Point,
     pub ctx_at: Option<Point>,
     pub last_click: Option<(DlId, Instant)>,
+    /// Last click on a queue row, for the rename double-click. The rows are
+    /// buttons, and a button captures the mouse event before an enclosing
+    /// `mouse_area` is asked, so `on_double_click` never fires on one:
+    /// the pair is timed here instead, as the download table already does
+    /// with [`Self::last_click`].
+    pub last_queue_click: Option<(String, Instant)>,
     pub sort: (SortKey, bool),
     pub add_url: AddUrlState,
     pub file_info: FileInfoState,
@@ -999,6 +1024,20 @@ impl App {
             .map(|(id, _)| *id)
     }
 
+    /// Re-fits a dialog already open at `kind` to whatever [`Self::window_size`]
+    /// now answers for it — a row that only shows up in some states (an
+    /// error, a credentials row) otherwise has nowhere to go until the
+    /// dialog is closed and reopened.
+    fn resize_open(&self, kind: WinKind) -> Task<Message> {
+        match self.win_of(kind) {
+            Some(id) => {
+                let (w, h) = self.window_size(kind);
+                window::resize(id, iced::Size::new(w, h))
+            }
+            None => Task::none(),
+        }
+    }
+
     /// The pointer, right now. Motion publishes no messages at all, so menu
     /// placement, the start of a drag and `Message::DragTick` all read the
     /// position from the probe.
@@ -1177,7 +1216,26 @@ impl App {
         }
         let (w, h) = match kind {
             WinKind::Main => unreachable!("handled above"),
-            WinKind::AddUrl => (760.0, 168.0),
+            // Base layout plus the credentials row when "Use authorization"
+            // is on, plus the error/blocked-site line when one is showing —
+            // both add a real row that the fixed base height has no room
+            // for, so the message otherwise runs past the window's bottom.
+            WinKind::AddUrl => {
+                let mut h = 168.0;
+                if self.add_url.use_auth {
+                    h += 40.0;
+                }
+                let warn = self.add_url.error.is_some()
+                    || (!self.add_url.address.trim().is_empty()
+                        && site_blocked(
+                            self.add_url.address.trim(),
+                            &self.cfg.settings.dont_start_sites,
+                        ));
+                if warn {
+                    h += 40.0;
+                }
+                (760.0, h)
+            }
             // New-download layout is short; Properties adds status/size/
             // login/cookies/history rows. Size the window to the mode so
             // neither shows dead space.
@@ -1361,6 +1419,11 @@ impl App {
             .map(|(_, n)| *n)
             .unwrap_or(self.cfg.settings.default_conns)
             .clamp(1, 32)
+    }
+
+    /// Saved credentials for a URL from Options > Sites Logins.
+    fn login_for(&self, url: &str) -> Option<(String, String)> {
+        find_login(url, &self.cfg.settings.logins).map(|l| (l.user.clone(), l.pass.clone()))
     }
 
     /// The cap this download is actually running under: its own if it set one,
@@ -1550,6 +1613,7 @@ impl App {
         let spec = StartSpec {
             conns: self.conns_for(&url),
             limit,
+            auth: spec.auth.clone().or_else(|| self.login_for(&url)),
             ..spec
         };
         engine::send(Cmd::Start(Box::new(spec)));
@@ -1721,6 +1785,8 @@ impl App {
             eta_secs: None,
             conns: vec![],
             status_line: String::new(),
+            shutdown_after: false,
+            shutdown_action: PowerAction::default(),
         });
         self.save_state();
         id
@@ -1769,14 +1835,72 @@ impl App {
                 sounds::Event::DownloadComplete,
             );
         }
-        let mut task = self.close_window(WinKind::Progress(id));
+        let task = self.close_window(WinKind::Progress(id));
+        // Shutting down makes the complete dialog moot — flush state first,
+        // since the OS call may end the process almost immediately.
+        if let Some(action) = self
+            .item(id)
+            .filter(|d| d.shutdown_after)
+            .map(|d| d.shutdown_action)
+        {
+            self.save_state();
+            self.save_config();
+            self.flush_saves();
+            run_power_action(action);
+            return Task::batch([task, iced::exit()]);
+        }
         if self.cfg.settings.show_complete_dialog {
-            task = Task::batch([task, self.open_window(WinKind::Complete(id))]);
+            return Task::batch([task, self.open_window(WinKind::Complete(id))]);
         }
         task
     }
 
     // --------------------------------------------------------------- queues
+
+    /// Records a click on the queue row `name` and answers whether it closed
+    /// a double-click. `None` is a click that landed somewhere other than a
+    /// queue row, which restarts the count.
+    fn queue_click(&mut self, name: Option<&str>) -> bool {
+        double_click(&mut self.last_queue_click, name)
+    }
+
+    /// Renames a queue and every download filed under it, then refreshes
+    /// the menu bar / tray submenus that carry queue names. Refuses an
+    /// empty name, a name already taken by another queue, or renaming a
+    /// stock queue (Main download queue / Synchronization queue). Returns
+    /// whether the rename went through.
+    fn rename_queue(&mut self, old: &str, new: &str) -> bool {
+        let new = new.trim();
+        let taken = self
+            .cfg
+            .queues
+            .iter()
+            .any(|q| q.name == new && q.name != old);
+        let builtin = self
+            .cfg
+            .queues
+            .iter()
+            .find(|q| q.name == old)
+            .map(|q| q.builtin)
+            .unwrap_or(true);
+        if new.is_empty() || taken || new == old || builtin {
+            return false;
+        }
+        if let Some(q) = self.cfg.queues.iter_mut().find(|q| q.name == old) {
+            q.name = new.to_string();
+        }
+        for d in &mut self.state.downloads {
+            if d.queue.as_deref() == Some(old) {
+                d.queue = Some(new.to_string());
+            }
+        }
+        self.save_config();
+        self.save_state();
+        self.refresh_native_menu();
+        let queues: Vec<String> = self.cfg.queues.iter().map(|q| q.name.clone()).collect();
+        crate::tray::reinstall(&queues, self.cfg.settings.power_save);
+        true
+    }
 
     fn queue_tick(&mut self) -> Task<Message> {
         let mut to_start: Vec<DlId> = vec![];
@@ -1847,6 +1971,7 @@ impl App {
             .map(|q| q.name.clone())
             .collect();
         let mut exit_app = false;
+        let mut power_action: Option<PowerAction> = None;
         for name in &finished {
             let mut acted = false;
             if let Some(q) = self.cfg.queues.iter_mut().find(|q| q.name == *name) {
@@ -1860,6 +1985,9 @@ impl App {
                     if sc.exit_when_done {
                         exit_app = true;
                     }
+                    if sc.shutdown_when_done {
+                        power_action = Some(sc.shutdown_action);
+                    }
                 }
             }
             if acted {
@@ -1872,10 +2000,13 @@ impl App {
                 crate::log::info(&format!("queue finished: {name}"));
             }
         }
-        if exit_app {
+        if exit_app || power_action.is_some() {
             self.save_state();
             self.save_config();
             self.flush_saves();
+            if let Some(action) = power_action {
+                run_power_action(action);
+            }
             return Task::batch([Task::batch(tasks), iced::exit()]);
         }
         Task::batch(tasks)
@@ -2441,6 +2572,7 @@ impl App {
                     .lines()
                     .map(str::trim)
                     .filter(|l| looks_downloadable(l, &self.cfg.settings.auto_types))
+                    .filter(|l| !site_blocked(l, &self.cfg.settings.dont_start_sites))
                     .filter(|l| !self.state.downloads.iter().any(|d| d.url == *l))
                     .map(str::to_string)
                     .collect();
@@ -2546,7 +2678,47 @@ impl App {
                 self.on_menu(action)
             }
             Message::TreeSelect(sel) => {
-                self.tree_sel = sel;
+                self.tree_sel = sel.clone();
+                self.renaming_queue = None;
+                let queue = match &sel {
+                    TreeSel::Queue(name) => Some(name.clone()),
+                    _ => None,
+                };
+                if self.queue_click(queue.as_deref()) {
+                    // Second click on the same queue: rename it in place.
+                    // Stock queues are refused by the handler.
+                    return self.update(Message::TreeQueueRenameStart(queue.unwrap()));
+                }
+                Task::none()
+            }
+            Message::TreeQueueRenameStart(name) => {
+                let builtin = self
+                    .cfg
+                    .queues
+                    .iter()
+                    .find(|q| q.name == name)
+                    .map(|q| q.builtin)
+                    .unwrap_or(true);
+                if builtin {
+                    return Task::none();
+                }
+                self.queue_rename_draft = name.clone();
+                self.renaming_queue = Some(name);
+                iced::widget::operation::focus("tree-queue-rename")
+            }
+            Message::TreeQueueRenameDraft(v) => {
+                self.queue_rename_draft = v;
+                Task::none()
+            }
+            Message::TreeQueueRenameCommit => {
+                if let Some(old) = self.renaming_queue.take() {
+                    let new = self.queue_rename_draft.clone();
+                    // The sidebar addresses a queue by name, so a rename
+                    // that landed has to carry the selection over with it.
+                    if self.rename_queue(&old, &new) && self.tree_sel == TreeSel::Queue(old) {
+                        self.tree_sel = TreeSel::Queue(new);
+                    }
+                }
                 Task::none()
             }
             Message::TreeToggle(i) => {
@@ -2642,6 +2814,14 @@ impl App {
                 Task::none()
             }
             Message::RawKey(key, mods) => {
+                // Escape backs out of an inline rename, leaving the queue
+                // under its old name — the draft is only committed on Enter.
+                if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                    && self.renaming_queue.is_some()
+                {
+                    self.renaming_queue = None;
+                    return Task::none();
+                }
                 let combo = combo_string(&key, mods);
                 let Some(combo) = combo else {
                     return Task::none();
@@ -2805,10 +2985,10 @@ impl App {
                 let Some(text) = text else {
                     return Task::none();
                 };
-                let url = text
-                    .lines()
-                    .map(str::trim)
-                    .find(|l| looks_downloadable(l, &self.cfg.settings.auto_types));
+                let url = text.lines().map(str::trim).find(|l| {
+                    looks_downloadable(l, &self.cfg.settings.auto_types)
+                        && !site_blocked(l, &self.cfg.settings.dont_start_sites)
+                });
                 let Some(url) = url else { return Task::none() };
                 if self.state.downloads.iter().any(|d| d.url == url) {
                     return Task::none();
@@ -2904,11 +3084,11 @@ impl App {
             Message::AddrChanged(s) => {
                 self.add_url.address = s;
                 self.add_url.error = None;
-                Task::none()
+                self.resize_open(WinKind::AddUrl)
             }
             Message::AddrAuthToggled(b) => {
                 self.add_url.use_auth = b;
-                Task::none()
+                self.resize_open(WinKind::AddUrl)
             }
             Message::AddrLogin(s) => {
                 self.add_url.login = s;
@@ -2922,7 +3102,7 @@ impl App {
                 let url = self.add_url.address.trim().to_string();
                 if let Err(e) = engine::parse_url(&url) {
                     self.add_url.error = Some(e);
-                    return Task::none();
+                    return self.resize_open(WinKind::AddUrl);
                 }
                 let auth = self
                     .add_url
@@ -2989,6 +3169,15 @@ impl App {
                     };
                     let bg = self.file_info_prefetch(id);
                     Task::batch([close, self.open_window(WinKind::FileInfo(id)), bg])
+                } else if self
+                    .item(id)
+                    .map(|d| site_blocked(&d.url, &self.cfg.settings.dont_start_sites))
+                    .unwrap_or(false)
+                {
+                    // Blocked site, no File Info dialog to surface the block
+                    // through: the item is added, queued, but left for the
+                    // user to start by hand.
+                    close
                 } else {
                     Task::batch([close, self.start_download(id, true)])
                 }
@@ -3389,6 +3578,20 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ProgShutdownAfter(id, b) => {
+                if let Some(d) = self.item_mut(id) {
+                    d.shutdown_after = b;
+                }
+                self.save_state();
+                Task::none()
+            }
+            Message::ProgShutdownAction(id, action) => {
+                if let Some(d) = self.item_mut(id) {
+                    d.shutdown_action = action;
+                }
+                self.save_state();
+                Task::none()
+            }
 
             // ----------------------------------------------------- complete
             Message::OpenFile(id) => {
@@ -3578,8 +3781,13 @@ impl App {
             // ---------------------------------------------------- scheduler
             Message::SchQueue(q) => {
                 self.sch.rename_draft = q.clone();
-                self.sch.queue = q;
+                self.sch.queue = q.clone();
                 self.sch.renaming = false;
+                if self.queue_click(Some(&q)) {
+                    // Second click on the same queue: rename it in place.
+                    // Stock queues are refused by the handler.
+                    return self.update(Message::SchNameEdit);
+                }
                 Task::none()
             }
             Message::SchNameEdit => {
@@ -3606,35 +3814,13 @@ impl App {
             Message::SchNameCommit => {
                 let old = self.sch.queue.clone();
                 let new = self.sch.rename_draft.trim().to_string();
-                let taken = self
-                    .cfg
-                    .queues
-                    .iter()
-                    .any(|q| q.name == new && q.name != old);
                 self.sch.renaming = false;
-                if new.is_empty() || taken || new == old {
-                    // Revert an empty/duplicate draft.
+                if self.rename_queue(&old, &new) {
+                    self.sch.queue = new.clone();
+                    self.sch.rename_draft = new;
+                } else {
+                    // Revert an empty/duplicate/stock-queue draft.
                     self.sch.rename_draft = old;
-                    return Task::none();
-                }
-                if let Some(q) = self.cfg.queues.iter_mut().find(|q| q.name == old) {
-                    q.name = new.clone();
-                }
-                for d in &mut self.state.downloads {
-                    if d.queue.as_deref() == Some(old.as_str()) {
-                        d.queue = Some(new.clone());
-                    }
-                }
-                self.sch.queue = new.clone();
-                self.sch.rename_draft = new;
-                self.save_config();
-                self.save_state();
-                // Queue submenus in the menu bar and tray carry the old name.
-                self.refresh_native_menu();
-                {
-                    let queues: Vec<String> =
-                        self.cfg.queues.iter().map(|q| q.name.clone()).collect();
-                    crate::tray::reinstall(&queues, self.cfg.settings.power_save);
                 }
                 Task::none()
             }
@@ -4053,10 +4239,15 @@ impl App {
 
     /// May this new download start on its own behind the File Info dialog?
     /// Only for a file type still listed under Options > File types — a type
-    /// the user took out of that list waits for Start Download.
+    /// the user took out of that list waits for Start Download — and only
+    /// for a host that isn't on the "don't start downloading automatically"
+    /// site list.
     fn auto_start_type(&self, id: DlId) -> bool {
         self.item(id)
-            .map(|d| auto_start_type(&d.file_name, &d.url, &self.cfg.settings.auto_types))
+            .map(|d| {
+                auto_start_type(&d.file_name, &d.url, &self.cfg.settings.auto_types)
+                    && !site_blocked(&d.url, &self.cfg.settings.dont_start_sites)
+            })
             .unwrap_or(false)
     }
 
@@ -4085,6 +4276,7 @@ impl App {
             return;
         }
         let existing: Vec<(String, bool)> = self.batch.checks.clone();
+        let sites = &self.cfg.settings.dont_start_sites;
         self.batch.checks = self
             .batch
             .text
@@ -4094,7 +4286,14 @@ impl App {
             .filter(|l| !l.is_empty() && engine::parse_url(l).is_ok())
             .map(|l| {
                 let prev = existing.iter().find(|(u, _)| u == l).map(|(_, b)| *b);
-                (l.to_string(), prev.unwrap_or(true))
+                // A link whose host is on the "don't start downloading
+                // automatically" list starts out unchecked: the user must
+                // opt back in explicitly, same as the extension's own
+                // pre-filter would have refused to hand it to Hydra at all.
+                (
+                    l.to_string(),
+                    prev.unwrap_or_else(|| !site_blocked(l, sites)),
+                )
             })
             .collect();
         self.batch.parsed = true;
@@ -4330,6 +4529,10 @@ impl App {
                 Task::none()
             }
             MenuAction::HomePage => {
+                let _ = open::that_detached("https://hydra.javad.dev");
+                Task::none()
+            }
+            MenuAction::Contribute => {
                 let _ = open::that_detached("https://github.com/ja7ad/hydra");
                 Task::none()
             }
@@ -4632,6 +4835,8 @@ impl App {
             SchField::OpenFileEnabled(b) => s.open_file_enabled = b,
             SchField::OpenFile(v) => s.open_file = v,
             SchField::ExitDone(b) => s.exit_when_done = b,
+            SchField::ShutdownDone(b) => s.shutdown_when_done = b,
+            SchField::ShutdownAction(a) => s.shutdown_action = a,
             SchField::FilesAtOnce(v) => {
                 if let Ok(n) = v.parse::<u32>() {
                     q.files_at_once = n.clamp(1, 16);
@@ -4655,6 +4860,19 @@ fn sort_keyed<'a, K: Ord>(v: &mut [&'a DownloadItem], asc: bool, key: impl Fn(&D
     keyed.sort_by(|a, b| if asc { a.0.cmp(&b.0) } else { b.0.cmp(&a.0) });
     for (slot, (_, d)) in v.iter_mut().zip(keyed) {
         *slot = d;
+    }
+}
+
+/// Shuts down or logs off the machine for a "when done" action. Errors (no
+/// permission, an unsupported desktop session) only get a log line — by the
+/// time this runs, the queue or download it was guarding is already done.
+fn run_power_action(action: PowerAction) {
+    let result = match action {
+        PowerAction::Shutdown => system_shutdown::shutdown(),
+        PowerAction::LogOff => system_shutdown::logout(),
+    };
+    if let Err(e) = result {
+        crate::log::warn(&format!("power action {action:?} failed: {e}"));
     }
 }
 
@@ -4730,6 +4948,77 @@ pub fn auto_start_type(file_name: &str, url: &str, auto_types: &str) -> bool {
         Some(e) => type_listed(&e, auto_types),
         None => true,
     }
+}
+
+/// Does this URL's host match an entry in the Options > File types
+/// "Don't start downloading automatically from the following sites" list?
+/// Entries are separated by whitespace or commas; a host matches a pattern
+/// when it equals it or is one of its subdomains — the optional `*.`
+/// prefix some entries carry is cosmetic, mirroring the browser
+/// extensions' `siteSkipped`.
+pub fn site_blocked(url: &str, dont_start_sites: &str) -> bool {
+    let host = match engine::parse_url(url) {
+        Ok(p) => p.host.to_ascii_lowercase(),
+        Err(_) => return false,
+    };
+    dont_start_sites
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|p| !p.is_empty())
+        .any(|pat| {
+            let pat = pat.to_ascii_lowercase();
+            let dom = pat.strip_prefix("*.").unwrap_or(&pat);
+            host == dom || host.ends_with(&format!(".{dom}"))
+        })
+}
+
+/// Which Options > Sites Logins entry, if any, applies to this URL. A site
+/// matches by host (or subdomain), optionally scoped to a path prefix when
+/// the entry carries one (`example.com/private`); when several entries
+/// match, the one with the longest `site` string wins, since it is the most
+/// specific.
+pub fn find_login<'a>(url: &str, logins: &'a [SiteLogin]) -> Option<&'a SiteLogin> {
+    let parsed = engine::parse_url(url).ok()?;
+    let host = parsed.host.to_ascii_lowercase();
+    let path = parsed.path.trim_start_matches('/').to_ascii_lowercase();
+    logins
+        .iter()
+        .filter(|l| {
+            let site = l.site.trim().to_ascii_lowercase();
+            let site = site
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_start_matches("ftp://");
+            let (site_host, site_path) = site.split_once('/').unwrap_or((site, ""));
+            let site_host = site_host.trim_start_matches("*.");
+            !site_host.is_empty()
+                && (host == site_host || host.ends_with(&format!(".{site_host}")))
+                && (site_path.is_empty() || path.starts_with(site_path))
+        })
+        .max_by_key(|l| l.site.len())
+}
+
+/// Times a click against the one before it, for rows that cannot use
+/// `mouse_area::on_double_click` — a `button` captures the mouse event
+/// before an enclosing area is asked, so the area's own detection never
+/// runs. Two clicks on the same `name` within 400ms (the window the
+/// download table already uses) read as a double; a click on a different
+/// target, or on none at all, restarts the count.
+pub fn double_click(last: &mut Option<(String, Instant)>, name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        *last = None;
+        return false;
+    };
+    let double = last
+        .as_ref()
+        .is_some_and(|(prev, at)| prev == name && at.elapsed().as_millis() < 400);
+    // A completed pair ends the sequence: a third click starts a new one
+    // rather than reading as a second double.
+    *last = if double {
+        None
+    } else {
+        Some((name.to_string(), Instant::now()))
+    };
+    double
 }
 
 /// Directory comparison for collision checks: `/a/b` and `/a/b/` (or a `..`
@@ -5040,6 +5329,8 @@ mod tests {
             eta_secs: None,
             conns: vec![],
             status_line: String::new(),
+            shutdown_after: false,
+            shutdown_action: PowerAction::default(),
         }
     }
 
@@ -5075,6 +5366,125 @@ mod tests {
             "https://ex.com/download",
             TYPES
         ));
+    }
+
+    #[test]
+    fn site_blocked_matches_hosts_and_subdomains() {
+        const SITES: &str = "*.update.microsoft.com download.windowsupdate.com, *.example.com";
+        assert!(site_blocked(
+            "https://sub.update.microsoft.com/x.exe",
+            SITES
+        ));
+        assert!(site_blocked("https://update.microsoft.com/x.exe", SITES));
+        assert!(site_blocked(
+            "https://download.windowsupdate.com/x.exe",
+            SITES
+        ));
+        assert!(!site_blocked("https://example.org/x.exe", SITES));
+        // A host that merely contains the pattern as a substring, without
+        // being a subdomain, must not match.
+        assert!(!site_blocked("https://evilexample.com/x.exe", SITES));
+    }
+
+    #[test]
+    fn site_blocked_example_com_patterns() {
+        // Bare host, no wildcard: exact host and any subdomain match.
+        const BARE: &str = "example.com";
+        assert!(site_blocked("https://example.com/x.exe", BARE));
+        assert!(site_blocked("http://EXAMPLE.COM/x.exe", BARE));
+        assert!(site_blocked("https://www.example.com/x.exe", BARE));
+        assert!(site_blocked("https://a.b.example.com/x.exe", BARE));
+        assert!(site_blocked("ftp://example.com/x.exe", BARE));
+        assert!(!site_blocked("https://notexample.com/x.exe", BARE));
+        assert!(!site_blocked("https://example.com.evil.net/x.exe", BARE));
+        assert!(!site_blocked("https://example.org/x.exe", BARE));
+
+        // Wildcard-prefixed entry: same behaviour, the "*." is cosmetic.
+        const WILDCARD: &str = "*.example.com";
+        assert!(site_blocked("https://example.com/x.exe", WILDCARD));
+        assert!(site_blocked("https://sub.example.com/x.exe", WILDCARD));
+        assert!(site_blocked("https://deep.sub.example.com/x.exe", WILDCARD));
+        assert!(!site_blocked("https://example.co/x.exe", WILDCARD));
+
+        // Comma- and whitespace-separated entries, mixed on one line.
+        const MIXED: &str = "example.com, *.example.net\texample.org";
+        assert!(site_blocked("https://example.com/x.exe", MIXED));
+        assert!(site_blocked("https://cdn.example.net/x.exe", MIXED));
+        assert!(site_blocked("https://example.org/x.exe", MIXED));
+        assert!(!site_blocked("https://example.io/x.exe", MIXED));
+
+        // No pattern at all: nothing is blocked.
+        assert!(!site_blocked("https://example.com/x.exe", ""));
+        assert!(!site_blocked("https://example.com/x.exe", "   "));
+    }
+
+    #[test]
+    fn double_click_pairs_only_consecutive_clicks_on_one_row() {
+        // A lone click is never a double; the one right after it is.
+        let mut last = None;
+        assert!(!double_click(&mut last, Some("Queue 3")));
+        assert!(double_click(&mut last, Some("Queue 3")));
+        // The pair is consumed, so a third click opens a new sequence
+        // instead of reading as another double.
+        assert!(!double_click(&mut last, Some("Queue 3")));
+        assert!(double_click(&mut last, Some("Queue 3")));
+
+        // A detour through another row breaks the pair.
+        let mut last = None;
+        assert!(!double_click(&mut last, Some("Queue 3")));
+        assert!(!double_click(&mut last, Some("Queue 4")));
+        assert!(!double_click(&mut last, Some("Queue 3")));
+
+        // A click that landed on no queue row at all clears the count.
+        let mut last = None;
+        assert!(!double_click(&mut last, Some("Queue 3")));
+        assert!(!double_click(&mut last, None));
+        assert!(last.is_none());
+        assert!(!double_click(&mut last, Some("Queue 3")));
+
+        // Two clicks too far apart in time are two single clicks.
+        let mut last = Some((
+            "Queue 3".to_string(),
+            Instant::now() - std::time::Duration::from_millis(600),
+        ));
+        assert!(!double_click(&mut last, Some("Queue 3")));
+    }
+
+    #[test]
+    fn find_login_matches_host_and_prefers_the_most_specific_path() {
+        let logins = vec![
+            SiteLogin {
+                site: "example.com".into(),
+                user: "site-user".into(),
+                pass: "site-pass".into(),
+            },
+            SiteLogin {
+                site: "example.com/private".into(),
+                user: "private-user".into(),
+                pass: "private-pass".into(),
+            },
+            SiteLogin {
+                site: "*.ftp.example.org".into(),
+                user: "ftp-user".into(),
+                pass: "ftp-pass".into(),
+            },
+        ];
+        // Bare host entry applies anywhere on the site.
+        assert_eq!(
+            find_login("https://example.com/public/x.zip", &logins).map(|l| l.user.as_str()),
+            Some("site-user")
+        );
+        // The more specific path-scoped entry wins under that path.
+        assert_eq!(
+            find_login("https://example.com/private/x.zip", &logins).map(|l| l.user.as_str()),
+            Some("private-user")
+        );
+        // Subdomain wildcard entry matches a subdomain, not an unrelated host.
+        assert_eq!(
+            find_login("ftp://files.ftp.example.org/x.zip", &logins).map(|l| l.user.as_str()),
+            Some("ftp-user")
+        );
+        assert!(find_login("https://unrelated.com/x.zip", &logins).is_none());
     }
 
     #[test]

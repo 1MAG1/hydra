@@ -41,6 +41,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 toml = "1"
 # "Open" / "Open folder" on completed downloads, delegated to the OS.
 open = "5"
+# Shut down / log off the machine when a queue or download finishes.
+system_shutdown = "4"
 # Native "Browse..." file/folder pickers (Save As, download directory, virus
 # scanner path). Async API so the picker never blocks the render thread.
 rfd = "0.17"

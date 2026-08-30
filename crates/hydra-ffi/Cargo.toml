@@ -4,7 +4,7 @@ name = "hya-ffi"
 # crate's compatibility promise is about the ABI, not about the CLI/GUI release
 # it happens to ship next to. The ABI has its own integer version on top of
 # this one — see `HYDRA_FFI_ABI_VERSION` in `src/lib.rs`.
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 # MIT OR Apache-2.0, matching hya-core and hya-net and NOT the GPL CLI: the
 # whole point of this crate is that third parties can embed the engine. It must
