@@ -598,6 +598,132 @@ pub struct hydra_source_array_t {
     pub len: usize,
 }
 
+// ----------------------------------------------------------------- metalink
+
+/// An opaque, parsed Metalink document.
+///
+/// Created by `hydra_metalink_parse`, `hydra_metalink_open` or
+/// `hydra_metalink_fetch`, and released with `hydra_metalink_free`. Immutable
+/// once created, so it may be read from several threads at once.
+pub enum hydra_metalink_t {}
+
+/// Which dialect a document was written in.
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum hydra_metalink_version_t {
+    /// The document has no recognisable Metalink namespace.
+    HYDRA_METALINK_UNKNOWN = 0,
+    /// Metalink 3.0, `http://www.metalinker.org/`. Preference is 0-100, higher
+    /// is better — the reader converts it, so nothing downstream sees the
+    /// inverted scale.
+    HYDRA_METALINK_V3 = 3,
+    /// Metalink 4 / RFC 5854, `urn:ietf:params:xml:ns:metalink`. Priority is
+    /// 1-999999, lower is better.
+    HYDRA_METALINK_V4 = 4,
+}
+
+/// One mirror named by a document, as the ranking the engine would use.
+#[repr(C)]
+#[derive(Debug)]
+pub struct hydra_metalink_url_t {
+    /// The mirror URL.
+    pub url: hydra_string_t,
+    /// ISO 3166-1 alpha-2 country code, lowercased, or an absent string.
+    pub location: hydra_string_t,
+    /// URL scheme: `http`, `https`, `ftp`, or whatever the document named.
+    pub protocol: hydra_string_t,
+    /// Rank after the engine's own ordering has been applied: 1 is best.
+    ///
+    /// Always in the RFC 5854 direction whichever dialect the document used.
+    pub priority: u32,
+    /// Connection ceiling the mirror stated for itself, or 0 if it stated none.
+    ///
+    /// A stated value NARROWS the client's own per-host ceiling and never
+    /// widens it.
+    pub max_connections: u32,
+    /// Nonzero if this build has a transport for the URL's scheme.
+    ///
+    /// A document may name `rsync://` mirrors; they are visible here and are
+    /// never given to a transfer.
+    pub fetchable: u8,
+    /// Reserved; must be ignored.
+    pub reserved: [u8; 7],
+}
+
+/// Owned list of mirrors. Release with `hydra_metalink_url_array_free`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct hydra_metalink_url_array_t {
+    /// Array items, or NULL if empty.
+    pub items: *mut hydra_metalink_url_t,
+    /// Number of items in array.
+    pub len: usize,
+}
+
+/// One file entry from a document.
+#[repr(C)]
+#[derive(Debug)]
+pub struct hydra_metalink_file_t {
+    /// The document's `name`, as a relative path.
+    ///
+    /// Absent when the name would escape the output directory (`../`, an
+    /// absolute path, a Windows drive letter or an alternate data stream);
+    /// `name_usable` is then zero and the entry cannot be downloaded.
+    pub name: hydra_string_t,
+    /// The strongest digest the document published, as `algorithm:hex`, or an
+    /// absent string.
+    pub digest: hydra_string_t,
+    /// The entry's `version`, or an absent string.
+    pub version: hydra_string_t,
+    /// Object size in bytes, or 0 if the document stated none.
+    ///
+    /// A stated size is what admits a mirror to a multi-source transfer: it is
+    /// evidence from the publisher rather than from the mirrors, so it replaces
+    /// the `ETag` agreement independent mirror operators cannot satisfy.
+    pub size: u64,
+    /// Piece length in bytes, or 0 if the document published no `<pieces>`.
+    pub piece_length: u64,
+    /// Number of piece digests published.
+    pub piece_count: usize,
+    /// Mirrors listed, including ones this build cannot fetch from.
+    pub mirror_count: usize,
+    /// Mirrors this build has a transport for.
+    pub fetchable_count: usize,
+    /// The publisher's DEFAULT per-mirror connection ceiling, or 0 for none.
+    ///
+    /// Metalink 3.0 `<resources maxconnections>`. Read as the default each
+    /// mirror inherits rather than as a cap across the whole file: mirrormanager
+    /// emits `maxconnections="1"` beside a seventeen-mirror list, and the
+    /// aggregate reading would make that list useless. A mirror stating its own
+    /// overrides it; `hydra_metalink_url_t.max_connections` reports what
+    /// actually governs each one.
+    pub max_connections: u32,
+    /// Nonzero when the piece list tiles the stated size exactly.
+    ///
+    /// Zero means the two disagree, so the pieces describe a different object
+    /// and are not used — the whole-file digest is then the only check.
+    pub pieces_tile: u8,
+    /// Nonzero if the entry carries an OpenPGP `<signature>`.
+    ///
+    /// Recorded, never verified: hydra does not check it, and reporting it as
+    /// verified would be worse than not reporting it at all.
+    pub signed: u8,
+    /// Nonzero when `name` is a usable relative path.
+    pub name_usable: u8,
+    /// Reserved; must be ignored.
+    pub reserved: [u8; 5],
+}
+
+/// Owned list of file entries. Release with `hydra_metalink_file_array_free`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct hydra_metalink_file_array_t {
+    /// Array items, or NULL if empty.
+    pub items: *mut hydra_metalink_file_t,
+    /// Number of items in array.
+    pub len: usize,
+}
+
 /// Owned list of job IDs. Release with `hydra_job_id_array_free`.
 #[repr(C)]
 #[derive(Debug)]

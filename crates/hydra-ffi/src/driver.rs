@@ -304,6 +304,12 @@ struct Resolved {
     url: Url,
     target: Target,
     probe: Probe,
+    /// The configured URL this came from, BEFORE any redirect.
+    ///
+    /// A publisher's ranking is index-aligned with the URLs the job was created
+    /// with, and probing may drop some and redirect others — so the way back to
+    /// a mirror's rank is the string it started as, not the host it ended at.
+    requested: String,
     /// Measured per-request setup cost, which the scheduler needs to decide
     /// whether a repair can pay for itself.
     delta: f64,
@@ -418,6 +424,7 @@ async fn resolve_one(
             url: u,
             target: t,
             probe: p,
+            requested: raw.to_string(),
             delta,
         });
     }
@@ -464,12 +471,69 @@ async fn attempt_transfer(
         return ftp_transfer(engine, job, &conn, &creds, cancel).await;
     }
 
-    // ---- probe every mirror ---------------------------------------------
+    // ---- probe every mirror, CONCURRENTLY --------------------------------
+    //
+    // One HEAD per mirror, and they are independent — each asks a different
+    // host what it holds — so the set costs about what the slowest one does
+    // rather than the sum. In series this was the most expensive thing about
+    // handing libhydra a mirror list: measured on the CLI against a real
+    // twelve-mirror Fedora document, a dozen sequential probes cost 14.4 s
+    // before the first byte. That matters more here than anywhere else,
+    // because this is the embedding surface for mobile, where the round trips
+    // being multiplied are the long ones.
+    //
+    // Bounded, but not by politeness: each probe goes to a DIFFERENT host, and
+    // one HEAD apiece is not something any of them feels — the per-host
+    // ceilings elsewhere answer that question. The cap is only so a
+    // forty-mirror document cannot open forty sockets at once and hit an fd
+    // limit.
+    const PROBE_FANOUT: usize = 16;
+    let gate = Arc::new(tokio::sync::Semaphore::new(PROBE_FANOUT));
+    let mut set = tokio::task::JoinSet::new();
+    for (i, raw) in job.cfg.urls.iter().enumerate() {
+        let (engine, job, conn, creds, cancel, gate) = (
+            engine.clone(),
+            job.clone(),
+            conn.clone(),
+            creds.clone(),
+            cancel.clone(),
+            gate.clone(),
+        );
+        let raw = raw.clone();
+        set.spawn(async move {
+            let _permit = gate.acquire_owned().await;
+            (
+                i,
+                resolve_one(&engine, &job, &conn, &raw, &creds, &cancel).await,
+            )
+        });
+    }
+    // Collected in the order the CALLER gave, not the order the network
+    // answered in. Everything downstream is index-aligned with `cfg.urls` —
+    // the publisher's ranking, the connection split, the source rows — and
+    // which mirror is source 0 must not depend on which handshake finished
+    // first, or two runs against the same document cannot be compared.
+    let mut answers: Vec<(usize, Result<Resolved, Detail>)> = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(v) => answers.push(v),
+            Err(e) => {
+                return Err(Detail {
+                    code: E::HYDRA_ERR_INTERNAL as u32,
+                    message: format!("probe task failed: {e}"),
+                    ..Default::default()
+                })
+            }
+        }
+    }
+    answers.sort_by_key(|(i, _)| *i);
     let mut resolved: Vec<Resolved> = Vec::new();
     let mut first_error: Option<Detail> = None;
-    for raw in &job.cfg.urls {
-        match resolve_one(engine, job, &conn, raw, &creds, cancel).await {
+    for (_, res) in answers {
+        match res {
             Ok(r) => resolved.push(r),
+            // A cancel outranks any transport error: the caller asked to stop,
+            // and reporting "connection refused" for that would be a lie.
             Err(d) if d.code == E::HYDRA_ERR_CANCELLED as u32 => return Err(d),
             Err(d) => {
                 if first_error.is_none() {
@@ -529,11 +593,23 @@ async fn attempt_transfer(
     // passes. A weak validator is not evidence of agreement either: the
     // specification lets one compare equal across representations that are
     // merely equivalent, which is precisely what must not be spliced.
+    //
+    // Unless a Metalink document stated the size. That is different evidence,
+    // and it makes the pairwise test both unnecessary and unsatisfiable:
+    // independent mirror operators run independent web servers and cannot share
+    // an `ETag`, so requiring one keeps exactly ONE source out of a
+    // nineteen-mirror list. A size published by whoever built the object, from a
+    // host that is usually not one of the mirrors, admits a mirror on stronger
+    // grounds — and the document's digest, per chunk where it published
+    // `<pieces>`, is what actually catches one serving something else.
     let strong = |p: &Probe| p.validator.is_some() && !p.weak_validator;
-    let usable: Vec<&Resolved> = if resolved.len() == 1 || !strong(&primary.probe) {
-        vec![primary]
-    } else {
-        resolved
+    let usable: Vec<&Resolved> = match job.cfg.attested_size {
+        Some(want) => resolved
+            .iter()
+            .filter(|r| r.probe.size == want && r.probe.ranges)
+            .collect(),
+        None if resolved.len() == 1 || !strong(&primary.probe) => vec![primary],
+        None => resolved
             .iter()
             .filter(|r| {
                 std::ptr::eq(*r, primary)
@@ -542,8 +618,22 @@ async fn attempt_transfer(
                         && strong(&r.probe)
                         && r.probe.validator == primary.probe.validator)
             })
-            .collect()
+            .collect(),
     };
+    // Every mirror disagreed with the document. Continuing on the primary would
+    // assemble an object the publisher says is a different size, so it is a
+    // failure with a reason rather than a silently wrong file.
+    if usable.is_empty() {
+        return Err(Detail {
+            code: E::HYDRA_ERR_VERIFICATION as u32,
+            message: format!(
+                "the mirror list states {} bytes and no reachable mirror serves an object of \
+                 that size with range support",
+                job.cfg.attested_size.unwrap_or(size)
+            ),
+            ..Default::default()
+        });
+    }
 
     // ---- resume ----------------------------------------------------------
     let mut held: Vec<(u64, u64)> = if job.cfg.resume {
@@ -558,42 +648,96 @@ async fn attempt_transfer(
     }
 
     let ceiling = engine.connection_ceiling(job.cfg.max_connections);
+    // Plans for the mirrors that SURVIVED probing, in the order they survived
+    // in. `usable` is a subset of the configured URL list, so the ranking has to
+    // be carried across by URL or a dropped mirror shifts every rank after it —
+    // the second-best host would be allocated as though it were the fourth.
+    let plans: Vec<hya_core::SourcePlan> = if job.cfg.source_plans.is_empty() {
+        crate::metalink::unranked(usable.len())
+    } else {
+        usable
+            .iter()
+            .map(|r| {
+                job.cfg
+                    .urls
+                    .iter()
+                    .position(|u| u == &r.requested)
+                    .and_then(|i| job.cfg.source_plans.get(i).copied())
+                    .unwrap_or_default()
+            })
+            .collect()
+    };
     // The connection budget is split across the agreeing sources, never
     // multiplied by them: eight connections over three mirrors is eight
-    // connections, not twenty-four.
-    let per: Vec<usize> = split_connections(ceiling, usable.len());
-    let n_sources = per.iter().filter(|&&n| n > 0).count().max(1);
-    let per: Vec<usize> = per.into_iter().take(n_sources).collect();
-    let targets: Vec<Target> = usable
+    // connections, not twenty-four. With a ranking in hand the split follows it,
+    // and honours any ceiling a mirror stated for itself.
+    let split: Vec<usize> = if job.cfg.source_plans.is_empty() {
+        let v = split_connections(ceiling, usable.len());
+        // `split_connections` drops empty entries, so pad back to one entry per
+        // source: everything below indexes `split` by source.
+        let mut out = vec![0usize; usable.len()];
+        for (i, n) in v.into_iter().enumerate() {
+            out[i] = n;
+        }
+        out
+    } else {
+        hya_core::plan::allocate(&plans, ceiling, ceiling, ceiling)
+    };
+    let seated: Vec<usize> = (0..usable.len()).filter(|&i| split[i] > 0).collect();
+    let n_sources = seated.len().max(1);
+    let per: Vec<usize> = seated.iter().map(|&i| split[i]).collect();
+    let targets: Vec<Target> = seated.iter().map(|&i| usable[i].target.clone()).collect();
+    let source_urls: Vec<String> = seated
         .iter()
-        .take(n_sources)
-        .map(|r| r.target.clone())
+        .map(|&i| {
+            let r = usable[i];
+            format!("{}://{}{}", r.url.scheme, r.url.authority(), r.url.path)
+        })
         .collect();
-    let source_urls: Vec<String> = usable
-        .iter()
-        .take(n_sources)
-        .map(|r| format!("{}://{}{}", r.url.scheme, r.url.authority(), r.url.path))
-        .collect();
+    // Everything the split did not seat, best-ranked first. A mirror list names
+    // far more sources than politeness authorises sockets for, and without a
+    // bench that surplus is decoration: the transfer survives on the mirrors it
+    // opened with or it does not.
+    let bench: Vec<hya_net::Reserve> = {
+        let mut idx: Vec<usize> = (0..usable.len()).filter(|&i| split[i] == 0).collect();
+        idx.sort_by_key(|&i| (plans[i].priority, i));
+        idx.into_iter()
+            .map(|i| hya_net::Reserve {
+                target: usable[i].target.clone(),
+                plan: plans[i],
+                host: usable[i].url.authority(),
+            })
+            .collect()
+    };
     let n_conns: usize = per.iter().sum::<usize>().max(1);
 
-    let sources: Vec<Source> = usable
+    let sources: Vec<Source> = seated
         .iter()
-        .take(n_sources)
-        .map(|r| Source {
-            caps: if strong(&r.probe) {
-                Capability::Full
-            } else {
-                Capability::NoValidator
-            },
-            delta_est: r.delta.max(1e-3),
-            ..Source::default()
+        .map(|&i| {
+            let r = usable[i];
+            Source {
+                caps: if job.cfg.attested_size.is_some() || strong(&r.probe) {
+                    // A document that states the size and a content digest
+                    // establishes agreement more strongly than an `ETag` does,
+                    // and from outside the mirrors — so a mirror admitted on
+                    // that evidence is a full source, not a pinned one.
+                    Capability::Full
+                } else {
+                    Capability::NoValidator
+                },
+                delta_est: r.delta.max(1e-3),
+                // The publisher's ranking, used once — for the first split,
+                // before anything has been measured. See
+                // `hya_core::sched::Source::priority`.
+                priority: plans[i].priority,
+                ..Source::default()
+            }
         })
         .collect();
 
-    let delta = usable
+    let delta = seated
         .iter()
-        .take(n_sources)
-        .map(|r| r.delta)
+        .map(|&i| usable[i].delta)
         .fold(0.05f64, f64::max);
     let mut sched = Scheduler::new(size, sources, &per)
         // Scaled to the measured setup cost rather than fixed: a slow path
@@ -658,8 +802,30 @@ async fn attempt_transfer(
         20
     };
 
-    let result = hya_net::run_transfer_cancellable(
-        conn,
+    // Substitutions rename a source row as they happen: a view that keeps naming
+    // the dead mirror attributes the replacement's throughput to a machine that
+    // is not serving it.
+    let sub_job = job.clone();
+    let sub_engine = engine.clone();
+    let mut on_sub = move |src: usize, r: &hya_net::Reserve| {
+        {
+            let mut g = sub_job.lock();
+            if let Some(slot) = g.sources.get_mut(src) {
+                slot.url.clone_from(&r.host);
+                slot.active = true;
+            }
+        }
+        crate::log::log_at!(
+            sub_engine,
+            crate::abi::hydra_log_level_t::HYDRA_LOG_WARN,
+            "job {}: source {} failed; switched to reserve mirror {}",
+            sub_job.id,
+            src,
+            r.host
+        );
+    };
+    let result = hya_net::run_transfer_with_reserves(
+        conn.clone(),
         targets,
         &per,
         size,
@@ -669,6 +835,8 @@ async fn attempt_transfer(
         &mut observe,
         pace,
         Some(cancel.clone()),
+        hya_net::Bench::fixed(bench),
+        Some(&mut on_sub),
     )
     .await;
 
@@ -683,14 +851,138 @@ async fn attempt_transfer(
                 .metrics
                 .request_count
                 .fetch_add(requests, Ordering::Relaxed);
-            let mut g = job.lock();
-            g.held = vec![(0, size)];
-            g.progress.bytes_downloaded = size;
+            {
+                let mut g = job.lock();
+                g.held = vec![(0, size)];
+                g.progress.bytes_downloaded = size;
+            }
+            // The document's `<pieces>`, verified here rather than in
+            // `settle_completed` because repairing one needs the mirrors, and
+            // this is the last point at which they are in hand.
+            if let Some(m) = job.cfg.pieces.clone() {
+                let targets: Vec<Target> = usable.iter().map(|r| r.target.clone()).collect();
+                verify_pieces(engine, job, &conn, &targets, &output, m, cancel).await?;
+            }
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Err(cancelled()),
         Err(e) => Err(err::from_io(&e)),
     }
+}
+
+/// Check every chunk against a Metalink `<pieces>` manifest and refetch the
+/// failures from a different mirror.
+///
+/// # Why this is worth a second pass over the file
+///
+/// A whole-file digest answers one question — is this object right — and when
+/// the answer is no, the only remedy it licenses is downloading all of it again.
+/// On a multi-gigabyte image over a mirror set where one node is serving a stale
+/// build, that is the difference between finishing and not.
+///
+/// A piece list localises the fault. The manifest names the chunk, the chunk is
+/// refetched from a mirror that did not serve it, and the refetched bytes are
+/// checked against the same digest before being accepted — so a second corrupt
+/// copy is not taken on faith merely because it was asked for twice.
+///
+/// `Trust::Advertised`, always, however the document arrived: nothing here has
+/// authenticated it. Detection and targeted refetch are self-correcting and are
+/// allowed; naming erasure positions for a parity decode is not. That cap is
+/// enforced inside `ChunkVerifier::new`, which also refuses to grant trust to a
+/// SHA-1 grid — the algorithm most Metalink 3.0 documents actually use.
+async fn verify_pieces(
+    engine: &Arc<Engine>,
+    job: &Arc<Job>,
+    conn: &Arc<TlsCapableConnector>,
+    targets: &[Target],
+    output: &str,
+    m: hya_net::manifest::Manifest,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(), Detail> {
+    use hya_net::manifest::{ChunkVerifier, Trust};
+
+    let size = m.object.size;
+    let mut v = ChunkVerifier::new(m, Trust::Advertised);
+    {
+        let path = output.to_string();
+        let mut f = std::fs::File::open(&path).map_err(|e| err::from_io(&e))?;
+        // Hashing the object is CPU- and disk-bound; keeping it off a runtime
+        // worker is the same reason `settle_completed` spawns its digest.
+        v = tokio::task::spawn_blocking(move || v.write_reader(&mut f).map(|()| v))
+            .await
+            .map_err(|e| Detail {
+                code: E::HYDRA_ERR_INTERNAL as u32,
+                message: format!("chunk verification task failed: {e}"),
+                ..Default::default()
+            })?
+            .map_err(|e| err::from_io(&e))?;
+    }
+    if v.all_verified() {
+        crate::log::log_at!(
+            engine,
+            crate::abi::hydra_log_level_t::HYDRA_LOG_INFO,
+            "job {}: all {} chunk(s) verified against the mirror list",
+            job.id,
+            v.verified_count()
+        );
+        return Ok(());
+    }
+
+    let bad = v.failed_indices().to_vec();
+    crate::log::log_at!(
+        engine,
+        crate::abi::hydra_log_level_t::HYDRA_LOG_WARN,
+        "job {}: {} chunk(s) failed their digest; refetching",
+        job.id,
+        bad.len()
+    );
+    let sink = Arc::new(SparseSink::create(output, size).map_err(|e| err::from_io(&e))?);
+    for (nth, idx) in bad.into_iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled());
+        }
+        let (lo, hi) = v.manifest().span(idx);
+        // Rotate through the mirrors, starting past the primary. Which host
+        // served the corrupt chunk is unknowable from here, so a FIXED
+        // alternate is a coin-flip that repeats itself: if the alternate is the
+        // bad mirror, every refetch fails and the repair dies on its first
+        // candidate. Rotation costs nothing and puts each retry somewhere new.
+        let t = targets[(1 + nth) % targets.len()].clone();
+        hya_net::fetch_range_retry(
+            conn.clone(),
+            t,
+            lo,
+            hi,
+            sink.clone(),
+            job.cfg.max_retries.max(1),
+            30.0,
+        )
+        .await
+        .map_err(|e| Detail {
+            code: E::HYDRA_ERR_VERIFICATION as u32,
+            message: format!("chunk {idx} refetch failed: {e}"),
+            ..Default::default()
+        })?;
+        let mut fresh = vec![0u8; (hi - lo) as usize];
+        {
+            use std::io::{Read as _, Seek as _, SeekFrom};
+            let mut f = std::fs::File::open(output).map_err(|e| err::from_io(&e))?;
+            f.seek(SeekFrom::Start(lo)).map_err(|e| err::from_io(&e))?;
+            f.read_exact(&mut fresh).map_err(|e| err::from_io(&e))?;
+        }
+        v.retry(idx);
+        if !v.write(lo, &fresh).is_empty() {
+            return Err(Detail {
+                code: E::HYDRA_ERR_CHECKSUM as u32,
+                message: format!(
+                    "chunk {idx} [{lo},{hi}) still fails its digest after refetch: the mirrors \
+                     are serving bytes the document does not describe"
+                ),
+                ..Default::default()
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Split a connection budget across sources, never exceeding it in total.

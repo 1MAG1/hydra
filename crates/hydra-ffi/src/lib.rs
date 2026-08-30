@@ -56,6 +56,7 @@ mod gate;
 mod guard;
 mod log;
 mod mem;
+mod metalink;
 mod persist;
 mod url;
 mod verify;

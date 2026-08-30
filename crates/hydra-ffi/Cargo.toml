@@ -4,7 +4,7 @@ name = "hya-ffi"
 # crate's compatibility promise is about the ABI, not about the CLI/GUI release
 # it happens to ship next to. The ABI has its own integer version on top of
 # this one — see `HYDRA_FFI_ABI_VERSION` in `src/lib.rs`.
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 # MIT OR Apache-2.0, matching hya-core and hya-net and NOT the GPL CLI: the
 # whole point of this crate is that third parties can embed the engine. It must
@@ -42,6 +42,9 @@ blake3 = { workspace = true }
 # The ABI suite drives a real loopback HTTP origin and hashes what came back,
 # so it needs the same digest the tests compare against.
 sha2 = { workspace = true }
+# The metalink tests build documents over those origins and compare the hex the
+# engine reports, so they need the same hex encoder the engine uses.
+hya-net = { workspace = true }
 
 [lints]
 workspace = true

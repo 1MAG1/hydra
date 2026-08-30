@@ -224,7 +224,7 @@
 /**
  * Minor version component of `HYDRA_FFI_VERSION`.
  */
-#define HYDRA_FFI_VERSION_MINOR 2
+#define HYDRA_FFI_VERSION_MINOR 3
 
 /**
  * Patch version component of `HYDRA_FFI_VERSION`.
@@ -243,7 +243,7 @@
  * If the two disagree, this header is not the one that library was built
  * from.
  */
-#define HYDRA_FFI_VERSION "0.2.0"
+#define HYDRA_FFI_VERSION "0.3.0"
 
 /**
  * Numeric version encoded as `major * 1_000_000 + minor * 1_000 + patch` for preprocessor checks.
@@ -482,6 +482,38 @@ typedef uint32_t hydra_event_type_t;
 #endif // __cplusplus
 
 /**
+ * Which dialect a document was written in.
+ */
+enum hydra_metalink_version_t
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * The document has no recognisable Metalink namespace.
+   */
+  HYDRA_METALINK_UNKNOWN = 0,
+  /**
+   * Metalink 3.0, `http://www.metalinker.org/`. Preference is 0-100, higher
+   * is better — the reader converts it, so nothing downstream sees the
+   * inverted scale.
+   */
+  HYDRA_METALINK_V3 = 3,
+  /**
+   * Metalink 4 / RFC 5854, `urn:ietf:params:xml:ns:metalink`. Priority is
+   * 1-999999, lower is better.
+   */
+  HYDRA_METALINK_V4 = 4,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum hydra_metalink_version_t hydra_metalink_version_t;
+#else
+typedef uint32_t hydra_metalink_version_t;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
  * Disposition of partial download files upon cancellation.
  */
 enum hydra_cancel_mode_t
@@ -712,6 +744,15 @@ typedef uint32_t hydra_log_level_t;
  * Opaque engine instance handle type.
  */
 typedef struct hydra_engine_t hydra_engine_t;
+
+/**
+ * An opaque, parsed Metalink document.
+ *
+ * Created by `hydra_metalink_parse`, `hydra_metalink_open` or
+ * `hydra_metalink_fetch`, and released with `hydra_metalink_free`. Immutable
+ * once created, so it may be read from several threads at once.
+ */
+typedef struct hydra_metalink_t hydra_metalink_t;
 
 /**
  * Owned, NUL-terminated UTF-8 string allocated by hydra.
@@ -1319,6 +1360,156 @@ typedef void (*hydra_event_callback)(const hydra_event_t *event,
 typedef void (*hydra_log_callback)(uint32_t level,
                                    const char *message,
                                    void *user_data);
+
+/**
+ * One file entry from a document.
+ */
+typedef struct {
+  /**
+   * The document's `name`, as a relative path.
+   *
+   * Absent when the name would escape the output directory (`../`, an
+   * absolute path, a Windows drive letter or an alternate data stream);
+   * `name_usable` is then zero and the entry cannot be downloaded.
+   */
+  hydra_string_t name;
+  /**
+   * The strongest digest the document published, as `algorithm:hex`, or an
+   * absent string.
+   */
+  hydra_string_t digest;
+  /**
+   * The entry's `version`, or an absent string.
+   */
+  hydra_string_t version;
+  /**
+   * Object size in bytes, or 0 if the document stated none.
+   *
+   * A stated size is what admits a mirror to a multi-source transfer: it is
+   * evidence from the publisher rather than from the mirrors, so it replaces
+   * the `ETag` agreement independent mirror operators cannot satisfy.
+   */
+  uint64_t size;
+  /**
+   * Piece length in bytes, or 0 if the document published no `<pieces>`.
+   */
+  uint64_t piece_length;
+  /**
+   * Number of piece digests published.
+   */
+  size_t piece_count;
+  /**
+   * Mirrors listed, including ones this build cannot fetch from.
+   */
+  size_t mirror_count;
+  /**
+   * Mirrors this build has a transport for.
+   */
+  size_t fetchable_count;
+  /**
+   * The publisher's DEFAULT per-mirror connection ceiling, or 0 for none.
+   *
+   * Metalink 3.0 `<resources maxconnections>`. Read as the default each
+   * mirror inherits rather than as a cap across the whole file: mirrormanager
+   * emits `maxconnections="1"` beside a seventeen-mirror list, and the
+   * aggregate reading would make that list useless. A mirror stating its own
+   * overrides it; `hydra_metalink_url_t.max_connections` reports what
+   * actually governs each one.
+   */
+  uint32_t max_connections;
+  /**
+   * Nonzero when the piece list tiles the stated size exactly.
+   *
+   * Zero means the two disagree, so the pieces describe a different object
+   * and are not used — the whole-file digest is then the only check.
+   */
+  uint8_t pieces_tile;
+  /**
+   * Nonzero if the entry carries an OpenPGP `<signature>`.
+   *
+   * Recorded, never verified: hydra does not check it, and reporting it as
+   * verified would be worse than not reporting it at all.
+   */
+  uint8_t signed_;
+  /**
+   * Nonzero when `name` is a usable relative path.
+   */
+  uint8_t name_usable;
+  /**
+   * Reserved; must be ignored.
+   */
+  uint8_t reserved[5];
+} hydra_metalink_file_t;
+
+/**
+ * Owned list of file entries. Release with `hydra_metalink_file_array_free`.
+ */
+typedef struct {
+  /**
+   * Array items, or NULL if empty.
+   */
+  hydra_metalink_file_t *items;
+  /**
+   * Number of items in array.
+   */
+  size_t len;
+} hydra_metalink_file_array_t;
+
+/**
+ * One mirror named by a document, as the ranking the engine would use.
+ */
+typedef struct {
+  /**
+   * The mirror URL.
+   */
+  hydra_string_t url;
+  /**
+   * ISO 3166-1 alpha-2 country code, lowercased, or an absent string.
+   */
+  hydra_string_t location;
+  /**
+   * URL scheme: `http`, `https`, `ftp`, or whatever the document named.
+   */
+  hydra_string_t protocol;
+  /**
+   * Rank after the engine's own ordering has been applied: 1 is best.
+   *
+   * Always in the RFC 5854 direction whichever dialect the document used.
+   */
+  uint32_t priority;
+  /**
+   * Connection ceiling the mirror stated for itself, or 0 if it stated none.
+   *
+   * A stated value NARROWS the client's own per-host ceiling and never
+   * widens it.
+   */
+  uint32_t max_connections;
+  /**
+   * Nonzero if this build has a transport for the URL's scheme.
+   *
+   * A document may name `rsync://` mirrors; they are visible here and are
+   * never given to a transfer.
+   */
+  uint8_t fetchable;
+  /**
+   * Reserved; must be ignored.
+   */
+  uint8_t reserved[7];
+} hydra_metalink_url_t;
+
+/**
+ * Owned list of mirrors. Release with `hydra_metalink_url_array_free`.
+ */
+typedef struct {
+  /**
+   * Array items, or NULL if empty.
+   */
+  hydra_metalink_url_t *items;
+  /**
+   * Number of items in array.
+   */
+  size_t len;
+} hydra_metalink_url_array_t;
 
 #ifdef __cplusplus
 extern "C" {
@@ -2140,6 +2331,222 @@ hydra_error_code_t hydra_engine_set_log_callback(hydra_engine_t *engine,
                                                  hydra_log_callback callback,
                                                  void *user_data,
                                                  uint32_t max_level);
+
+/**
+ * Parse a Metalink document held in memory.
+ *
+ * `xml` is the document text, NUL-terminated UTF-8. Both dialects are read:
+ * Metalink 3.0 (`.metalink`, what mirrormanager and most distribution
+ * redirectors emit) and Metalink 4 / RFC 5854 (`.meta4`). The two spell mirror
+ * preference on scales that run in OPPOSITE directions; the reader normalises
+ * them, so every priority this ABI reports has 1 as best.
+ *
+ * On success `*out_document` owns a document that must be released with
+ * hydra_metalink_free.
+ *
+ * Thread-safe. Non-blocking. Allocates internally.
+ *
+ * # Safety
+ *
+ * `xml` must be a valid NUL-terminated string and `out_document` must be
+ * writable.
+ */
+HYDRA_API
+hydra_error_code_t hydra_metalink_parse(const char *xml,
+                                        hydra_metalink_t **out_document);
+
+/**
+ * Read a Metalink document from a local file.
+ *
+ * Thread-safe. Blocking (one file read). Allocates internally.
+ *
+ * # Safety
+ *
+ * `path` must be a valid NUL-terminated string and `out_document` must be
+ * writable.
+ */
+HYDRA_API
+hydra_error_code_t hydra_metalink_open(const char *path,
+                                       hydra_metalink_t **out_document);
+
+/**
+ * Fetch a Metalink document over HTTP and read it.
+ *
+ * Runs on the engine's own runtime and **blocks the calling thread** until the
+ * document arrives or the fetch fails — a mirror list is kilobytes, and an
+ * application that wants it off the UI thread has its own thread pool for that.
+ * Redirects are followed, because mirror redirectors use them constantly.
+ *
+ * The body is capped at 4 MiB: it is fetched before anything about it is known,
+ * and an unbounded read of a body chosen by whoever answers is a
+ * memory-exhaustion primitive no amount of care in the parser can fix.
+ *
+ * Thread-safe. Blocking. Allocates internally.
+ *
+ * # Safety
+ *
+ * `engine` must be valid, `url` must be a valid NUL-terminated string, and
+ * `out_document` must be writable.
+ */
+HYDRA_API
+hydra_error_code_t hydra_metalink_fetch(hydra_engine_t *engine,
+                                        const char *url,
+                                        hydra_metalink_t **out_document);
+
+/**
+ * Release a parsed document.
+ *
+ * Thread-safe. Non-blocking.
+ *
+ * # Safety
+ *
+ * `document` must be NULL or a handle this library produced and not yet freed.
+ */
+HYDRA_API
+void hydra_metalink_free(hydra_metalink_t *document);
+
+/**
+ * Which dialect a document was written in.
+ *
+ * Returns `HYDRA_METALINK_UNKNOWN` for an invalid handle, which is also what a
+ * document with no recognisable namespace reports — the distinction is not one
+ * a caller can act on differently.
+ *
+ * Thread-safe. Non-blocking.
+ *
+ * # Safety
+ *
+ * `document` must be a valid handle.
+ */
+HYDRA_API
+hydra_metalink_version_t hydra_metalink_version(hydra_metalink_t *document);
+
+/**
+ * Every file entry a document describes.
+ *
+ * This is what a host application shows a user before anything is fetched: the
+ * names, the sizes, whether a digest and a piece list are published, and how
+ * many of the listed mirrors this build can actually fetch from. A mirror list
+ * that silently loses two thirds of its entries to an unsupported scheme is
+ * worth seeing before a multi-gigabyte download rather than after.
+ *
+ * Release with hydra_metalink_file_array_free.
+ *
+ * Thread-safe. Non-blocking. Allocates internally.
+ *
+ * # Safety
+ *
+ * `document` must be a valid handle and `out` must be writable.
+ */
+HYDRA_API
+hydra_error_code_t hydra_metalink_files(hydra_metalink_t *document,
+                                        hydra_metalink_file_array_t *out);
+
+/**
+ * Release a file array and the strings inside it.
+ *
+ * Thread-safe. Non-blocking.
+ *
+ * # Safety
+ *
+ * `a` must be NULL or an array this library produced and not yet freed.
+ */
+HYDRA_API
+void hydra_metalink_file_array_free(hydra_metalink_file_array_t *a);
+
+/**
+ * The mirrors of one file entry, in the order hydra would use them.
+ *
+ * Best first, with `priority` renumbered densely from 1 whichever dialect the
+ * document used — so a caller never has to know that Metalink 3.0's scale runs
+ * the other way. Only mirrors this build has a transport for are returned;
+ * `hydra_metalink_file_t.mirror_count` against `fetchable_count` is how many
+ * were dropped.
+ *
+ * Release with hydra_metalink_url_array_free.
+ *
+ * Thread-safe. Non-blocking. Allocates internally.
+ *
+ * # Safety
+ *
+ * `document` must be a valid handle and `out` must be writable.
+ */
+HYDRA_API
+hydra_error_code_t hydra_metalink_mirrors(hydra_metalink_t *document,
+                                          size_t file_index,
+                                          hydra_metalink_url_array_t *out);
+
+/**
+ * Release a mirror array and the strings inside it.
+ *
+ * Thread-safe. Non-blocking.
+ *
+ * # Safety
+ *
+ * `a` must be NULL or an array this library produced and not yet freed.
+ */
+HYDRA_API
+void hydra_metalink_url_array_free(hydra_metalink_url_array_t *a);
+
+/**
+ * Create a job for one entry of a Metalink document.
+ *
+ * `config` is the ordinary job configuration and supplies everything about how
+ * the transfer should behave — output path, headers, proxy, rate cap, retries,
+ * priority. Its `urls` and `url_count` are IGNORED and may be NULL/0: the
+ * document supplies the sources. Its `checksum` is honoured when set and
+ * otherwise filled in from the document's strongest published digest, so a
+ * caller with a digest from a signed announcement keeps it and a caller with
+ * none still gets verification.
+ *
+ * What the document adds beyond the URLs is the point of this call:
+ *
+ * * the **size**, which admits every agreeing mirror to a multi-source transfer
+ *   without the `ETag` match independent mirror operators cannot produce;
+ * * the **ranking**, which decides the first split and the reserve order;
+ * * the **reserve bench** — mirrors past the connection budget, substituted in
+ *   place when a source dies, so nineteen mirrors are worth more than four;
+ * * **`<pieces>`**, verified after the transfer with a failing chunk refetched
+ *   from a different mirror instead of the whole object being downloaded again.
+ *
+ * A `<signature>` in the document is recorded and NOT verified. Verify it
+ * yourself before trusting the digests it covers.
+ *
+ * Thread-safe. Non-blocking. Allocates internally.
+ *
+ * # Safety
+ *
+ * `engine` and `document` must be valid, `config` must have been initialised by
+ * hydra_job_config_init, and `out_job_id` must be writable.
+ */
+HYDRA_API
+hydra_error_code_t hydra_job_create_from_metalink(hydra_engine_t *engine,
+                                                  hydra_metalink_t *document,
+                                                  size_t file_index,
+                                                  const hydra_job_config_t *config,
+                                                  hydra_job_id_t *out_job_id);
+
+/**
+ * Find a file entry by name.
+ *
+ * Matches either the document's full relative name or just the base name,
+ * because an application passes on what a user picked from a listing and a
+ * listing generally shows the base name.
+ *
+ * Returns `HYDRA_ERR_NOT_FOUND` when no entry matches, leaving `*out_index`
+ * untouched.
+ *
+ * Thread-safe. Non-blocking.
+ *
+ * # Safety
+ *
+ * `document` must be a valid handle, `name` must be a valid NUL-terminated
+ * string, and `out_index` must be writable.
+ */
+HYDRA_API
+hydra_error_code_t hydra_metalink_find_file(hydra_metalink_t *document,
+                                            const char *name,
+                                            size_t *out_index);
 
 /* ==========================================================================
  * Classifying a returned code.

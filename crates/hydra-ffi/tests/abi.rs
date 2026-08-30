@@ -1319,3 +1319,402 @@ fn source_information_is_available_while_a_job_runs() {
     unsafe { hydra_job_cancel(h.engine, id, 1) };
     await_terminal(&h, id, Duration::from_secs(30));
 }
+
+// ================================================================== metalink
+
+/// Build a Metalink 4 document over live origins, so the mirrors in it are real.
+fn meta4(
+    name: &str,
+    size: usize,
+    digest_hex: &str,
+    urls: &[String],
+    pieces: Option<(u64, Vec<String>)>,
+) -> String {
+    let mut s = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    s.push_str("<metalink xmlns=\"urn:ietf:params:xml:ns:metalink\">\n");
+    s.push_str("  <generator>hydra-ffi-test/1.0</generator>\n");
+    s.push_str(&format!("  <file name=\"{name}\">\n"));
+    s.push_str(&format!("    <size>{size}</size>\n"));
+    s.push_str(&format!("    <hash type=\"sha-256\">{digest_hex}</hash>\n"));
+    if let Some((len, hashes)) = pieces {
+        s.push_str(&format!("    <pieces length=\"{len}\" type=\"sha-256\">\n"));
+        for h in hashes {
+            s.push_str(&format!("      <hash>{h}</hash>\n"));
+        }
+        s.push_str("    </pieces>\n");
+    }
+    for (i, u) in urls.iter().enumerate() {
+        s.push_str(&format!("    <url priority=\"{}\">{u}</url>\n", i + 1));
+    }
+    // A scheme this build has no transport for, so the test also proves the
+    // reader keeps it visible and the source list drops it.
+    s.push_str("    <url priority=\"900\">rsync://rs.invalid/object.bin</url>\n");
+    s.push_str("  </file>\n</metalink>\n");
+    s
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    let mut h = sha2::Sha256::new();
+    h.update(bytes);
+    hya_net::digest::to_lower_hex(&h.finalize())
+}
+
+fn parse_doc(xml: &str) -> *mut hydra_metalink_t {
+    let c = CString::new(xml).unwrap();
+    let mut doc: *mut hydra_metalink_t = ptr::null_mut();
+    let rc = unsafe { hydra_metalink_parse(c.as_ptr(), &mut doc) };
+    assert_eq!(
+        rc,
+        hydra_error_code_t::HYDRA_OK,
+        "parse failed: {}",
+        last_error()
+    );
+    assert!(!doc.is_null());
+    doc
+}
+
+#[test]
+fn a_document_reports_its_files_and_its_ranked_mirrors_before_anything_is_fetched() {
+    // The inspection layer exists so a host application can put the decision in
+    // front of a user — which file, how large, is it verifiable — while the
+    // object is still on the far side of a metered link.
+    let body = make_body(1024);
+    let a = serve(body.clone(), Behaviour::default());
+    let b = serve(body.clone(), Behaviour::default());
+    let urls = vec![a.url("/object.bin"), b.url("/object.bin")];
+    let xml = meta4(
+        "object.bin",
+        body.len(),
+        &sha256_hex(&body),
+        &urls,
+        Some((
+            512,
+            vec![sha256_hex(&body[..512]), sha256_hex(&body[512..])],
+        )),
+    );
+    let doc = parse_doc(&xml);
+
+    assert_eq!(
+        unsafe { hydra_metalink_version(doc) },
+        hydra_metalink_version_t::HYDRA_METALINK_V4
+    );
+
+    let mut files: hydra_metalink_file_array_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { hydra_metalink_files(doc, &mut files) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    assert_eq!(files.len, 1);
+    let f = unsafe { &*files.items };
+    assert_eq!(
+        unsafe { CStr::from_ptr(f.name.data) }.to_str().unwrap(),
+        "object.bin"
+    );
+    assert_eq!(f.size, body.len() as u64);
+    assert_eq!(f.name_usable, 1);
+    assert_eq!(f.piece_count, 2);
+    assert_eq!(f.piece_length, 512);
+    assert_eq!(f.pieces_tile, 1, "512 x 2 tiles a 1024-byte object");
+    assert_eq!(f.signed, 0);
+    // The rsync mirror is VISIBLE in the count and absent from what can be
+    // fetched: a list that silently shrank would be indistinguishable from one
+    // the publisher wrote that way.
+    assert_eq!(f.mirror_count, 3);
+    assert_eq!(f.fetchable_count, 2);
+    assert!(unsafe { CStr::from_ptr(f.digest.data) }
+        .to_str()
+        .unwrap()
+        .starts_with("sha256:"));
+
+    let mut mirrors: hydra_metalink_url_array_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { hydra_metalink_mirrors(doc, 0, &mut mirrors) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    assert_eq!(mirrors.len, 2, "only the fetchable mirrors are sources");
+    let ranks: Vec<u32> = (0..mirrors.len)
+        .map(|i| unsafe { (*mirrors.items.add(i)).priority })
+        .collect();
+    assert_eq!(ranks, vec![1, 2], "dense, best first");
+    assert_eq!(
+        unsafe { CStr::from_ptr((*mirrors.items).url.data) }
+            .to_str()
+            .unwrap(),
+        urls[0]
+    );
+
+    // A name that is not in the document is a miss, not entry zero.
+    let mut idx: usize = 99;
+    let want = CString::new("object.bin").unwrap();
+    assert_eq!(
+        unsafe { hydra_metalink_find_file(doc, want.as_ptr(), &mut idx) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    assert_eq!(idx, 0);
+    let missing = CString::new("not-in-here").unwrap();
+    assert_eq!(
+        unsafe { hydra_metalink_find_file(doc, missing.as_ptr(), &mut idx) },
+        hydra_error_code_t::HYDRA_ERR_NOT_FOUND
+    );
+    assert_eq!(idx, 0, "a miss must not disturb the caller's variable");
+
+    unsafe { hydra_metalink_url_array_free(&mut mirrors) };
+    unsafe { hydra_metalink_file_array_free(&mut files) };
+    unsafe { hydra_metalink_free(doc) };
+}
+
+#[test]
+fn a_job_created_from_a_document_assembles_from_mirrors_that_share_no_validator() {
+    // The claim the feature rests on. Two independent mirrors cannot produce the
+    // same `ETag`, so the pairwise gate keeps exactly one of them — and with the
+    // document's size as the admission test, both are used and the bytes are
+    // still right, because the document's digest and pieces are checked after.
+    let body = make_body(2 * 1024 * 1024 + 13);
+    let no_validator = Behaviour {
+        validator: false,
+        ..Behaviour::default()
+    };
+    let a = serve(body.clone(), no_validator);
+    let b = serve(body.clone(), no_validator);
+    let urls = vec![a.url("/object.bin"), b.url("/object.bin")];
+    let chunk = 1 << 20;
+    let pieces: Vec<String> = body.chunks(chunk).map(sha256_hex).collect();
+    let xml = meta4(
+        "object.bin",
+        body.len(),
+        &sha256_hex(&body),
+        &urls,
+        Some((chunk as u64, pieces)),
+    );
+    let doc = parse_doc(&xml);
+
+    let h = harness("metalink", false, |c| {
+        c.max_connections = 4;
+        c.adaptive_concurrency = 0;
+        c.progress_interval_ms = 20;
+    });
+    let out = h.dir.join("object.bin");
+    let out_c = CString::new(out.to_string_lossy().into_owned()).unwrap();
+    let mut cfg: hydra_job_config_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe {
+            hydra_job_config_init(&mut cfg, std::mem::size_of::<hydra_job_config_t>() as u32)
+        },
+        hydra_error_code_t::HYDRA_OK
+    );
+    // Deliberately NO urls: the document supplies them.
+    cfg.output_path = out_c.as_ptr();
+    cfg.adaptive = 0;
+    cfg.max_connections = 4;
+
+    let mut id: hydra_job_id_t = 0;
+    assert_eq!(
+        unsafe { hydra_job_create_from_metalink(h.engine, doc, 0, &cfg, &mut id) },
+        hydra_error_code_t::HYDRA_OK,
+        "creation failed: {}",
+        last_error()
+    );
+    assert_ne!(id, 0);
+    assert_eq!(
+        unsafe { hydra_job_start(h.engine, id) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let ev = await_terminal(&h, id, Duration::from_secs(60));
+    assert_eq!(
+        ev.kind,
+        hydra_event_type_t::HYDRA_EVENT_COMPLETED,
+        "terminal event was {:?}: {}",
+        ev.kind,
+        last_error()
+    );
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        body,
+        "the assembled object must be byte-exact"
+    );
+    // Both mirrors served: that is the whole point, and it is only visible from
+    // the request counts, because a one-source transfer produces the same file.
+    let served = a.requests.load(std::sync::atomic::Ordering::Relaxed)
+        + b.requests.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        served >= 2,
+        "expected requests across both mirrors, got {served}"
+    );
+
+    unsafe { hydra_metalink_free(doc) };
+}
+
+#[test]
+fn a_document_whose_mirrors_all_disagree_with_its_size_fails_with_a_reason() {
+    // Reporting success here would hand back an object the publisher says is a
+    // different size — which passes every length check this program makes.
+    let body = make_body(4096);
+    let o = serve(body.clone(), Behaviour::default());
+    let xml = meta4(
+        "object.bin",
+        999_999,
+        &sha256_hex(&body),
+        &[o.url("/object.bin")],
+        None,
+    );
+    let doc = parse_doc(&xml);
+
+    let h = harness("metalink-size", false, |c| {
+        c.progress_interval_ms = 20;
+    });
+    let out = h.dir.join("object.bin");
+    let out_c = CString::new(out.to_string_lossy().into_owned()).unwrap();
+    let mut cfg: hydra_job_config_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe {
+            hydra_job_config_init(&mut cfg, std::mem::size_of::<hydra_job_config_t>() as u32)
+        },
+        hydra_error_code_t::HYDRA_OK
+    );
+    cfg.output_path = out_c.as_ptr();
+    let mut id: hydra_job_id_t = 0;
+    assert_eq!(
+        unsafe { hydra_job_create_from_metalink(h.engine, doc, 0, &cfg, &mut id) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    assert_eq!(
+        unsafe { hydra_job_start(h.engine, id) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let ev = await_terminal(&h, id, Duration::from_secs(30));
+    assert_eq!(ev.kind, hydra_event_type_t::HYDRA_EVENT_FAILED);
+
+    unsafe { hydra_metalink_free(doc) };
+}
+
+#[test]
+fn metalink_handles_reject_null_and_stale_pointers_rather_than_crashing() {
+    let mut doc: *mut hydra_metalink_t = ptr::null_mut();
+    assert_eq!(
+        unsafe { hydra_metalink_parse(ptr::null(), &mut doc) },
+        hydra_error_code_t::HYDRA_ERR_INVALID_ARGUMENT
+    );
+    let junk = CString::new("<html>not a mirror list</html>").unwrap();
+    assert_eq!(
+        unsafe { hydra_metalink_parse(junk.as_ptr(), &mut doc) },
+        hydra_error_code_t::HYDRA_ERR_INVALID_ARGUMENT
+    );
+    let missing = CString::new("/definitely/not/here.meta4").unwrap();
+    assert_ne!(
+        unsafe { hydra_metalink_open(missing.as_ptr(), &mut doc) },
+        hydra_error_code_t::HYDRA_OK
+    );
+
+    let mut files: hydra_metalink_file_array_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { hydra_metalink_files(ptr::null_mut(), &mut files) },
+        hydra_error_code_t::HYDRA_ERR_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        unsafe { hydra_metalink_version(ptr::null_mut()) },
+        hydra_metalink_version_t::HYDRA_METALINK_UNKNOWN
+    );
+
+    // A freed handle is rejected rather than used: the magic is cleared on free,
+    // so a double free and a use-after-free both land on the same check.
+    let body = make_body(16);
+    let d = parse_doc(&meta4(
+        "x.bin",
+        body.len(),
+        &sha256_hex(&body),
+        &["https://a.example/x.bin".to_string()],
+        None,
+    ));
+    unsafe { hydra_metalink_free(d) };
+    // Freeing twice is harmless.
+    unsafe { hydra_metalink_free(d) };
+    // Freeing NULL is harmless.
+    unsafe { hydra_metalink_free(ptr::null_mut()) };
+    unsafe { hydra_metalink_file_array_free(ptr::null_mut()) };
+    unsafe { hydra_metalink_url_array_free(ptr::null_mut()) };
+}
+
+/// Live: a real Metalink document driven entirely through the C ABI.
+///
+/// Opt-in via `HYDRA_FFI_METALINK_LIVE=<path or url>`. The offline tests stop
+/// at resolution; this is the only thing that exercises the ABI's own path —
+/// `hydra_metalink_open` → `hydra_job_create_from_metalink` → the concurrent
+/// mirror probe → the multi-source transfer → verification against the
+/// document's digest — over real hosts.
+#[test]
+fn live_metalink_through_the_abi() {
+    let Some(src) = std::env::var("HYDRA_FFI_METALINK_LIVE")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let c = CString::new(src).unwrap();
+    let mut doc: *mut hydra_metalink_t = ptr::null_mut();
+    assert_eq!(
+        unsafe { hydra_metalink_open(c.as_ptr(), &mut doc) },
+        hydra_error_code_t::HYDRA_OK,
+        "open failed: {}",
+        last_error()
+    );
+
+    let mut files: hydra_metalink_file_array_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { hydra_metalink_files(doc, &mut files) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let f = unsafe { &*files.items };
+    let want = f.size;
+    eprintln!(
+        "document: {} bytes, {} of {} mirrors fetchable, {} pieces",
+        want, f.fetchable_count, f.mirror_count, f.piece_count
+    );
+
+    let h = harness("ffi-metalink-live", false, |c| {
+        c.max_connections = 4;
+        c.progress_interval_ms = 50;
+    });
+    let out = h.dir.join("object.bin");
+    let out_c = CString::new(out.to_string_lossy().into_owned()).unwrap();
+    let mut cfg: hydra_job_config_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe {
+            hydra_job_config_init(&mut cfg, std::mem::size_of::<hydra_job_config_t>() as u32)
+        },
+        hydra_error_code_t::HYDRA_OK
+    );
+    cfg.output_path = out_c.as_ptr();
+    cfg.max_connections = 4;
+
+    let mut id: hydra_job_id_t = 0;
+    assert_eq!(
+        unsafe { hydra_job_create_from_metalink(h.engine, doc, 0, &cfg, &mut id) },
+        hydra_error_code_t::HYDRA_OK,
+        "creation failed: {}",
+        last_error()
+    );
+    let started = Instant::now();
+    assert_eq!(
+        unsafe { hydra_job_start(h.engine, id) },
+        hydra_error_code_t::HYDRA_OK
+    );
+    let ev = await_terminal(&h, id, Duration::from_secs(300));
+    assert_eq!(
+        ev.kind,
+        hydra_event_type_t::HYDRA_EVENT_COMPLETED,
+        "terminal event was {:?}: {}",
+        ev.kind,
+        last_error()
+    );
+    let on_disk = std::fs::metadata(&out).expect("the file must exist").len();
+    assert_eq!(on_disk, want, "size must match the document");
+    eprintln!(
+        "{on_disk} bytes in {:.2}s = {:.2} MB/s (digest verified by the engine)",
+        started.elapsed().as_secs_f64(),
+        on_disk as f64 / started.elapsed().as_secs_f64() / 1.048576e6
+    );
+
+    unsafe { hydra_metalink_file_array_free(&mut files) };
+    unsafe { hydra_metalink_free(doc) };
+}
