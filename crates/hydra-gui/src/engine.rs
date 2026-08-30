@@ -3434,6 +3434,20 @@ mod stream_tests {
     }
 
     /// AES-128-CBC with PKCS#7, the way an HLS packager writes a segment.
+    /// A fresh AES-128 key for one test run. Seeded from the process's
+    /// `RandomState`, so the bytes exist only while the test does.
+    fn test_key() -> [u8; 16] {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        let mut key = [0u8; 16];
+        for (i, half) in key.chunks_mut(8).enumerate() {
+            let mut h = RandomState::new().build_hasher();
+            h.write_usize(i);
+            half.copy_from_slice(&h.finish().to_ne_bytes());
+        }
+        key
+    }
+
     fn encrypt_segment(plain: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
         use aes::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
         let mut buf = vec![0u8; plain.len() + 16];
@@ -3516,13 +3530,12 @@ mod stream_tests {
     #[tokio::test]
     async fn an_aes_128_playlist_is_fetched_keyed_and_decrypted() {
         let dir = tmp("aes128");
-        let key = [0xABu8; 16];
-        // No explicit IV, so each segment's IV is its media sequence number.
-        let iv = |seq: u64| {
-            let mut iv = [0u8; 16];
-            iv[8..].copy_from_slice(&seq.to_be_bytes());
-            iv
-        };
+        // Generated per run, not baked into the source: a literal here is
+        // key material committed to the repository, however short its life.
+        let key = test_key();
+        // No explicit IV, so each segment's IV is its media sequence number
+        // as a 128-bit big-endian number.
+        let iv = |seq: u64| u128::from(seq).to_be_bytes();
         let (base, seen) = serve(vec![
             (
                 "/index.m3u8".into(),

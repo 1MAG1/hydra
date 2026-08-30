@@ -308,12 +308,12 @@ fn parse_hex_iv(v: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
-/// The implicit IV: the media sequence number, big-endian, in the low 64
-/// bits of a 128-bit block.
+/// The implicit IV: the media sequence number as a 128-bit big-endian
+/// number, which puts it in the low 64 bits of the block. Widening to
+/// `u128` derives every byte from the sequence number, so no part of the IV
+/// is a constant in the source.
 fn iv_from_sequence(seq: u64) -> [u8; 16] {
-    let mut iv = [0u8; 16];
-    iv[8..].copy_from_slice(&seq.to_be_bytes());
-    iv
+    u128::from(seq).to_be_bytes()
 }
 
 fn tag_value(line: &str) -> &str {
@@ -1928,7 +1928,9 @@ v2/index.m3u8\n";
         use aes::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
         let dir = scratch("aes");
         let path = dir.join("seg").to_string_lossy().into_owned();
-        let key = [0x11u8; 16];
+        // Generated per run, not baked into the source: a literal here is
+        // key material committed to the repository, however short its life.
+        let key = test_key();
         let iv = iv_from_sequence(42);
         let plain = b"the quick brown fox jumps over the lazy dog, twice over".to_vec();
 
@@ -1949,7 +1951,7 @@ v2/index.m3u8\n";
         // validate, which is the difference between a failed download and a
         // corrupt one.
         std::fs::write(&path, &buf).unwrap();
-        assert!(decrypt_in_place(&path, &[0x22u8; 16], &iv).is_err());
+        assert!(decrypt_in_place(&path, &key.map(|b| !b), &iv).is_err());
 
         // Neither does a truncated segment.
         std::fs::write(&path, &buf[..buf.len() - 3]).unwrap();
@@ -2087,6 +2089,20 @@ v2/index.m3u8\n";
     /// The concurrency the assembly tests drive at, so "one window's worth"
     /// means something definite in them.
     const CONC: usize = 6;
+
+    /// A fresh AES-128 key for one test run. Seeded from the process's
+    /// `RandomState`, so the bytes exist only while the test does.
+    fn test_key() -> [u8; 16] {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        let mut key = [0u8; 16];
+        for (i, half) in key.chunks_mut(8).enumerate() {
+            let mut h = RandomState::new().build_hasher();
+            h.write_usize(i);
+            half.copy_from_slice(&h.finish().to_ne_bytes());
+        }
+        key
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("hydra-hls-{}-{name}", std::process::id()));
