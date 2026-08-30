@@ -1650,6 +1650,8 @@ impl App {
         }
         let user_agent = self.cfg.settings.user_agent.clone();
         let adaptive = self.cfg.settings.adaptive_conns;
+        // Read here with the others: the item is borrowed mutably below.
+        let remote_time = self.cfg.settings.server_file_date;
         // Read before the item is borrowed mutably below; a stream uses the
         // same connection count a file download would.
         let stream_conns = self
@@ -1748,6 +1750,7 @@ impl App {
             cookies: d.cookies.clone(),
             limit: None,
             adaptive,
+            remote_time,
         };
         let url = d.url.clone();
         let limit = self.effective_limit(self.item(id).unwrap());

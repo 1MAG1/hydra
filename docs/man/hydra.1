@@ -5,10 +5,14 @@
 .TH HYDRA 1 "2026-08-30" "hydra" "User Commands"
 .
 .SH NAME
-hydra \- multi-source file retriever with reassignable byte ranges
+hydra, hya \- multi-source file retriever with reassignable byte ranges
 .
 .SH SYNOPSIS
 .B hydra
+.RI [ options ]
+.IR URL ...
+.br
+.B hya
 .RI [ options ]
 .IR URL ...
 .br
@@ -1335,6 +1339,36 @@ re-executes the binary headless in a new session, so transfers survive the
 terminal closing.
 Exiting the event loop would otherwise kill them, since they are tasks in
 the same process.
+.
+.SH THE hya NAME
+.B hya
+is the same program under a shorter name. Every install channel \- the
+install scripts, Homebrew, the deb, rpm and AUR packages, the macOS installer
+and the Windows installer \- puts the CLI on
+.B PATH
+under both spellings, as a symlink where the platform allows one and as a
+second copy where it does not.
+.PP
+It exists for two reasons. Three letters is less to type for a command run as
+often as a download; and
+.B hydra
+is also the name of THC\-Hydra, the login auditor that Debian, Ubuntu, Kali,
+Arch and Homebrew all ship, so a machine can carry two unrelated
+.B hydra
+programs and resolve whichever comes first on
+.BR PATH .
+.B hya
+is unambiguous.
+.PP
+Shell completions are name\-bound \- a completion script names the command it
+completes \- so the packages install a set for each name. To add the short
+name's set by hand:
+.PP
+.RS 4
+.nf
+hydra install\-completions \-\-bin\-name hya
+.fi
+.RE
 .
 .SH SEE ALSO
 .BR hydra\-interactive (1),

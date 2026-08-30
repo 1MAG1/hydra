@@ -825,13 +825,16 @@ jobs:
             mkdir -p "$RPM_TOP/SOURCES" "$RPM_TOP/SRPMS" "$RPM_TOP/SPECS" "$RPM_TOP/BUILD"
             git archive --format=tar.gz --prefix="hydra-${VERSION}/" HEAD > "$RPM_TOP/SOURCES/hydra-${VERSION}.tar.gz"
 
-            # Build the Source RPM (SRPM) with dynamic version from release tag
-            rpmbuild -bs \
-              --define "_topdir $RPM_TOP" \
-              --define "_version ${VERSION}" \
-              packaging/rpm/hydra.spec
+            # Render the spec with the release version baked in. Copr imports
+            # the spec and the tarball into dist-git and then re-runs
+            # `rpmbuild -bs` in mock without our command-line defines, so the
+            # version has to be in the spec itself rather than in `--define`.
+            scripts/render-rpm-spec.sh "$VERSION" "$RPM_TOP/SPECS/hydra.spec"
 
-            SRPM=$(ls "$RPM_TOP"/SRPMS/hydra-*.src.rpm)
+            # Build the Source RPM (SRPM); the spec now carries the version itself
+            rpmbuild -bs --define "_topdir $RPM_TOP" "$RPM_TOP/SPECS/hydra.spec"
+
+            SRPM=$(ls "$RPM_TOP"/SRPMS/hydra-${VERSION}-*.src.rpm)
             echo "Built SRPM: $SRPM"
 
             # Submit SRPM to Copr build system

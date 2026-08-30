@@ -10,7 +10,7 @@
 # crate stands against crates.io — the same comparison the check job makes.
 
 # crates.io name -> manifest directory: crates/hydra-core holds the hya-core
-# crate, crates/hydra-net holds hya-net.
+# crate, crates/hydra-net holds hya-net, crates/hydra-stream holds hya-stream.
 crate_dir() {
   echo "hydra-${1#hya-}"
 }
@@ -69,8 +69,8 @@ version_gt() {
 # root Cargo.toml intentionally omits one (see commit d8b0285: local builds
 # would otherwise need the pin bumped in lockstep with every hya-core/hya-net
 # version change). The publish job stamps the pin in here instead, against its
-# own ephemeral checkout right before publishing the dependent crate — nothing
-# is committed back.
+# own ephemeral checkout right before publishing the dependent crates
+# (hya-net, hya-stream) — nothing is committed back.
 pin_workspace_dependency_version() {
   local name="$1" dir version
   dir=$(crate_dir "$name")
@@ -93,7 +93,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 
   status=0
   printf '%-10s %-12s %-12s %s\n' CRATE MANIFEST REGISTRY STATUS
-  for crate in hya-core hya-net; do
+  for crate in hya-core hya-net hya-stream; do
     version=$(crate_version "$crate")
     latest=$(latest_indexed_version "$crate")
     if [ -z "$latest" ]; then

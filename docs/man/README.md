@@ -1,11 +1,12 @@
 # Manual pages
 
-Eight section-1 pages, written in `man(7)` and verified against the release binary
+Eight section-1 pages (plus `hya.1`, a symlink onto `hydra.1` for the CLI's short
+name), written in `man(7)` and verified against the release binary
 rather than against the source comments. `mandoc -Tlint` is clean on all of them.
 
 | Page | Covers |
 |---|---|
-| `hydra.1` | the download command: every top-level flag, protocols, adaptive streams (HLS/DASH quality, container, live recording), wget/curl compatibility, JSON schema, exit codes, environment, files |
+| `hydra.1` (`hya.1`) | the download command: every top-level flag, protocols, adaptive streams (HLS/DASH quality, container, live recording), wget/curl compatibility, JSON schema, exit codes, environment, files |
 | `hydra-interactive.1` | the queue manager, its keys, and what backgrounding actually does |
 | `hydra-checksum.1` | advertised-digest retrieval and the trust boundary around it |
 | `hydra-parity.1` | at-rest Reed–Solomon parity, and why digests come first |
