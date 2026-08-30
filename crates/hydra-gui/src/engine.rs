@@ -48,6 +48,14 @@ pub struct StartSpec {
     /// Start at one connection and let the in-band ramp admit more while
     /// they pay for themselves; `conns` becomes a ceiling, not a target.
     pub adaptive: bool,
+    /// Stamp the finished file with the date the server reported for the
+    /// object, instead of the time the bytes happened to land on disk.
+    ///
+    /// Options > "Set file creation date as provided by the server", and the
+    /// CLI's `--remote-time`. Only `Last-Modified` can answer this: an ETag is
+    /// opaque, so a server that sends no date leaves the file's own time
+    /// alone rather than getting a fabricated one.
+    pub remote_time: bool,
 }
 
 /// An adaptive stream to assemble. Deliberately NOT a `StartSpec`: there is
@@ -736,6 +744,22 @@ async fn run_download(
     };
     crate::log::debug(&format!("#{id} probe delta {delta:.3}s"));
 
+    // The date to stamp the finished file with, resolved once here while the
+    // probe headers are still in hand.
+    //
+    // `Last-Modified` first and on its own terms: `validator` collapses to the
+    // ETag whenever the server sent one, so reading THAT field would throw the
+    // date away for GitHub, S3 and most CDNs — the common case, and the exact
+    // defect the CLI's `--remote-time` was fixed for. The validator is still
+    // consulted as a fallback, for the servers that send only a date: there it
+    // IS the `Last-Modified` value.
+    let stamp = spec.remote_time.then(|| remote_stamp(&p)).flatten();
+    if spec.remote_time && stamp.is_none() {
+        crate::log::info(&format!(
+            "#{id} remote time: server sent no Last-Modified header, skipped"
+        ));
+    }
+
     let file_name = p.suggested_filename().or_else(|| {
         let n = file_name_from_url(&url);
         (!n.is_empty()).then_some(n)
@@ -787,7 +811,7 @@ async fn run_download(
                 r = &mut fut => {
                     match r {
                         Ok(n) => {
-                            finish_file(&spec, &final_path, &tx, n, t0.elapsed().as_secs_f64());
+                            finish_file(&spec, &final_path, &tx, n, t0.elapsed().as_secs_f64(), stamp);
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
                             ev(Event::Stopped {
@@ -1044,7 +1068,7 @@ async fn run_download(
             crate::log::debug(&format!(
                 "#{id} transfer {elapsed:.2}s, {reqs} requests over {n} conns"
             ));
-            finish_file(&spec, &final_path, &tx, size, elapsed);
+            finish_file(&spec, &final_path, &tx, size, elapsed, stamp);
         }
         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
             ev(Event::Stopped { id, done, held });
@@ -1217,7 +1241,17 @@ async fn run_ftp_download(
         }),
         Some(Ok(())) => {
             let final_path = Arc::new(Mutex::new(spec.final_path.clone()));
-            finish_file(spec, &final_path, tx, size, t0.elapsed().as_secs_f64());
+            // No stamp over FTP: the date would have to come from `MDTM`, which
+            // this transfer never issues. Silently leaving the file's own time
+            // is the same no-op an HTTP server that sends no date gets.
+            finish_file(
+                spec,
+                &final_path,
+                tx,
+                size,
+                t0.elapsed().as_secs_f64(),
+                None,
+            );
         }
         Some(Err(e)) => {
             crate::log::error(&format!("#{id} ftp failed at {done}/{size}: {e}"));
@@ -1232,6 +1266,36 @@ async fn run_ftp_download(
     }
 }
 
+/// The date to stamp a finished file with, read from a probe's headers.
+///
+/// `Last-Modified` first and on its own terms: [`Probe::validator`] collapses
+/// to the ETag whenever the server sent one, so reading THAT field would throw
+/// the date away for GitHub, S3 and most CDNs — the common case, and the exact
+/// defect the CLI's `--remote-time` was fixed for. The validator is still
+/// consulted as a fallback, for the servers that send only a date: there it IS
+/// the `Last-Modified` value.
+///
+/// `None` when the server offered no date at all. An ETag is opaque and cannot
+/// answer "when did this object last change?", so the finished file keeps its
+/// own time rather than getting a fabricated one.
+fn remote_stamp(p: &Probe) -> Option<u64> {
+    p.last_modified
+        .as_deref()
+        .or(p.validator.as_deref())
+        .and_then(hya_net::polite::parse_http_date)
+}
+
+/// Set a file's modification time from a Unix timestamp.
+///
+/// Modification time, not birth time: POSIX has no way to set the latter at
+/// all, so "creation date" in the option's wording means the same thing here
+/// that it means in every other download manager — the date the server said
+/// the object last changed.
+fn set_mtime(path: &std::path::Path, secs: u64) -> std::io::Result<()> {
+    let f = std::fs::File::options().write(true).open(path)?;
+    f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+}
+
 /// Move the finished `.part` into place and report completion. The
 /// destination is read at completion time so File-Info edits made while the
 /// transfer ran land the file where the user finally said.
@@ -1241,6 +1305,7 @@ fn finish_file(
     tx: &UnboundedSender<Event>,
     size: u64,
     elapsed: f64,
+    stamp: Option<u64>,
 ) {
     let final_str = final_path
         .lock()
@@ -1260,6 +1325,16 @@ fn finish_file(
     });
     match moved {
         Ok(()) => {
+            // After the rename, never before: the mtime has to be set on the
+            // file the user keeps, and moving it is what fixes which file
+            // that is. Best-effort — a filesystem that will not take the
+            // timestamp (a read-only mount, an exotic FUSE target) is not a
+            // reason to report a good download as failed.
+            if let Some(secs) = stamp {
+                if let Err(e) = set_mtime(final_path, secs) {
+                    crate::log::warn(&format!("#{} cannot set remote time: {e}", spec.id));
+                }
+            }
             crate::log::log(&format!("done #{} -> {final_str}", spec.id));
             let _ = tx.send(Event::Finished {
                 id: spec.id,
@@ -1283,6 +1358,58 @@ fn finish_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stamp must survive an ETag. A server sending BOTH headers — GitHub,
+    /// S3, most CDNs — is the common case, and reading the collapsed
+    /// `validator` field would discard the date for every one of them, which is
+    /// what made the option look broken.
+    #[test]
+    fn remote_stamp_survives_an_etag() {
+        let p = Probe {
+            validator: Some("\"abc123\"".into()),
+            last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()),
+            ..Default::default()
+        };
+        assert_eq!(remote_stamp(&p), Some(1_445_412_480));
+    }
+
+    /// Only a date: the collapsed validator IS the `Last-Modified`, so the
+    /// fallback has to read it.
+    #[test]
+    fn remote_stamp_falls_back_to_a_date_form_validator() {
+        let p = Probe {
+            validator: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()),
+            ..Default::default()
+        };
+        assert_eq!(remote_stamp(&p), Some(1_445_412_480));
+    }
+
+    /// An ETag is opaque: no date, and none invented.
+    #[test]
+    fn remote_stamp_is_none_without_a_date() {
+        let p = Probe {
+            validator: Some("\"abc123\"".into()),
+            ..Default::default()
+        };
+        assert_eq!(remote_stamp(&p), None);
+        assert_eq!(remote_stamp(&Probe::default()), None);
+    }
+
+    #[test]
+    fn set_mtime_stamps_the_file() {
+        let path = std::env::temp_dir().join("hydra-gui-mtime-test.bin");
+        std::fs::write(&path, b"x").expect("write");
+        set_mtime(&path, 1_445_412_480).expect("set mtime");
+        let got = std::fs::metadata(&path)
+            .expect("metadata")
+            .modified()
+            .expect("modified")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after epoch")
+            .as_secs();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(got, 1_445_412_480);
+    }
 
     #[test]
     fn parse_url_forms() {
@@ -1370,6 +1497,7 @@ mod tests {
                 cookies: None,
                 limit: None,
                 adaptive: std::env::var_os("HYDRA_AB_ADAPTIVE").is_some(),
+                remote_time: false,
             })));
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
             loop {
@@ -1423,6 +1551,9 @@ mod tests {
             cookies: None,
             limit: None,
             adaptive: false,
+            // On, so the harness exercises the stamping path too: it is part
+            // of what "the file lands correctly on disk" means now.
+            remote_time: true,
         })));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         let mut probed_size = None;
@@ -1436,7 +1567,13 @@ mod tests {
                     if let Some(ps) = probed_size {
                         assert_eq!(ps, size);
                     }
-                    eprintln!("live download ok: {size} bytes");
+                    let mtime = meta
+                        .modified()
+                        .expect("modified")
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("after epoch")
+                        .as_secs();
+                    eprintln!("live download ok: {size} bytes, mtime {mtime}");
                     break;
                 }
                 Event::Failed { error, .. } => panic!("download failed: {error}"),
