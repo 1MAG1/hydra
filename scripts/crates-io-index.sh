@@ -50,12 +50,24 @@ is_indexed() {
 
 # Latest version on the registry, ignoring yanked releases. The sparse index
 # serves one JSON object per line in publish order, so the last live line is
-# the current version. Empty when the crate has never been published.
+# the current version. Empty when the crate has never been published (a 404
+# from the sparse index) — checked via HTTP status rather than `curl -f`,
+# whose exit 22 on 404 would otherwise abort the caller under `set -e`.
 latest_indexed_version() {
-  local name="$1"
-  curl -sf -A "$(crate_user_agent "$name" latest)" "$(sparse_index_url "$name")" \
-    | jq -r 'select(.yanked | not) | .vers' \
-    | tail -1
+  local name="$1" tmp status
+  tmp=$(mktemp)
+  status=$(curl -s -o "$tmp" -w '%{http_code}' -A "$(crate_user_agent "$name" latest)" "$(sparse_index_url "$name")")
+  if [ "$status" = "404" ]; then
+    rm -f "$tmp"
+    return 0
+  fi
+  if [ "$status" -ge 400 ]; then
+    rm -f "$tmp"
+    echo "error: crates.io index request for ${name} failed with HTTP ${status}" >&2
+    return 1
+  fi
+  jq -r 'select(.yanked | not) | .vers' "$tmp" | tail -1
+  rm -f "$tmp"
 }
 
 # `a` is strictly newer than `b` under version sort. Used to refuse a manifest
