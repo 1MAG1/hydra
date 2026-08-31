@@ -1,6 +1,6 @@
 [package]
 name = "hya-stream"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 # MIT OR Apache-2.0, like hya-core and hya-net and for the same reason: this
 # is a library built to be depended on. Manifest parsing and segment assembly
@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 repository.workspace = true
 homepage.workspace = true
 description = "HLS and MPEG-DASH manifest parsing, segment planning and assembly"
+readme = "README.md"
 
 [dependencies]
 # The same incremental-admission controller the range scheduler uses, applied
