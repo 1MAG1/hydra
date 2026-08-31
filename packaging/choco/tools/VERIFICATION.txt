@@ -1,0 +1,16 @@
+﻿VERIFICATION
+Verification is intended to assist the Chocolatey moderators and community
+in verifying that this package's contents are trustworthy.
+
+The package maintainer is the author of Hydra. The binaries are downloaded directly from the official upstream GitHub releases:
+https://github.com/ja7ad/hydra/releases/tag/v0.4.0
+
+1. Download the installers from the official GitHub Release assets:
+   - x64:   https://github.com/ja7ad/hydra/releases/download/v0.4.0/hydra-0.4.0-windows-x64-setup.exe
+   - ARM64: https://github.com/ja7ad/hydra/releases/download/v0.4.0/hydra-0.4.0-windows-arm64-setup.exe
+
+2. Verify the SHA256 checksums in PowerShell:
+   Get-FileHash -Algorithm SHA256 .\hydra-0.4.0-windows-x64-setup.exe
+   Get-FileHash -Algorithm SHA256 .\hydra-0.4.0-windows-arm64-setup.exe
+
+3. Compare the resulting SHA256 values with those specified in 'tools/chocolateyinstall.ps1'.
