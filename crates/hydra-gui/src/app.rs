@@ -1228,20 +1228,24 @@ impl App {
         if cookies.is_none() && name.is_none() {
             return;
         }
-        let cats = self.cfg.categories.clone();
+        // Resolved before the item is borrowed mutably, and through
+        // `cat_dir` — the one accessor that honours Options > Save to > "Do
+        // not create category folders". Reading the category's own `dir`
+        // here ignored that setting, so `add_item` filed the download in the
+        // single General folder the user asked for and this overwrote it
+        // with a per-category folder they had switched off.
+        let cat = name.as_deref().map(|n| categorize(n, &self.cfg.categories));
+        let dir = cat.as_ref().and_then(|c| self.cat_dir(c.as_deref()));
         if let Some(d) = self.item_mut(id) {
             if let Some(c) = cookies {
                 d.cookies = Some(c);
             }
             if let Some(n) = name {
-                d.file_name = n.clone();
-                d.category = categorize(&n, &cats);
-                if let Some(dir) = d
-                    .category
-                    .as_deref()
-                    .and_then(|c| cats.iter().find(|k| k.name == c))
-                    .map(|c| c.dir.clone())
-                {
+                d.file_name = n;
+                if let Some(c) = cat {
+                    d.category = c;
+                }
+                if let Some(dir) = dir {
                     d.save_dir = dir;
                 }
             }
@@ -1934,6 +1938,7 @@ impl App {
             shutdown_after: false,
             shutdown_action: PowerAction::default(),
             stream: None,
+            name_locked: false,
         });
         self.save_state();
         id
@@ -2256,9 +2261,8 @@ impl App {
             if d.size.is_none() || (refine && size.is_some()) {
                 d.size = size;
             }
-            // Only adopt a server name if the user hasn't renamed.
             if let Some(name) = name.filter(|n| !n.is_empty()) {
-                if d.downloaded == 0 && d.held.is_empty() {
+                if may_adopt_name(d) {
                     adopted = d.file_name != name;
                     d.file_name = name;
                 }
@@ -3397,10 +3401,11 @@ impl App {
                     .cat_dir(cat.as_deref())
                     .or_else(|| self.cat_dir(None))
                     .unwrap_or_default();
-                let on_disk = std::path::Path::new(&dir).join(&name);
-                let file = on_disk
-                    .exists()
-                    .then(|| on_disk.to_string_lossy().into_owned());
+                // A capture name and a stream name are the name the file
+                // will really be saved under; so is a URL that names one.
+                let named =
+                    cap_name.is_some() || stream.is_some() || engine::url_file_name(&url).is_some();
+                let file = collision_file(&dir, &name, named);
                 if existing.is_some() || file.is_some() {
                     self.pending_add = Some(PendingAdd {
                         url,
@@ -3677,6 +3682,10 @@ impl App {
                     d.save_dir = fi.save_dir.clone();
                     if !fi.file_name.trim().is_empty() {
                         d.file_name = fi.file_name.trim().to_string();
+                        // Typing in the box is the user naming the file:
+                        // pin it so the probe this Start Download is about
+                        // to fire cannot hand the name back to the server.
+                        d.name_locked |= fi.name_touched;
                     }
                     d.description = fi.description.clone();
                     if url_changed {
@@ -3748,8 +3757,17 @@ impl App {
                 let close = self.close_file_info_windows();
                 if fi.is_new {
                     // The dialog was aborted: the auto-started item goes away
-                    // with its temp data on cancel.
-                    Task::batch([close, self.delete_item(fi.dl)])
+                    // with its temp data on cancel — and with the finished
+                    // file too when the background transfer beat the user to
+                    // Cancel. A small file that landed while the dialog was
+                    // open used to stay on disk under the server's name, and
+                    // the next capture of that link then warned that a file
+                    // with this name already existed.
+                    let done = self
+                        .item(fi.dl)
+                        .map(|d| d.state == DlState::Complete)
+                        .unwrap_or(false);
+                    Task::batch([close, self.delete_item_opts(fi.dl, done)])
                 } else {
                     close
                 }
@@ -4586,12 +4604,16 @@ impl App {
                 let id = self.add_item(pending.url, pending.auth, None);
                 self.apply_capture_extras(id, pending.cookies, pending.name);
                 // `name_1.ext`, `name_2.ext`, ... until it collides with
-                // neither the disk nor another list entry.
+                // neither the disk nor another list entry. Locked, because
+                // this copy exists precisely so the file already on disk is
+                // not written over: a probe adopting the server's name back
+                // would aim the transfer straight at it again.
                 if let Some(d) = self.item(id) {
                     let unique =
                         unique_file_name(&d.save_dir, &d.file_name, &self.state.downloads, id);
                     if let Some(d) = self.item_mut(id) {
                         d.file_name = unique;
+                        d.name_locked = true;
                     }
                 }
                 self.save_state();
@@ -5454,6 +5476,44 @@ pub fn normalize_dir(p: &str) -> std::path::PathBuf {
     out
 }
 
+/// May a probe's name replace the one the item carries?
+///
+/// The byte counts alone cannot answer this. A probe belongs to the transfer
+/// that issued it, so its answer arrives while `downloaded` is still zero —
+/// which is to say AFTER `Start Download` wrote the name the user typed into
+/// the File Info dialog. Reading "no bytes yet" as "nobody has named this
+/// file" therefore handed every rename straight back to the server, and did
+/// the same to the renamed copy the duplicate dialog hands out, aiming it at
+/// the very file it had just warned about. `name_locked` is what separates
+/// the two cases.
+fn may_adopt_name(d: &DownloadItem) -> bool {
+    !d.name_locked && d.downloaded == 0 && d.held.is_empty()
+}
+
+/// The file the duplicate dialog should warn about, if any.
+///
+/// `named` says whether `name` is the name this download will really be
+/// saved under. It is not always: for a typed URL that names no file,
+/// `file_name_from_url` invents `index.html` as somewhere to put the bytes
+/// until the probe resolves the real name a moment later. Warning on that
+/// placeholder reported "a file with this name already exists" about an
+/// unrelated leftover, for a download that was never going to be written
+/// there.
+///
+/// `is_file` rather than `exists`, because the dialog's answer is "Open
+/// existing file": with Options > Save to > "Do not create category folders"
+/// on, the one download folder is also where the category directories sit,
+/// and a capture named after one of them — the extension sends the page
+/// title, which carries no extension — matched a directory and offered to
+/// open it as though it were the file.
+fn collision_file(dir: &str, name: &str, named: bool) -> Option<String> {
+    if !named {
+        return None;
+    }
+    let path = std::path::Path::new(dir).join(name);
+    path.is_file().then(|| path.to_string_lossy().into_owned())
+}
+
 /// `name.ext` -> first of `name.ext`, `name_1.ext`, `name_2.ext`, ... that
 /// exists neither on disk in `dir` nor as another list entry saving there.
 pub fn unique_file_name(
@@ -5814,6 +5874,7 @@ mod tests {
             shutdown_after: false,
             shutdown_action: PowerAction::default(),
             stream: None,
+            name_locked: false,
         }
     }
 
@@ -6078,6 +6139,62 @@ mod tests {
         // Unknown size: no clamping, still sorted and merged.
         assert_eq!(sanitize_spans(&[(10, 20), (0, 15)], None), vec![(0, 20)]);
         assert_eq!(sum_spans(&[(0, 90), (100, 110)]), 100);
+    }
+
+    #[test]
+    fn a_probe_may_not_take_a_name_the_user_chose() {
+        // Fresh item, nothing on disk, nobody has named it: the probe's
+        // `Content-Disposition` name is exactly what should land.
+        let mut d = item(1, "/dl", "index.html", None, DlState::Paused);
+        assert!(may_adopt_name(&d));
+
+        // The user typed a name in the File Info dialog and pressed Start
+        // Download. The probe belongs to the transfer that press started, so
+        // it answers here — with zero bytes in and nothing held, which is
+        // what used to make it look like a fresh item.
+        d.file_name = "MyName.zip".into();
+        d.name_locked = true;
+        assert!(!may_adopt_name(&d));
+
+        // The lock survives the restart a Download Later / Start Queue round
+        // trip performs, which issues a second probe against zero bytes.
+        d.state = DlState::Connecting;
+        assert!(!may_adopt_name(&d));
+
+        // Bytes already on disk still pin the name on their own: renaming
+        // under a running transfer would orphan them.
+        let mut unlocked = item(2, "/dl", "setup.exe", None, DlState::Receiving);
+        unlocked.held = vec![(0, 4096)];
+        assert!(!may_adopt_name(&unlocked));
+    }
+
+    #[test]
+    fn the_duplicate_warning_needs_a_real_file_under_the_real_name() {
+        let dir = std::env::temp_dir().join(format!("hydra-dup-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_s = dir.to_string_lossy().into_owned();
+
+        // Nothing there: no warning.
+        assert_eq!(collision_file(&dir_s, "setup.exe", true), None);
+
+        // A real file under the name the download will use: warn.
+        std::fs::write(dir.join("setup.exe"), b"old").unwrap();
+        assert!(collision_file(&dir_s, "setup.exe", true).is_some());
+
+        // Same file, but the name is only the `index.html` placeholder
+        // invented for a URL that named nothing — the probe has not answered
+        // yet, so this download is not headed here at all.
+        assert_eq!(collision_file(&dir_s, "setup.exe", false), None);
+
+        // A DIRECTORY of that name is not a file to open. With category
+        // folders switched off these sit in the same folder downloads land
+        // in, and a page-title capture carries no extension to tell them
+        // apart.
+        std::fs::create_dir_all(dir.join("Programs")).unwrap();
+        assert_eq!(collision_file(&dir_s, "Programs", true), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

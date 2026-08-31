@@ -110,6 +110,18 @@ pub struct DownloadItem {
     /// instead of the range scheduler.
     #[serde(default)]
     pub stream: Option<StreamInfo>,
+    /// The user named this file themselves — in the File Info / Properties
+    /// dialog, or by taking the renamed copy the duplicate dialog offered.
+    ///
+    /// A probe answers AFTER the transfer it belongs to has started, so
+    /// without this the `Content-Disposition` name arrived second and won:
+    /// the edited name was written to the item, the download started, and
+    /// the first `Probed` event put the server's name back and re-aimed the
+    /// engine's final path at it. Every rename made from the dialog was lost
+    /// that way, and the duplicate dialog's "Download as new file" copy was
+    /// renamed back over the file it had just warned about.
+    #[serde(default)]
+    pub name_locked: bool,
 }
 
 /// What a stream item needs beyond a URL: which rendition was chosen, and
