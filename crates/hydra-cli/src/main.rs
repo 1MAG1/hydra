@@ -36,6 +36,7 @@ mod compat;
 mod compat_link;
 mod completions;
 mod download;
+mod metalink;
 mod progress;
 mod prompt;
 mod queue;
@@ -439,6 +440,9 @@ async fn async_main() -> std::process::ExitCode {
             }
             return std::process::ExitCode::SUCCESS;
         }
+        Some(cli::Command::Metalink { source, json }) => {
+            return metalink_report(source, *json, &args).await;
+        }
         Some(cli::Command::Formats {
             json,
             category,
@@ -613,7 +617,7 @@ async fn async_main() -> std::process::ExitCode {
             }
         }
     }
-    if urls.is_empty() {
+    if urls.is_empty() && args.metalink.is_none() {
         eprintln!("hydra: no URL given (try --help)");
         return std::process::ExitCode::from(2);
     }
@@ -684,8 +688,14 @@ async fn async_main() -> std::process::ExitCode {
     let plain = plain_download_conflict(&args).is_none();
     // Either flag forces the attempt: both owe an answer that a plain
     // download cannot give.
+    //
+    // `!urls.is_empty()` is not defensiveness: `--metalink FILE` names the
+    // sources without naming a URL, so this is the first code below the
+    // "no URL given" check that can be reached with an empty list — and
+    // `urls[0]` there is a panic, not a diagnostic.
     if !multi
         && plain
+        && !urls.is_empty()
         && (args.list_streams || args.inspect || stream::looks_like_manifest(&urls[0]))
     {
         let sjob = stream::Job {
@@ -744,6 +754,9 @@ async fn async_main() -> std::process::ExitCode {
 
     let job = download::Job {
         ticks: None,
+        // `multi` implies at least two, so indexing is safe there; the other
+        // arm takes the whole list, which a `--metalink` run leaves empty until
+        // `with_metalink` fills it in from the document.
         urls: if multi {
             vec![urls[0].clone()]
         } else {
@@ -797,7 +810,28 @@ async fn async_main() -> std::process::ExitCode {
         emit_manifest: args.emit_manifest.clone(),
         chunk_digests: args.chunk_digests.clone(),
         chunk_size: args.chunk_size,
+        source_plans: Vec::new(),
+        attested: None,
+        metalink_notes: Vec::new(),
+        follow_metalink: !args.no_follow_metalink,
+        metalink_select: args.metalink_selection(),
     };
+
+    // ---- a mirror list replaces the source list ---------------------------
+    //
+    // Handled here rather than inside the engine because a document may describe
+    // SEVERAL files, and one job fetches one object. The engine's own follow path
+    // (a URL discovered at probe time to be serving `application/metalink4+xml`)
+    // can only take the first entry; this one can run them all.
+    match metalink_origins(&args, &urls) {
+        Err(e) => {
+            eprintln!("hydra: {e}");
+            return std::process::ExitCode::from(2);
+        }
+        Ok(list) if !list.is_empty() => return run_metalink(list, job, &args).await,
+        Ok(_) => {}
+    }
+
     if multi {
         return run_many(job, &urls, args.mode, args.json, args.quiet).await;
     }
@@ -809,6 +843,326 @@ async fn async_main() -> std::process::ExitCode {
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::FAILURE
+    }
+}
+
+/// Where the mirror list for this run comes from, if there is one.
+///
+/// Two spellings, because both are how people actually reach for it:
+/// `--metalink FILE|URL` states it outright, and a bare `foo.meta4` argument
+/// means the same thing — a user who has downloaded a document does not expect
+/// to have to name a flag to use it. A URL with no extension
+/// (`.../metalink?repo=fedora-40`) is NOT detected here: it is caught by
+/// `Content-Type` at probe time, where the answer is already paid for.
+fn origin_of(spec: &str) -> metalink::Origin {
+    if spec.contains("://") {
+        metalink::Origin::Url(spec.to_string())
+    } else {
+        metalink::Origin::File(std::path::PathBuf::from(spec))
+    }
+}
+
+/// Which of this run's arguments are Metalink documents.
+///
+/// Detection is automatic, so `--metalink` is an override and not a
+/// requirement — a user holding a mirror list should be able to point hydra at
+/// it and have it work, the same way `hydra <url>` works. An argument is a
+/// document if its name says so (`.meta4`, `.metalink`) or, for a local path, if
+/// its content does; a remote URL that reveals itself only by `Content-Type` is
+/// caught later, inside the engine, where the probe has already been paid for.
+///
+/// A MIX of documents and plain URLs is refused rather than guessed at. The two
+/// readings — "fetch this list and also that URL" and "you meant these all to be
+/// lists" — lead to different files on disk, and picking one silently is how a
+/// command that looks like it worked produces something else.
+fn metalink_origins(args: &cli::Cli, urls: &[String]) -> Result<Vec<metalink::Origin>, String> {
+    if let Some(spec) = args.metalink.as_deref() {
+        return Ok(vec![origin_of(spec)]);
+    }
+    let docs: Vec<&String> = urls
+        .iter()
+        .filter(|u| metalink::looks_like_document(u))
+        .collect();
+    if docs.is_empty() {
+        return Ok(Vec::new());
+    }
+    if docs.len() != urls.len() {
+        let plain: Vec<&str> = urls
+            .iter()
+            .filter(|u| !metalink::looks_like_document(u))
+            .map(String::as_str)
+            .collect();
+        return Err(format!(
+            "{} of these arguments are Metalink documents and {} are not ({}). \
+             Run them separately, or name the document with --metalink and drop the rest",
+            docs.len(),
+            plain.len(),
+            plain.join(", ")
+        ));
+    }
+    Ok(docs.into_iter().map(|d| origin_of(d)).collect())
+}
+
+/// Fetch everything a Metalink document describes.
+///
+/// Several files run SEQUENTIALLY rather than concurrently. That is not a
+/// limitation working around the progress renderer: a mirror list is a list of
+/// volunteer machines, and the whole point of the politeness ceilings is that
+/// this client does not decide on a user's behalf to open four connections per
+/// file times six files against the same set of hosts. `--mode same` on explicit
+/// URLs is a different situation — the user named them one by one.
+async fn run_metalink(
+    origins: Vec<metalink::Origin>,
+    template: download::Job,
+    args: &cli::Cli,
+) -> std::process::ExitCode {
+    let mut files: Vec<metalink::Resolved> = Vec::new();
+    for origin in &origins {
+        let doc = match load_metalink(origin, args).await {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("hydra: {e}");
+                return std::process::ExitCode::from(2);
+            }
+        };
+        let got = match metalink::resolve(&doc, &args.metalink_selection(), origin) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("hydra: {e}");
+                return std::process::ExitCode::from(2);
+            }
+        };
+        if !args.quiet && !args.json {
+            eprintln!(
+                "hydra: {origin}: Metalink {}, {} file(s), {} mirror(s)",
+                doc.version.map(|v| v.as_str()).unwrap_or("?"),
+                got.len(),
+                got.iter().map(|f| f.urls.len()).sum::<usize>(),
+            );
+        }
+        files.extend(got);
+    }
+
+    let explicit_output = template.output.is_some();
+    let mut all_ok = true;
+    let mut results = Vec::new();
+    for (i, f) in files.iter().enumerate() {
+        // The document's own notes are carried ON the job and emitted by the
+        // engine through `Progress::event`, so they are verbosity-gated, land in
+        // `--logfile`, and are silenced by `-q` — none of which an `eprintln!`
+        // here would be.
+        let mut job = template.clone().with_metalink(f);
+        // `-O` names ONE file. With several entries it cannot apply to all of
+        // them, and applying it to the first would write six objects over each
+        // other in turn — the same rule `run_many` follows.
+        if explicit_output && files.len() > 1 {
+            if i == 0 {
+                eprintln!(
+                    "hydra: -O names one file and this document describes {}; using the names from the document",
+                    files.len()
+                );
+            }
+            job.output = Some(std::path::PathBuf::from(&f.name));
+        }
+        let out = download::run(job).await;
+        all_ok &= out.ok;
+        results.push(out);
+    }
+    if args.json {
+        let doc = if results.len() == 1 {
+            serde_json::to_string_pretty(&results[0])
+        } else {
+            serde_json::to_string_pretty(&results)
+        };
+        println!("{}", doc.unwrap_or_default());
+    }
+    if all_ok {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    }
+}
+
+async fn load_metalink(
+    origin: &metalink::Origin,
+    args: &cli::Cli,
+) -> Result<hya_net::Metalink, String> {
+    match origin {
+        metalink::Origin::File(p) => metalink::load_file(p),
+        metalink::Origin::Url(u) => {
+            let conn = hya_net::TlsCapableConnector::with_insecure(args.insecure)
+                .map(std::sync::Arc::new)
+                .map_err(|e| format!("tls setup failed: {e}"))?;
+            metalink::load_url(&conn, u, &args.headers, &args.user_agent, args.max_redirs).await
+        }
+    }
+}
+
+/// `hydra metalink <doc>`: report what a document offers and what hydra would do
+/// with it, without fetching anything.
+///
+/// The second half is the part worth having. A mirror list that loses two thirds
+/// of its entries to a scheme this build cannot fetch, or whose `<pieces>` do not
+/// tile its own stated size, is worth discovering before starting a
+/// multi-gigabyte download rather than after.
+async fn metalink_report(source: &str, json: bool, args: &cli::Cli) -> std::process::ExitCode {
+    let origin = origin_of(source);
+    let doc = match load_metalink(&origin, args).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("hydra: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let sel = args.metalink_selection();
+    let resolved = metalink::resolve(&doc, &sel, &origin);
+
+    if json {
+        let files: Vec<serde_json::Value> = doc
+            .files
+            .iter()
+            .map(|f| {
+                let (ranked, notes) = metalink::rank(f, &sel);
+                serde_json::json!({
+                    "name": f.name,
+                    "name_usable": f.safe_name().is_ok(),
+                    "size": f.size,
+                    "version": f.version,
+                    "languages": f.languages,
+                    "os": f.oses,
+                    "signed": f.signature.is_some(),
+                    "hashes": f.hashes.iter().map(|h| h.spec()).collect::<Vec<_>>(),
+                    "pieces": f.pieces.as_ref().map(|p| serde_json::json!({
+                        "length": p.length,
+                        "algo": p.algo.as_str(),
+                        "count": p.hashes.len(),
+                        "tiles_the_object": f.size.is_some_and(|s| p.covers(s)),
+                    })),
+                    "mirrors_total": f.urls.len(),
+                    "mirrors_fetchable": f.fetchable_urls().len(),
+                    "default_max_connections": f.default_max_connections,
+                    "mirrors": ranked.iter().map(|u| serde_json::json!({
+                        "url": u.url,
+                        "rank": u.priority,
+                        "location": u.location,
+                        "protocol": u.kind.as_str(),
+                        "max_connections": u.max_connections,
+                    })).collect::<Vec<_>>(),
+                    "notes": notes,
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "source": origin.to_string(),
+            "version": doc.version.map(|v| v.as_str()),
+            "generator": doc.generator,
+            "published": doc.published,
+            "origin": doc.origin,
+            "files": files,
+            "usable": resolved.is_ok(),
+            "error": resolved.as_ref().err(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+        return if resolved.is_ok() {
+            std::process::ExitCode::SUCCESS
+        } else {
+            std::process::ExitCode::FAILURE
+        };
+    }
+
+    println!(
+        "{origin}\n  Metalink {}{}{}",
+        doc.version.map(|v| v.as_str()).unwrap_or("?"),
+        doc.generator
+            .as_deref()
+            .map(|g| format!(", generated by {g}"))
+            .unwrap_or_default(),
+        doc.published
+            .as_deref()
+            .map(|d| format!(", published {d}"))
+            .unwrap_or_default(),
+    );
+    for f in &doc.files {
+        println!();
+        match f.safe_name() {
+            Ok(n) => println!("  {n}"),
+            Err(e) => println!("  {} — REFUSED: {}", f.name, e.why),
+        }
+        match f.size {
+            Some(n) => println!("    size      {} ({n} bytes)", progress::human(n)),
+            None => println!("    size      not stated (mirrors cannot be checked against it)"),
+        }
+        if f.hashes.is_empty() {
+            println!("    digest    none published");
+        } else {
+            for h in &f.hashes {
+                let best = f.best_hash().is_some_and(|b| b == h);
+                println!(
+                    "    digest    {}{}",
+                    h.spec(),
+                    if best { "   <- used" } else { "" }
+                );
+            }
+        }
+        match (&f.pieces, f.size) {
+            (Some(p), Some(size)) if p.covers(size) => println!(
+                "    pieces    {} x {} ({}) — per-chunk verification and targeted refetch",
+                p.hashes.len(),
+                progress::human(p.length),
+                p.algo.as_str()
+            ),
+            (Some(p), _) => println!(
+                "    pieces    {} x {} ({}) — do NOT tile this object; whole-file digest only",
+                p.hashes.len(),
+                progress::human(p.length),
+                p.algo.as_str()
+            ),
+            (None, _) => println!("    pieces    none (a fault costs a whole re-download)"),
+        }
+        if f.signature.is_some() {
+            println!("    signature present, NOT verified by hydra");
+        }
+        let (ranked, notes) = metalink::rank(f, &sel);
+        println!(
+            "    mirrors   {} listed, {} fetchable",
+            f.urls.len(),
+            ranked.len()
+        );
+        if let Some(n) = f.default_max_connections {
+            println!("              the publisher asks for at most {n} connection(s) per mirror");
+        }
+        for n in &notes {
+            println!("              note: {n}");
+        }
+        for (i, u) in ranked.iter().enumerate() {
+            println!(
+                "      {:>2}. {}{}{}",
+                i + 1,
+                u.url,
+                u.location
+                    .as_deref()
+                    .map(|l| format!("  [{}]", l.to_uppercase()))
+                    .unwrap_or_default(),
+                u.max_connections
+                    .map(|n| format!("  max {n} conn"))
+                    .unwrap_or_default(),
+            );
+        }
+    }
+    match resolved {
+        Ok(files) => {
+            println!();
+            println!(
+                "  hydra would fetch {} file(s) from this document.",
+                files.len()
+            );
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            println!();
+            println!("  unusable: {e}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 
@@ -1613,5 +1967,67 @@ async fn report_header_values(urls: &[String], args: &cli::Cli) -> std::process:
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser as _;
+
+    fn cli(args: &[&str]) -> cli::Cli {
+        cli::Cli::try_parse_from(args).expect("parses")
+    }
+
+    #[test]
+    fn a_mirror_list_is_recognised_from_the_flag_or_from_the_argument_itself() {
+        // `--metalink` is an OVERRIDE, not a requirement: a user holding a
+        // document should be able to point hydra at it the way they point it at
+        // a URL. The flag wins outright when both are given, so a run that
+        // names a document explicitly cannot be redirected by an argument.
+        let a = cli(&["hydra", "--metalink", "list.meta4", "https://h/f"]);
+        let got = metalink_origins(&a, &["https://h/f".into()]).unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(matches!(&got[0], metalink::Origin::File(p) if p.ends_with("list.meta4")));
+
+        // A `.meta4` URL is one by its name; a URL that reveals itself only by
+        // `Content-Type` is NOT caught here — it is settled inside the engine,
+        // on the probe that had to happen anyway.
+        let b = cli(&["hydra", "https://h/x.meta4"]);
+        let got = metalink_origins(&b, &["https://h/x.meta4".into()]).unwrap();
+        assert!(matches!(&got[0], metalink::Origin::Url(u) if u.ends_with("x.meta4")));
+        let c = cli(&["hydra", "https://mirrors.example/metalink?repo=x"]);
+        assert!(
+            metalink_origins(&c, &["https://mirrors.example/metalink?repo=x".into()])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn documents_mixed_with_plain_urls_are_refused_rather_than_guessed_at() {
+        // The two readings — "fetch this list and also that URL" and "you meant
+        // these all to be lists" — put different files on disk. Picking one
+        // silently is how a command that looks like it worked produces
+        // something else.
+        let a = cli(&["hydra", "a.meta4", "https://h/f"]);
+        let e = metalink_origins(&a, &["a.meta4".into(), "https://h/f".into()]).unwrap_err();
+        assert!(e.contains("https://h/f"), "{e}");
+        assert!(e.contains("Run them separately"), "{e}");
+
+        // All documents is not a mix, and neither is no document at all.
+        let b = cli(&["hydra", "a.meta4", "b.metalink"]);
+        assert_eq!(
+            metalink_origins(&b, &["a.meta4".into(), "b.metalink".into()])
+                .unwrap()
+                .len(),
+            2
+        );
+        let c = cli(&["hydra", "https://h/a", "https://h/b"]);
+        assert!(
+            metalink_origins(&c, &["https://h/a".into(), "https://h/b".into()])
+                .unwrap()
+                .is_empty()
+        );
     }
 }

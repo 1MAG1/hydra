@@ -162,6 +162,43 @@ pub struct Job {
     pub chunk_digests: Option<PathBuf>,
     /// Chunk grid for --emit-manifest.
     pub chunk_size: Option<u64>,
+    /// Publisher ranking and per-mirror ceilings, index-aligned with `urls`.
+    ///
+    /// Empty means unranked, which is exactly what a bare list of URLs is — so
+    /// every caller that does not read a mirror list gets the behaviour it
+    /// always had.
+    pub source_plans: Vec<hya_core::SourcePlan>,
+    /// Size and digests attested by a Metalink document rather than by a mirror.
+    ///
+    /// See [`crate::metalink`] for why this changes what mirror agreement means:
+    /// independent mirror operators cannot share an `ETag`, so the pairwise
+    /// validator gate is unsatisfiable across a real mirror list, while a
+    /// document that states the size and a content digest establishes the same
+    /// thing more strongly and from outside the mirrors.
+    pub attested: Option<crate::metalink::Attested>,
+    /// Treat a URL that turns out to SERVE a Metalink document as a mirror list
+    /// rather than as the file to save.
+    ///
+    /// Decided at probe time from `Content-Type`, because that is the only point
+    /// at which the answer is free: `https://mirrors.example/metalink?repo=x`
+    /// has no extension to read and probing it twice to find out would cost a
+    /// round trip on every download. Off means "save whatever the URL serves",
+    /// which is what a user debugging a redirector wants.
+    pub follow_metalink: bool,
+    /// What reading the mirror list revealed, for the run log.
+    ///
+    /// Carried on the job rather than printed where it was discovered so it goes
+    /// through `Progress::event` like everything else: verbosity-gated, routed
+    /// to `--logfile`, and silenced by `-q`. A bare `eprintln!` obeys none of
+    /// those, and a mirror list has plenty to say.
+    pub metalink_notes: Vec<String>,
+    /// Which entry and which mirrors to take, when a document is followed.
+    ///
+    /// Carried on the job rather than read from `Cli` because the follow happens
+    /// inside the engine — the discovery is a `Content-Type` on a probe that has
+    /// already been paid for — and the engine has no access to the parsed
+    /// command line.
+    pub metalink_select: crate::metalink::Selection,
 }
 
 /// What happened, for `--json` and for the report.
@@ -363,6 +400,122 @@ pub fn output_target(job: &Job, out_path: &str) -> OutputTarget {
         return OutputTarget::Discard;
     }
     OutputTarget::File(out_path.to_string())
+}
+
+/// Rebuild a job around the mirror list a URL turned out to be serving.
+///
+/// The derived job keeps everything the user asked for — output path, rate cap,
+/// headers, politeness — and replaces only the source list, the attestation, and
+/// the ranking. `follow_metalink` is cleared on the result, which bounds the
+/// recursion at one hop: a document that names itself, or a redirector that
+/// answers a mirror URL with another mirror list, costs one wasted fetch rather
+/// than an unbounded chain.
+///
+/// The output NAME is left alone when the user gave `-O`, and otherwise comes
+/// from the document rather than from the URL — `metalink?repo=fedora-40` is not
+/// a filename, and the document knows what the object is called.
+async fn follow_metalink(job: &Job, from: &Url) -> Result<Job, String> {
+    let conn = hya_net::TlsCapableConnector::with_insecure(job.insecure)
+        .map(Arc::new)
+        .map_err(|e| format!("tls setup failed: {e}"))?;
+    let url = from.to_string();
+    let doc = crate::metalink::load_url(&conn, &url, &job.headers, &job.user_agent, job.max_redirs)
+        .await?;
+    let origin = crate::metalink::Origin::Url(url);
+    let files = crate::metalink::resolve(&doc, &job.metalink_select, &origin)?;
+    // One job fetches one object. A document describing several needs one job
+    // each, which only the command-line path can arrange — so a follow that
+    // lands on a multi-file document takes the first entry and says so, rather
+    // than silently fetching one of several and reporting success.
+    let first = files
+        .first()
+        .ok_or_else(|| format!("{origin}: no usable file entry"))?;
+    if files.len() > 1 {
+        eprintln!(
+            "hydra: {origin} describes {} files; fetching {:?}. Use --metalink <url> --metalink-file NAME to choose another, or --metalink <url> alone to fetch them all.",
+            files.len(),
+            first.name
+        );
+    }
+    Ok(job.clone().with_metalink(first))
+}
+
+impl Job {
+    /// Point this job at the sources, ranking and attestation of one document
+    /// entry.
+    pub fn with_metalink(mut self, r: &crate::metalink::Resolved) -> Job {
+        self.urls = r.urls.clone();
+        self.source_plans = r.plans.clone();
+        self.attested = r.attested.clone();
+        self.metalink_notes = r.notes.clone();
+        if let Some(n) = r.signature_note() {
+            self.metalink_notes.push(n.to_string());
+        }
+        // One hop only; see `follow_metalink`.
+        self.follow_metalink = false;
+        if self.output.is_none() {
+            self.output = Some(PathBuf::from(&r.name));
+        }
+        self
+    }
+}
+
+/// How wide a transfer driven by a MIRROR LIST should open, in connections.
+///
+/// # Why this is not `usable.len()`
+///
+/// It is tempting to seat every mirror the document offers — they are all
+/// there, and each takes at least one connection. Measured, that is worse: a
+/// real twelve-mirror Fedora document seated at eleven took 9.4 s against 6.0 s
+/// at eight, because the initial split hands every seated source a share of the
+/// object and the slowest hosts then have to have it taken back off them one
+/// repair at a time. A mirror list makes more sources AVAILABLE; it does not
+/// make more of them useful, and the useful number is still bounded by the
+/// client's own link.
+///
+/// # It is the width a single-URL download would open, spread across hosts
+///
+/// A mirror list makes more sources AVAILABLE; it does not make more of them
+/// useful. The useful number is still bounded by the client's own link, and
+/// `per_host` is already this build's answer to "how many connections is a
+/// download worth" — so a mirror list opens the same number and points each one
+/// at a different server, which is strictly politer than pointing them all at
+/// one. The aggregate ceiling still binds on top.
+///
+/// Measured on the twelve-mirror Fedora document, four interleaved reps of
+/// each width, medians of total wall clock: 5.79 s at three sources, 6.37 s at
+/// five, 6.73 s at eight, 8.16 s at twelve. Wider is monotonically worse once
+/// the link is saturated — the first split hands every seated source a share of
+/// the object, and the slow ones then have to have it taken back off them one
+/// repair at a time. The surplus of a long list pays as RESERVES, not as seats.
+///
+/// (An earlier revision bounded this by the aggregate ceiling instead, and an
+/// in-band ramp was tried in place of a fixed width. Both measured worse — the
+/// ramp notably so, at a 9.8 s median with an 18.5 s worst case — so the
+/// numbers above are what the code does.)
+fn mirror_list_width(job: &Job, sources: usize) -> usize {
+    let ceiling = job.polite.per_host.min(job.polite.total).max(1);
+    sources.clamp(1, ceiling)
+}
+
+/// How a source is named in the progress view and in the log.
+///
+/// The host, plus the port when it is not the scheme's default. The port is
+/// almost always redundant and occasionally the only thing that distinguishes
+/// two rows — several mirrors behind one name on different ports, or a local
+/// test set — and a connection row that cannot be told from its neighbour is
+/// not a diagnostic.
+fn source_label(u: &Url) -> String {
+    let default = match u.scheme.as_str() {
+        "https" => 443,
+        "ftp" => 21,
+        _ => 80,
+    };
+    if u.port == default {
+        u.host.clone()
+    } else {
+        format!("{}:{}", u.host, u.port)
+    }
 }
 
 /// A scratch filename unique to this verification.
@@ -782,6 +935,14 @@ pub fn default_job() -> Job {
         emit_manifest: None,
         chunk_digests: None,
         chunk_size: None,
+        source_plans: Vec::new(),
+        attested: None,
+        metalink_notes: Vec::new(),
+        metalink_select: crate::metalink::Selection::default(),
+        // On by default: a URL that answers with `application/metalink4+xml` is
+        // a mirror list, and saving it as `big.iso` would hand the user 6 KB of
+        // XML named after the 4 GB image they asked for.
+        follow_metalink: true,
     }
 }
 
@@ -890,11 +1051,17 @@ struct Resolved {
     via_html: bool,
 }
 
+///
+/// Logs into `log` rather than straight to `Progress`, because the callers probe
+/// mirrors CONCURRENTLY and a shared renderer cannot be borrowed by several
+/// futures at once. Replaying the buffers in index order afterwards also keeps
+/// the output deterministic: interleaved by completion, the same mirror list
+/// would print in a different order on every run.
 async fn probe_resolving<C>(
     c: &C,
     u: &Url,
     t: &Target,
-    p: &mut Progress,
+    log: &mut Vec<(u8, String)>,
     max_redirs: u32,
 ) -> Result<Resolved, String>
 where
@@ -934,7 +1101,7 @@ where
             let next = current
                 .join(&loc)
                 .ok_or_else(|| format!("unparsable redirect target {loc:?}"))?;
-            p.event(1, &format!("redirect {} -> {}", current.host, next.host));
+            log.push((1, format!("redirect {} -> {}", current.host, next.host)));
             let px = proxy_for(&next);
             target = next
                 .to_target(px.as_ref().map(|(h, p)| (h.as_str(), *p)))
@@ -953,10 +1120,10 @@ where
                 .await
                 .and_then(|loc| current.join(&loc))
             {
-                p.event(
+                log.push((
                     1,
-                    &format!("html redirect {} -> {}", current.host, next.host),
-                );
+                    format!("html redirect {} -> {}", current.host, next.host),
+                ));
                 let px = proxy_for(&next);
                 target = next
                     .to_target(px.as_ref().map(|(h, p)| (h.as_str(), *p)))
@@ -976,29 +1143,252 @@ where
     Err(format!("too many redirects (--max-redirs {max_redirs})"))
 }
 
+/// One mirror's probe, as it comes back from the concurrent fan-out.
+///
+/// The index is what everything downstream is aligned to; the URL is carried
+/// alongside because a probe may fail before there is a `Resolved` to read it
+/// from, and a failure that cannot name its host is not a diagnostic.
+type ProbeOutcome = (usize, Url, Result<Resolved, String>, Vec<(u8, String)>);
+
+/// Probe every mirror and keep the ones that can be assembled together.
+///
+/// # Two different tests, because there are two different kinds of evidence
+///
+/// Without a mirror list the only evidence available is what the mirrors
+/// themselves say, so agreement has to be established PAIRWISE: same size and
+/// the same strong validator as the first source. That is the right test for its
+/// evidence, and it is deliberately strict — two mirrors serving different
+/// builds produce a file that passes every length check and is silently wrong.
+///
+/// `attested_size` is different evidence. It comes from a Metalink document,
+/// published by whoever built the object, on a host that is usually not any of
+/// the mirrors, alongside a content digest for the whole file. Against that, the
+/// pairwise validator test is not merely unnecessary — it is unsatisfiable:
+/// independent mirror operators run independent web servers and cannot share an
+/// `ETag`, so requiring one keeps exactly ONE source out of a nineteen-mirror
+/// list. The document's size is the admission test instead, and its digest (per
+/// chunk, where `<pieces>` is published) is what actually catches a mirror
+/// serving something else.
+/// May a mirror that answered AFTER the transfer started join the bench?
+///
+/// The oath is the seats': a reserve's bytes are spliced into the same file on
+/// substitution, so its admission cannot be weaker than the front door's. With
+/// a document, that is the attested size. Without one, the pairwise gate: the
+/// first source's size AND its strong validator — a weak or absent validator
+/// admits nothing late, exactly as it admits nothing up front. Ranges are
+/// required either way, because the first thing a substituted source is asked
+/// for is a range.
+fn bench_admission(
+    attested_size: Option<u64>,
+    first_size: u64,
+    first_strong_validator: Option<&str>,
+    pr: &hya_net::Probe,
+) -> bool {
+    if !pr.ranges {
+        return false;
+    }
+    match attested_size {
+        Some(want) => pr.size == want,
+        None => {
+            pr.size == first_size
+                && !pr.weak_validator
+                && first_strong_validator.is_some()
+                && pr.validator.as_deref() == first_strong_validator
+        }
+    }
+}
+
+/// Mirrors admitted after the transfer has already started.
+///
+/// `(index into the caller's `pairs`, post-redirect target)`. The caller pairs
+/// them with the rankings it holds and feeds them to the reserve bench.
+type LateMirrors = tokio::sync::mpsc::UnboundedReceiver<(usize, Target)>;
+
+/// What probing the mirror list produced.
+struct Probed {
+    /// The probe the transfer's size, validator and type are read from.
+    first: hya_net::Probe,
+    /// Indices of the mirrors that may be SEATED, in the caller's order.
+    keep: Vec<usize>,
+    /// Post-redirect targets, by index.
+    resolved: Vec<(usize, Target)>,
+    /// The name a redirector page moved the object to, if it did.
+    renamed: Option<String>,
+    /// Mirrors still being probed when the transfer was allowed to start.
+    late: Option<LateMirrors>,
+}
+
 async fn probe_all(
     conn: &Arc<TlsCapableConnector>,
     pairs: &[(Url, Target)],
     p: &mut Progress,
     max_redirs: u32,
-) -> Result<
-    (
-        hya_net::Probe,
-        Vec<usize>,
-        Vec<(usize, Target)>,
-        Option<String>,
-    ),
-    String,
-> {
-    let c = conn.clone();
+    attested_size: Option<u64>,
+    want_seats: usize,
+) -> Result<Probed, String> {
+    // Probed CONCURRENTLY, bounded.
+    //
+    // Sequentially, this was the single most expensive thing about using a
+    // mirror list: a real Fedora document lists a dozen fetchable mirrors on
+    // three continents, and one HEAD each, in series, cost 14.4 s before the
+    // first byte of a 5.9 KB object. The probes are independent — each asks one
+    // host what it holds — so the whole set costs about what the slowest one
+    // does.
+    //
+    // Bounded, but not by politeness: every probe in this set goes to a
+    // DIFFERENT host, and one HEAD each is not something any of them feels. The
+    // per-host ceilings elsewhere are the ones that answer that question. This
+    // cap exists only so a forty-mirror document cannot open forty sockets at
+    // once and run into an fd limit.
+    //
+    // Sixteen rather than a handful because the cost here is latency, not
+    // bandwidth, and it is paid before the first byte: measured against a real
+    // Fedora document (twelve fetchable mirrors on three continents), six in
+    // flight took two waves and 4.1 s of setup, which was 3.6 s of the 4.5 s by
+    // which the mirror-list run trailed a single-mirror one. One wave removes
+    // almost all of it.
+    const PROBE_FANOUT: usize = 16;
+    let gate = Arc::new(tokio::sync::Semaphore::new(PROBE_FANOUT));
+    let mut set = tokio::task::JoinSet::new();
+    for (i, (u, t)) in pairs.iter().enumerate() {
+        let c = conn.clone();
+        let gate = gate.clone();
+        let (u, t) = (u.clone(), t.clone());
+        set.spawn(async move {
+            let mut log: Vec<(u8, String)> = Vec::new();
+            let permit = gate.acquire_owned().await;
+            let r = probe_resolving(c.as_ref(), &u, &t, &mut log, max_redirs).await;
+            drop(permit);
+            (i, u, r, log)
+        });
+    }
+    // How long to wait for SEATS — and only for seats.
+    //
+    // The probe phase is paid entirely before the first byte, so its cost is the
+    // SLOWEST mirror the transfer waits for, not the average. This window used
+    // to be the point at which slow mirrors were ABANDONED, which is why it was
+    // generous: cutting it short threw away working sources. It is not that any
+    // more. A mirror that misses the window keeps probing in the background and
+    // joins the reserve bench when it answers, so the only thing the window now
+    // decides is how long the transfer holds still hoping for one more SEAT.
+    //
+    // That makes it safe to be short, and being short is worth real time: the
+    // floor alone was 2.0 s in front of a ~5 s transfer. Six hundred
+    // milliseconds is still several times a healthy intercontinental round trip.
+    //
+    // Relative, not fixed, because "slow" is a property of the path: three times
+    // the fastest mirror's own round trip, floored so a LAN-fast first answer
+    // cannot make it unreasonably tight, capped so a pathological one cannot
+    // reintroduce the wait. It opens only once a mirror has been ADMITTED — a
+    // run whose first answers all fail still waits, because the alternative is
+    // failing while a working mirror is still dialling — and never applies to a
+    // single-source run, which has nothing to choose between.
+    const PROBE_GRACE_MULTIPLE: f64 = 3.0;
+    const PROBE_GRACE_MIN: std::time::Duration = std::time::Duration::from_millis(600);
+    const PROBE_GRACE_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+    // Enough is enough: stop waiting once the seats are filled.
+    //
+    // This is the whole cost of using a mirror list. The transfer needs exactly
+    // two things from the probe phase — a size and enough mirrors to seat the
+    // connection budget — and everything past that only fills a RESERVE bench
+    // nothing consults until a source fails. Waiting for it means waiting for
+    // the slowest host on the list to answer a HEAD, in front of a transfer
+    // that could already be running: measured against a real twelve-mirror
+    // Fedora document, 2.0 s of dead time before the first byte, against a
+    // ~5 s transfer.
+    //
+    // So the loop stops at `want_seats` and the mirrors still in flight are
+    // handed to the caller as a stream. They keep probing while bytes move and
+    // join the bench as they are admitted — a reserve is worth the same
+    // whenever it arrives, because nothing looks at the bench until something
+    // breaks. The grace window below is now only the backstop for a list that
+    // never yields enough seats at all.
+    let (late_tx, late_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut done: Vec<ProbeOutcome> = Vec::new();
+    let probe_start = Instant::now();
+    let mut first_ok: Option<std::time::Duration> = None;
+    let mut seated = 0usize;
+    let mut streaming = false;
+    while !set.is_empty() {
+        if seated >= want_seats {
+            streaming = true;
+            break;
+        }
+        let joined = match first_ok {
+            Some(fastest) if pairs.len() > 1 => {
+                let window = std::time::Duration::from_secs_f64(
+                    fastest.as_secs_f64() * PROBE_GRACE_MULTIPLE,
+                )
+                .clamp(PROBE_GRACE_MIN, PROBE_GRACE_MAX);
+                let left = window.saturating_sub(probe_start.elapsed());
+                match tokio::time::timeout(left, set.join_next()).await {
+                    Ok(v) => v,
+                    // Out of patience for seats — not out of interest. The
+                    // stragglers keep probing and become reserves.
+                    Err(_) => {
+                        streaming = true;
+                        break;
+                    }
+                }
+            }
+            _ => set.join_next().await,
+        };
+        let Some(joined) = joined else { break };
+        match joined {
+            Ok(v) => {
+                if v.2.is_ok() {
+                    if first_ok.is_none() {
+                        first_ok = Some(probe_start.elapsed());
+                    }
+                    // Counted on the ADMISSION test the loop below applies, so
+                    // "enough seats" means enough usable mirrors and not merely
+                    // enough answers. A document that states a size makes this
+                    // exact. Without one the pairwise validator gate can still
+                    // reject a counted mirror afterwards, so the transfer may
+                    // open on fewer sources than it hoped — a slight
+                    // undershoot, healed by substitution from the bench, and
+                    // cheaper than holding the transfer to find out.
+                    let usable = match (attested_size, v.2.as_ref().ok()) {
+                        (Some(want), Some(r)) => r.probe.size == want,
+                        _ => true,
+                    };
+                    seated += usize::from(usable);
+                }
+                done.push(v);
+            }
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => return Err(format!("probe task failed: {e}")),
+        }
+    }
+    if streaming && !set.is_empty() {
+        p.event(
+            1,
+            &format!(
+                "starting on {seated} source(s) after {:.2}s; {} more mirror(s) are still \
+                 being probed and join the reserve bench as they answer",
+                probe_start.elapsed().as_secs_f64(),
+                set.len(),
+            ),
+        );
+    }
+    // Back into the ORDER THE CALLER GAVE, not the order the network answered
+    // in. Everything downstream is index-aligned with `pairs` — the mirror
+    // ranking, the per-source connection split, the progress rows — and "which
+    // mirror is source 0" must not depend on which handshake finished first, or
+    // two runs against the same document cannot be compared.
+    done.sort_by_key(|(i, ..)| *i);
+
     let mut first: Option<hya_net::Probe> = None;
     let mut keep = Vec::new();
     // Targets after redirect resolution, paired with the index they came from.
     let mut resolved_targets: Vec<(usize, Target)> = Vec::new();
     // The name the FIRST source ended up at, when a redirector page moved it.
     let mut renamed: Option<String> = None;
-    for (i, (u, t)) in pairs.iter().enumerate() {
-        match probe_resolving(c.as_ref(), u, t, p, max_redirs).await {
+    for (i, u, res, log) in done {
+        for (level, line) in log {
+            p.event(level, &line);
+        }
+        match res {
             Ok(r) => {
                 let (pr, resolved) = (r.probe, r.target);
                 // A redirect may have moved the object to a different host; the
@@ -1022,6 +1412,27 @@ async fn probe_all(
                         validator.as_deref().unwrap_or("none")
                     ),
                 );
+                // A document's stated size is the admission test when there is
+                // one, for every source including the first: a mirror that
+                // disagrees with the document is wrong even if it happens to be
+                // the one probed first.
+                if let Some(want) = attested_size {
+                    if size == want {
+                        keep.push(i);
+                        if first.is_none() {
+                            first = Some(pr);
+                        }
+                    } else {
+                        p.event(
+                            0,
+                            &format!(
+                                "skipping {}: serves {size} bytes, the mirror list says {want}",
+                                u.host
+                            ),
+                        );
+                    }
+                    continue;
+                }
                 match &first {
                     None => {
                         first = Some(pr);
@@ -1057,8 +1468,60 @@ async fn probe_all(
             Err(e) => p.event(0, &format!("probe failed for {}: {e}", u.host)),
         }
     }
+    // Only now — with `first` in hand — can the stragglers be given their
+    // admission test, so this is where the background prober starts.
+    //
+    // # The bench takes the SAME oath the seats took
+    //
+    // A reserve is not a spectator: on substitution its bytes are spliced into
+    // the same file the seated mirrors are filling. So the test cannot be
+    // weaker than the one at the front door. With a document, that is the
+    // attested size. Without one, it is the pairwise gate — same size as the
+    // first source AND the same strong validator — and an earlier revision of
+    // this spawn skipped exactly that, which would have let `-x 2 --mirrors a
+    // b c` bench mirror `c` unexamined and splice whatever it served into the
+    // file when a seat failed. Requiring ranges as well is not optional
+    // either: a substituted source is immediately asked for ranges, which is
+    // the one thing a no-ranges mirror cannot answer.
+    let late = match (streaming && !set.is_empty(), &first) {
+        (true, Some(f0)) => {
+            let first_size = f0.size;
+            // Only a STRONG validator authorises pairwise splicing; a weak one
+            // admits nothing late, exactly as it admits nothing up front.
+            let first_validator = f0.validator.clone().filter(|_| !f0.weak_validator);
+            tokio::spawn(async move {
+                while let Some(joined) = set.join_next().await {
+                    let Ok((i, _u, res, _log)) = joined else {
+                        continue;
+                    };
+                    let Ok(r) = res else { continue };
+                    if !bench_admission(
+                        attested_size,
+                        first_size,
+                        first_validator.as_deref(),
+                        &r.probe,
+                    ) {
+                        continue;
+                    }
+                    // A closed receiver means the transfer ended; nothing left
+                    // to probe for.
+                    if late_tx.send((i, r.target)).is_err() {
+                        return;
+                    }
+                }
+            });
+            Some(late_rx)
+        }
+        _ => None,
+    };
     match first {
-        Some(pr) if !keep.is_empty() => Ok((pr, keep, resolved_targets, renamed)),
+        Some(pr) if !keep.is_empty() => Ok(Probed {
+            first: pr,
+            keep,
+            resolved: resolved_targets,
+            renamed,
+            late,
+        }),
         _ => Err("no usable source: every probe failed".into()),
     }
 }
@@ -1231,14 +1694,39 @@ async fn verify_and_repair_chunks(
     job: &Job,
     p: &mut Progress,
 ) -> Result<String, String> {
-    use hya_net::manifest::{ChunkVerifier, Manifest, Trust};
+    use hya_net::manifest::{Manifest, Trust};
 
     let text = std::fs::read_to_string(manifest_path)
         .map_err(|e| format!("cannot read manifest {}: {e}", manifest_path.display()))?;
     let m = Manifest::parse(&text).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
 
     // A manifest handed as a local file is trusted for chunk verification.
-    let mut v = ChunkVerifier::new(m, Trust::Trusted);
+    verify_and_repair(conn, usable, out_path, m, Trust::Trusted, job, p).await
+}
+
+/// Verify every chunk against a manifest already in hand, refetching failures.
+///
+/// Split from [`verify_and_repair_chunks`] because the manifest does not always
+/// come from a file. A Metalink `<pieces>` list is the same thing arriving by a
+/// different road, and it is the road that matters more: `--chunk-digests`
+/// requires a user who already has a manifest, while a mirror list ships one
+/// with the mirrors it belongs to.
+///
+/// `trust` decides only whether the digests may name erasure positions for a
+/// parity decode — see [`hya_net::manifest::Trust`]. Detection and targeted
+/// refetch work at either level, which is what this function does.
+async fn verify_and_repair(
+    conn: &Arc<TlsCapableConnector>,
+    usable: &[(Url, Target)],
+    out_path: &Path,
+    m: hya_net::manifest::Manifest,
+    trust: hya_net::manifest::Trust,
+    job: &Job,
+    p: &mut Progress,
+) -> Result<String, String> {
+    use hya_net::manifest::ChunkVerifier;
+
+    let mut v = ChunkVerifier::new(m, trust);
 
     p.phase("verifying chunks");
     {
@@ -1269,12 +1757,14 @@ async fn verify_and_repair_chunks(
     );
 
     let mut repaired = 0usize;
-    for idx in bad {
+    for (nth, idx) in bad.into_iter().enumerate() {
         let (lo, hi) = v.manifest().span(idx);
-        // Prefer a DIFFERENT source than the one that served it: a mirror that
-        // delivered corrupt bytes once is the least likely to fix them.
-        let alt = if usable.len() > 1 { 1 } else { 0 };
-        let t = usable[alt.min(usable.len() - 1)].1.clone();
+        // Rotate through the sources, starting past the first. Which host
+        // served the corrupt chunk is unknowable from here, so a FIXED
+        // alternate is a coin-flip that repeats itself: if the alternate is the
+        // bad mirror, every refetch fails and the repair dies on its first
+        // candidate. Rotation costs nothing and puts each retry somewhere new.
+        let t = usable[(1 + nth) % usable.len()].1.clone();
         p.event(1, &format!("refetching chunk {idx} [{lo},{hi})"));
         hya_net::fetch_range_retry(
             conn.clone(),
@@ -1332,6 +1822,76 @@ async fn verify_and_repair_chunks(
 /// 1 MiB chunks: large enough that syscall overhead is negligible against disk
 /// throughput, small enough to stay in L2 and to keep the resident cost constant
 /// regardless of object size.
+/// Hash a file with any algorithm a mirror list may publish.
+///
+/// # Why this is not just `sha256_file`
+///
+/// A Metalink publishes whatever the project's build system produced, and that
+/// is frequently not SHA-256: Metalink 3.0 documents in the wild carry MD5 and
+/// SHA-1 far more often, sometimes alongside SHA-256 and SHA-512 and sometimes
+/// instead of it. Verifying only when the document happens to have published a
+/// SHA-256 would silently skip the check on the documents most likely to need
+/// it.
+///
+/// Streamed in fixed chunks for the same reason [`sha256_file`] is: buffering
+/// the object to hash it makes peak memory scale with the object, which is the
+/// one thing a downloader must never do.
+///
+/// MD5 and SHA-1 are used here as INTEGRITY checks, not as authentication.
+/// Against a transmission fault, a truncating proxy, or a mirror serving a stale
+/// build — which is what a published digest is actually for — they work. Against
+/// an adversary who chose the bytes, they do not, and no amount of care at this
+/// call site changes that: the digest and the object came down the same wire.
+fn digest_file(path: &Path, algo: hya_net::digest::Algo) -> Option<String> {
+    use hya_net::digest::Algo;
+    use std::io::Read;
+    // CRC32 is not implemented here: it is an error-detecting code whose
+    // collisions are arithmetic, and a "verified" that means that little is
+    // worse than an honest "not checked".
+    if matches!(algo, Algo::Crc32 | Algo::Crc32c) {
+        return None;
+    }
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut sha256 = Sha256::new();
+    let mut sha512 = sha2::Sha512::new();
+    let mut sha1 = sha1::Sha1::new();
+    let mut md5 = md5::Md5::new();
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => match algo {
+                Algo::Sha256 => sha256.update(&buf[..n]),
+                Algo::Sha512 => sha512.update(&buf[..n]),
+                Algo::Sha1 => sha1.update(&buf[..n]),
+                Algo::Md5 => md5.update(&buf[..n]),
+                Algo::Crc32 | Algo::Crc32c => unreachable!("refused above"),
+            },
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+    Some(hya_net::digest::to_lower_hex(&match algo {
+        Algo::Sha256 => sha256.finalize().to_vec(),
+        Algo::Sha512 => sha512.finalize().to_vec(),
+        Algo::Sha1 => sha1.finalize().to_vec(),
+        Algo::Md5 => md5.finalize().to_vec(),
+        Algo::Crc32 | Algo::Crc32c => unreachable!("refused above"),
+    }))
+}
+
+/// Split an `algo:hex` digest spec, defaulting a bare digest to SHA-256.
+///
+/// A bare 64-hex value is what `--checksum` has always accepted; anything with a
+/// prefix comes from a mirror list and names its own algorithm.
+fn parse_digest_spec(spec: &str) -> Option<(hya_net::digest::Algo, String)> {
+    let t = spec.trim().to_ascii_lowercase();
+    match t.split_once(':') {
+        Some((a, h)) => hya_net::digest::Algo::parse(a).map(|algo| (algo, h.trim().to_string())),
+        None => Some((hya_net::digest::Algo::Sha256, t)),
+    }
+}
+
 fn sha256_file(path: &Path) -> Option<String> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).ok()?;
@@ -1409,6 +1969,15 @@ pub async fn run(job: Job) -> Outcome {
     };
     let t_start = Instant::now();
 
+    // What reading the mirror list revealed. Level 1 because it is real
+    // diagnostic detail about a source list the user did not type — which
+    // mirrors were dropped and why, whether per-chunk verification is available,
+    // whether the publisher capped the connection count — but not the answer to
+    // "did it work", which is the bar and the result line.
+    for n in &job.metalink_notes {
+        p.event(1, n);
+    }
+
     // One connector for the whole job: it carries the TLS session cache, so the
     // second and later connections to a host skip a full handshake. That directly
     // lowers the per-request setup cost the scheduler is measuring.
@@ -1475,11 +2044,87 @@ pub async fn run(job: Job) -> Outcome {
     }
 
     p.phase("resolving and probing sources");
-    let (probe_info, keep, resolved, renamed) =
-        match probe_all(&conn, &pairs, &mut p, job.max_redirs).await {
-            Ok(v) => v,
-            Err(e) => return failed(&job, 0, e),
+    // How many mirrors the probe phase must produce before the transfer may
+    // start. Every mirror can take at least one connection, so the connection
+    // budget is the seat count — bounded by the list itself and by politeness.
+    // Anything past this only fills the reserve bench, which is why it does not
+    // have to be waited for.
+    let want_seats = match job.conns {
+        Some(n) => n.clamp(1, job.polite.total.max(1)),
+        None => mirror_list_width(&job, pairs.len()),
+    }
+    .min(pairs.len());
+    let Probed {
+        first: probe_info,
+        keep,
+        resolved,
+        renamed,
+        late: late_mirrors,
+    } = match probe_all(
+        &conn,
+        &pairs,
+        &mut p,
+        job.max_redirs,
+        job.attested.as_ref().map(|a| a.size),
+        want_seats,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return failed(&job, 0, e),
+    };
+    // ---- the URL is a MIRROR LIST, not the object -------------------------
+    //
+    // `https://mirrors.fedoraproject.org/metalink?repo=fedora-40&arch=x86_64` has
+    // no extension to read, so nothing before this point could have known. The
+    // probe already happened and already carries the `Content-Type`, so asking
+    // here costs nothing, while asking earlier would cost a round trip on every
+    // download that is not a Metalink.
+    //
+    // Saving it instead would hand the user a few kilobytes of XML under the
+    // name of the multi-gigabyte image they asked for — which passes every check
+    // this program makes and is entirely the wrong file.
+    if job.follow_metalink && job.attested.is_none() && probe_info.serves_metalink() {
+        p.event(
+            0,
+            &format!(
+                "{} serves a Metalink document; reading it as a mirror list \
+                 (--no-follow-metalink to save it instead)",
+                pairs[keep[0]].0.host
+            ),
+        );
+        p.end_phase();
+        return match follow_metalink(&job, &pairs[keep[0]].0).await {
+            Ok(next) => {
+                // Say WHAT the document turned out to describe, at level 0.
+                //
+                // The user typed one URL and is about to receive a file with a
+                // different name and possibly a very different size — a
+                // repository-metadata redirector and an image redirector look
+                // identical on the command line, and only the document knows
+                // which one this was. Reporting the mirror list without
+                // reporting its contents leaves "why did I get 6 KiB?" as the
+                // first thing the user has to work out for themselves.
+                p.event(
+                    0,
+                    &format!(
+                        "the document describes {} ({}) on {} mirror(s)",
+                        next.output
+                            .as_deref()
+                            .map(|o| o.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "one file".into()),
+                        next.attested
+                            .as_ref()
+                            .map(|a| crate::progress::human(a.size))
+                            .unwrap_or_else(|| "size not stated".into()),
+                        next.urls.len(),
+                    ),
+                );
+                Box::pin(run(next)).await
+            }
+            Err(e) => failed(&job, 0, e),
         };
+    }
     // The requested URL was a redirector PAGE, so the name taken from it names
     // the stub, not the file — `href.li/?…` yields `index.html`. Adopt the name
     // the object actually landed under. Only when the user named nothing: `-O`
@@ -1914,6 +2559,33 @@ pub async fn run(job: Job) -> Outcome {
         // Guessing a multi-connection default here is what produced transfers
         // slower than a single stream on a saturated link.
         None if !job.probe => (job.polite.allow(1), 0.05, Vec::new()),
+        // A MIRROR LIST answers the question the probe was going to ask.
+        //
+        // `learn_concurrency` measures marginal goodput against ONE host and
+        // returns a per-host connection count. That is the right measurement
+        // for one URL and the wrong one for a mirror list: the useful width of
+        // a transfer across N independent servers is not a property of any one
+        // of them, and the probe cannot see the other N-1. Measured on a real
+        // twelve-mirror Fedora document it answered "2", and the transfer took
+        // 10.2 s against 5.2 s for the eight the list could actually seat — the
+        // probe was not merely paid for, it was paid for a worse answer.
+        //
+        // So with a ranked list in hand the count comes from the list: one
+        // connection per usable mirror, under both politeness ceilings. Sizing
+        // is still measured where measurement is the only source of truth — the
+        // scheduler reassigns ranges continuously on observed rate, and a mirror
+        // that cannot keep up loses its work whatever this number was.
+        None if !job.source_plans.is_empty() && usable.len() > 1 => {
+            let n = mirror_list_width(&job, usable.len());
+            p.event(
+                1,
+                &format!(
+                    "{n} source(s) from the mirror list; measuring one host's marginal goodput \
+                     would not describe them"
+                ),
+            );
+            (n, 0.05, Vec::new())
+        }
         _ => {
             // The probe writes into the same file the transfer will use, so it must
             // exist first. `run_transfer_observed` opens it again by path; both open
@@ -1963,14 +2635,76 @@ pub async fn run(job: Job) -> Outcome {
     // the per-host limit — `--max-total-connections 2 -x 8` reported eight
     // connections and opened eight, because nothing in this path ever read
     // `Politeness.total`.
-    let split = job.polite.split(n_conns, usable.len());
-    let n_sources = split.iter().filter(|&&n| n > 0).count().max(1);
-    let tgts: Vec<Target> = usable
-        .iter()
-        .take(n_sources)
-        .map(|(_, t)| t.clone())
-        .collect();
-    let per: Vec<usize> = split.into_iter().take(n_sources).collect();
+    //
+    // Plans for the sources that SURVIVED probing, in the order they survived
+    // in. `keep` is a subset of the original URL list, so the ranking has to be
+    // carried across by index or a dropped mirror shifts every rank after it —
+    // the second-best host would be allocated as though it were the fourth.
+    let plans: Vec<hya_core::SourcePlan> = if job.source_plans.is_empty() {
+        vec![hya_core::SourcePlan::default(); usable.len()]
+    } else {
+        keep.iter()
+            .map(|&i| job.source_plans.get(i).copied().unwrap_or_default())
+            .collect()
+    };
+    let split = if job.source_plans.is_empty() {
+        job.polite.split(n_conns, usable.len())
+    } else {
+        job.polite.split_plan(n_conns, &plans)
+    };
+    // Seated sources are the ones the split gave connections to; the rest are
+    // the bench. With an even split the seated set is a prefix, but a ranked
+    // allocation can leave a gap — a mirror that stated `maxconnections` may be
+    // passed over while a lower-ranked one is seated — so this filters rather
+    // than truncating.
+    let seated: Vec<usize> = (0..usable.len()).filter(|&i| split[i] > 0).collect();
+    let tgts: Vec<Target> = seated.iter().map(|&i| usable[i].1.clone()).collect();
+    let per: Vec<usize> = seated.iter().map(|&i| split[i]).collect();
+    // Everything the split did not seat, best-ranked first. This is what makes a
+    // nineteen-mirror list worth more than a four-mirror one at four
+    // connections: `run_transfer_with_reserves` substitutes from here in place
+    // when a source dies, so the socket count stays what politeness authorised.
+    let bench_ready: Vec<hya_net::Reserve> = {
+        let mut idx: Vec<usize> = (0..usable.len()).filter(|&i| split[i] == 0).collect();
+        idx.sort_by_key(|&i| (plans[i].priority, i));
+        idx.into_iter()
+            .map(|i| hya_net::Reserve {
+                target: usable[i].1.clone(),
+                plan: plans[i],
+                host: source_label(&usable[i].0),
+            })
+            .collect()
+    };
+    // Mirrors still being probed when the transfer was allowed to start. They
+    // arrive as `(index into pairs, target)`; the ranking and the display name
+    // live here, so a small bridge turns each into a `Reserve` as it lands.
+    // Nothing is awaited — the transfer already has its seats.
+    let bench_late = late_mirrors.map(|mut rx| {
+        let plans_all = job.source_plans.clone();
+        let labels: Vec<(String, hya_core::SourcePlan)> = pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (u, _))| {
+                (
+                    source_label(u),
+                    plans_all.get(i).copied().unwrap_or_default(),
+                )
+            })
+            .collect();
+        let (tx, out) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some((i, target)) = rx.recv().await {
+                let Some((host, plan)) = labels.get(i).cloned() else {
+                    continue;
+                };
+                if tx.send(hya_net::Reserve { target, plan, host }).is_err() {
+                    return;
+                }
+            }
+        });
+        out
+    });
+    let seated_plans: Vec<hya_core::SourcePlan> = seated.iter().map(|&i| plans[i]).collect();
     // What the transfer will actually open, which is what `--json.connections`
     // must report: a number the run did not use is not a measurement.
     let n_conns: usize = per.iter().sum();
@@ -1988,14 +2722,76 @@ pub async fn run(job: Job) -> Outcome {
         ),
     );
 
-    let sources: Vec<Source> = tgts
+    // Where the size and digest being trusted came from. A verification result
+    // is only as meaningful as its source, and a user reading "checksum OK"
+    // should be able to find out which document said so.
+    if let Some(a) = &job.attested {
+        p.event(
+            1,
+            &format!(
+                "attested by {}: {} bytes, {}",
+                a.origin,
+                a.size,
+                a.digest.as_deref().unwrap_or("no digest published")
+            ),
+        );
+    }
+
+    let sources: Vec<Source> = seated_plans
         .iter()
-        .map(|_| Source {
+        .map(|plan| Source {
             gamma_est: 1.0e6,
             delta_est: delta.max(1e-3),
+            // The publisher's ranking, used once — for the first split, before
+            // anything has been measured. See `hya_core::sched::Source::priority`
+            // for why it is deliberately not consulted again.
+            priority: plan.priority,
             ..Default::default()
         })
         .collect();
+    // Which mirror is which. Without this a multi-source run shows four
+    // connection rows and no way to tell which host a rank was assigned to, so a
+    // "mirror 2 is slow" observation cannot be turned into a URL to check.
+    if !job.source_plans.is_empty() {
+        for (k, &i) in seated.iter().enumerate() {
+            p.event(
+                1,
+                &format!(
+                    "source {k}: rank {} {} — {} connection(s){}",
+                    plans[i].priority,
+                    source_label(&usable[i].0),
+                    split[i],
+                    plans[i]
+                        .max_connections
+                        .map(|n| format!(", mirror states a ceiling of {n}"))
+                        .unwrap_or_default(),
+                ),
+            );
+            p.event(2, &format!("  {}", usable[i].0));
+        }
+    }
+    if !bench_ready.is_empty() {
+        p.event(
+            1,
+            &format!(
+                "{} reserve mirror(s) held back; a source that fails is replaced rather than \
+                 stranding its range",
+                bench_ready.len()
+            ),
+        );
+        // The whole bench at -vv: when a substitution happens, the next question
+        // is always "to what", and the answer is deterministic and knowable now.
+        for (k, r) in bench_ready.iter().enumerate() {
+            p.event(
+                2,
+                &format!("  reserve {k}: rank {} {}", r.plan.priority, r.host),
+            );
+        }
+    }
+    let bench = hya_net::Bench {
+        ready: bench_ready,
+        late: bench_late,
+    };
     // --range: schedule only the requested interval. Resolving it here rather
     // than in the argument parser is what lets a suffix range like `-512` mean
     // "the last 512 bytes" — that needs the object size, known only now.
@@ -2141,11 +2937,13 @@ pub async fn run(job: Job) -> Outcome {
     });
     let outs = out_path.to_string_lossy().to_string();
     let c = conn.clone();
-    let hosts: Vec<String> = usable
-        .iter()
-        .take(n_sources)
-        .map(|(u, _)| u.host.clone())
-        .collect();
+    // Host names for the progress view, one per SOURCE — behind a lock because a
+    // reserve substitution changes them mid-transfer. A view that keeps naming
+    // the dead mirror is worse than one naming none: it attributes the
+    // replacement's throughput to a machine that is not serving it.
+    let hosts: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(
+        seated.iter().map(|&i| source_label(&usable[i].0)).collect(),
+    ));
     // Digest, head bytes and any unavailability reason gathered from the stream,
     // for the `--no-save` path that has no file to read them back from.
     let mut stream_result: Option<(Option<String>, Vec<u8>, Option<String>)> = None;
@@ -2163,12 +2961,26 @@ pub async fn run(job: Job) -> Outcome {
         // carries explicit ranges rather than a byte count, because positioned writes
         // land out of order and a count cannot describe a hole.
         let tick_sink = job.ticks.clone();
+        // Substitutions, published by the transport's callback and drained by the
+        // renderer on its next tick.
+        //
+        // The callback cannot report them itself: `Progress` is owned by the
+        // render closure for the duration of the transfer, and two closures
+        // cannot hold it at once. Draining here rather than after the transfer is
+        // what makes the message arrive when the mirror changed — reported at the
+        // end it reads as a summary of something that is over, when in fact it is
+        // the reason the next ten minutes look different from the last.
+        let swaps: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let swaps_r = swaps.clone();
         let mut last_ckpt = Instant::now();
         let ckpt_path = out_path.clone();
         let ckpt_size = size;
         let ckpt_validator = validator.clone();
         let ckpt_url = job.urls[0].clone();
         let mut render = |sc: &Scheduler, done: u64| {
+            for line in swaps_r.lock().unwrap().drain(..) {
+                p.event(0, &line);
+            }
             // Carry the scheduler's own count out to the completeness check. A
             // monotonic max rather than a plain store: the observer is called on
             // every tick and the last tick before completion is not necessarily
@@ -2242,7 +3054,10 @@ pub async fn run(job: Job) -> Outcome {
                     let _ = rec.save(&ckpt_path);
                 }
             }
-            let views = conn_views(sc, &hosts);
+            let views = {
+                let names = hosts.lock().unwrap();
+                conn_views(sc, &names)
+            };
             // Publish live state for any UI driving this job. Done here rather than in
             // the transport because this closure already has the scheduler, so there is
             // no extra plumbing and no extra tick rate to reconcile.
@@ -2291,38 +3106,53 @@ pub async fn run(job: Job) -> Outcome {
         // connection. `--no-save` is capped too — the bytes still cross the
         // network, which is what the flag is about.
         let pace = hya_net::polite::Pace::shared(limiter.clone());
-        match &sink {
-            Some(sk) => {
-                let r = hya_net::run_transfer_into(
-                    c,
-                    tgts,
-                    &per,
-                    size,
-                    sk.clone(),
-                    sched,
-                    20,
-                    &mut render,
-                    pace,
-                )
-                .await;
-                stream_result = sk.take_digest(size);
-                r
+        // Keep the progress view honest across a substitution, and say so at
+        // level 0: a mirror changing under a running transfer is exactly the
+        // kind of thing a user wants in the log when they come back to a
+        // download that took longer than expected.
+        let sub_hosts = hosts.clone();
+        let sub_note_w = swaps.clone();
+        let mut on_sub = move |src: usize, r: &hya_net::Reserve| {
+            let mut names = sub_hosts.lock().unwrap();
+            let was = names.get(src).cloned().unwrap_or_else(|| "?".into());
+            if let Some(slot) = names.get_mut(src) {
+                slot.clone_from(&r.host);
             }
-            None => {
-                hya_net::run_transfer_paced(
-                    c,
-                    tgts,
-                    &per,
-                    size,
-                    &outs,
-                    sched,
-                    20,
-                    &mut render,
-                    pace,
-                )
-                .await
-            }
+            sub_note_w.lock().unwrap().push(format!(
+                "{was} failed; switched to reserve mirror {}",
+                r.host
+            ));
+        };
+        // One transfer entry point for both paths. `--no-save`'s discarding sink
+        // and the ordinary sparse file differ only in where the bytes land, and
+        // splitting the call in two meant the reserve bench had to be threaded
+        // through twice — so the sink is chosen here and the call is made once.
+        let sk = match &sink {
+            Some(sk) => sk.clone(),
+            None => match SparseSink::create(&outs, size) {
+                Ok(sk) => Arc::new(sk),
+                Err(e) => return failed(&job, size, format!("cannot create {outs}: {e}")),
+            },
+        };
+        let r = hya_net::run_transfer_with_reserves(
+            c,
+            tgts,
+            &per,
+            size,
+            sk,
+            sched,
+            20,
+            &mut render,
+            pace,
+            None,
+            bench,
+            Some(&mut on_sub),
+        )
+        .await;
+        if let Some(discarding_sink) = &sink {
+            stream_result = discarding_sink.take_digest(size);
         }
+        r
     };
     // Two clocks, both reported. `elapsed` is the whole invocation; `transfer_elapsed`
     // is what the progress bar measured. Conflating them made a 1.7s transfer report
@@ -2463,6 +3293,34 @@ pub async fn run(job: Job) -> Outcome {
                 Err(e) => return failed(&job, size, e),
             }
         }
+    } else if let Some(pieces) = job.attested.as_ref().and_then(|a| a.pieces.clone()) {
+        // The document's `<pieces>`. This is the whole reason a mirror list is
+        // worth more than a list of URLs at the moment something goes wrong: a
+        // corrupt chunk costs one chunk refetched from a DIFFERENT mirror, not a
+        // whole re-download, and the manifest says which chunk.
+        //
+        // `Advertised`, not `Trusted`, however the document arrived. Nothing here
+        // has authenticated it — the `<signature>` is recorded and not verified —
+        // so it may detect a bad chunk and drive a refetch, both of which are
+        // self-correcting (the refetched bytes are checked against the same
+        // digest), and may not name erasure positions for a parity decode, which
+        // is not.
+        if complete && !discarding {
+            match verify_and_repair(
+                &conn,
+                &usable,
+                &out_path,
+                pieces,
+                hya_net::manifest::Trust::Advertised,
+                &job,
+                &mut p,
+            )
+            .await
+            {
+                Ok(r) => chunk_report = Some(r),
+                Err(e) => return failed(&job, size, e),
+            }
+        }
     }
 
     let digest = if !complete {
@@ -2484,13 +3342,53 @@ pub async fn run(job: Job) -> Outcome {
     } else {
         sha256_file(&out_path)
     };
-    let checksum_ok = match (&job.checksum, &digest) {
-        (Some(want), Some(got)) => {
-            let want = want.trim_start_matches("sha256:").to_ascii_lowercase();
-            Some(want == *got)
-        }
-        (Some(_), None) => Some(false),
-        _ => None,
+    // What must the bytes hash to?
+    //
+    // `--checksum` first: a digest the user typed came from somewhere they chose
+    // — a release page, a signed announcement, a colleague — and it outranks one
+    // that arrived over the same session as the mirror list. The document's is
+    // the fallback, and it is the common case, because nobody types a SHA-512 by
+    // hand for a file they are about to download from nineteen mirrors.
+    let want_digest: Option<String> = job
+        .checksum
+        .clone()
+        .or_else(|| job.attested.as_ref().and_then(|a| a.digest.clone()));
+    let checksum_ok = match (&want_digest, complete) {
+        // Nothing to check against, or an incomplete file: an object that did
+        // not arrive cannot match a digest, and saying `None` there would report
+        // "not checked" about a file that is definitively wrong.
+        (None, _) => None,
+        (Some(_), false) => Some(false),
+        (Some(spec), true) => match parse_digest_spec(spec) {
+            None => {
+                if !job.quiet {
+                    eprintln!("hydra: cannot check {spec:?}: unknown digest algorithm");
+                }
+                None
+            }
+            Some((algo, want)) => {
+                // The SHA-256 is already computed above for the report, so the
+                // common case costs no second pass over the file.
+                let got = match (algo, &digest) {
+                    (hya_net::digest::Algo::Sha256, Some(d)) => Some(d.clone()),
+                    _ if discarding => {
+                        // Nothing was written, so there is no file to re-read.
+                        // The stream digest is SHA-256 only, so any other
+                        // algorithm genuinely cannot be checked — which is worth
+                        // saying rather than silently reporting "verified".
+                        if !job.quiet {
+                            eprintln!(
+                                "hydra: --no-save keeps no file, so the {} digest could not be checked (sha256 is computed from the stream)",
+                                algo.as_str()
+                            );
+                        }
+                        None
+                    }
+                    _ => digest_file(&out_path, algo),
+                };
+                got.map(|g| g == want)
+            }
+        },
     };
 
     // ---- classify what actually arrived --------------------------------
@@ -3043,6 +3941,139 @@ mod tests {
             final_url.port, real_port,
             "must land on the redirect target"
         );
+    }
+
+    #[test]
+    fn the_bench_takes_the_same_oath_the_seats_took() {
+        // A reserve's bytes are spliced into the same file on substitution, so
+        // a mirror that answers late must clear the same bar it would have
+        // cleared at the front door. An earlier revision required only range
+        // support here, which would have benched an unvalidated mirror.
+        let probe = |size: u64, ranges: bool, validator: Option<&str>, weak: bool| hya_net::Probe {
+            size,
+            ranges,
+            validator: validator.map(str::to_string),
+            weak_validator: weak,
+            last_modified: None,
+            content_type: None,
+            disposition: None,
+            status: 200,
+            location: None,
+            raw_head: String::new(),
+            raw_request: String::new(),
+        };
+
+        // With a document: the attested size is the whole test.
+        assert!(bench_admission(
+            Some(9),
+            0,
+            None,
+            &probe(9, true, None, false)
+        ));
+        assert!(!bench_admission(
+            Some(9),
+            0,
+            None,
+            &probe(8, true, None, false)
+        ));
+        // ...but never without ranges: the first thing a substituted source is
+        // asked for is a range.
+        assert!(!bench_admission(
+            Some(9),
+            0,
+            None,
+            &probe(9, false, None, false)
+        ));
+
+        // Without a document: the pairwise gate, exactly as at the front door.
+        let first = Some("\"etag-1\"");
+        assert!(bench_admission(
+            None,
+            9,
+            first,
+            &probe(9, true, Some("\"etag-1\""), false)
+        ));
+        assert!(
+            !bench_admission(None, 9, first, &probe(9, true, Some("\"etag-2\""), false)),
+            "a different validator is a different build"
+        );
+        assert!(
+            !bench_admission(None, 9, first, &probe(8, true, Some("\"etag-1\""), false)),
+            "a different size is a different object"
+        );
+        assert!(
+            !bench_admission(None, 9, first, &probe(9, true, Some("\"etag-1\""), true)),
+            "a weak validator may compare equal across different bytes"
+        );
+        assert!(
+            !bench_admission(None, 9, first, &probe(9, true, None, false)),
+            "no validator, no proof"
+        );
+        // A first source with no strong validator authorises nothing late.
+        assert!(!bench_admission(
+            None,
+            9,
+            None,
+            &probe(9, true, Some("\"x\""), false)
+        ));
+    }
+
+    #[test]
+    fn a_digest_spec_names_its_algorithm_or_defaults_to_sha256() {
+        use hya_net::digest::Algo;
+        // The two roads a spec arrives by: `--checksum`, normalised to
+        // `algo:hex` at parse time, and a Metalink digest, which always carries
+        // its prefix. A bare value is the historical `--checksum` form.
+        assert_eq!(
+            parse_digest_spec("sha512:AbC1"),
+            Some((Algo::Sha512, "abc1".into())),
+            "the algorithm is read and the hex lowercased"
+        );
+        assert_eq!(
+            parse_digest_spec("f00d"),
+            Some((Algo::Sha256, "f00d".into())),
+            "a bare digest has always meant sha256 here"
+        );
+        assert_eq!(
+            parse_digest_spec("whirlpool:aa"),
+            None,
+            "an algorithm this build cannot compute is 'not checked', never 'ok'"
+        );
+    }
+
+    #[test]
+    fn digest_file_computes_every_algorithm_a_document_publishes_and_refuses_crc() {
+        use hya_net::digest::Algo;
+        let p = std::env::temp_dir().join(format!("hydra-digest-file-{}", std::process::id()));
+        std::fs::write(&p, b"abc").unwrap();
+        // Published test vectors for "abc", so a wrong wiring of algorithm to
+        // hasher is caught here rather than as a checksum mismatch against a
+        // real mirror.
+        for (algo, want) in [
+            (Algo::Md5, "900150983cd24fb0d6963f7d28e17f72"),
+            (Algo::Sha1, "a9993e364706816aba3e25717850c26c9cd0d89d"),
+            (
+                Algo::Sha256,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+        ] {
+            assert_eq!(
+                digest_file(&p, algo).as_deref(),
+                Some(want),
+                "{} vector",
+                algo.as_str()
+            );
+        }
+        assert_eq!(digest_file(&p, Algo::Sha512).map(|h| h.len()), Some(128));
+        // A CRC is an error-detecting code, not a digest; "verified" against
+        // one would mean almost nothing, and None reports it as unchecked.
+        assert_eq!(digest_file(&p, Algo::Crc32), None);
+        // A file that cannot be read is "could not check", not a wrong value.
+        assert_eq!(
+            digest_file(std::path::Path::new("/definitely/not/here"), Algo::Sha256),
+            None
+        );
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
