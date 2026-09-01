@@ -153,25 +153,301 @@ impl Probe {
 
 impl Probe {
     /// Filename from a `Content-Disposition` header, if it carries one.
+    ///
+    /// Parsed the way RFC 6266 defines the header rather than by scanning it
+    /// for the substring `filename=`, because the servers this matters most
+    /// for are exactly the ones such a scan misses. A name that is not ASCII
+    /// cannot be stated in a plain `filename=` at all — RFC 6266 §4.3 sends
+    /// it as the extended `filename*=UTF-8''<pct-encoded>` form, which does
+    /// NOT contain `filename=` — so the scan found nothing, the caller fell
+    /// back to the last segment of the URL, and a cloud drive's object id
+    /// became the filename: a file the user picked as `无极助手3.3.exe` was
+    /// offered as `211784095912171.rar`, wrong name and, by its extension,
+    /// wrong category too.
+    ///
+    /// What is understood here, in order of preference:
+    ///
+    /// * `filename*=UTF-8''%E6%97%A0%E6%9E%81.exe` — the extended form,
+    ///   percent-decoded. It beats a plain `filename` in the same header, as
+    ///   RFC 6266 §4.3 requires: a server that sends both sends the plain one
+    ///   for old clients, transliterated or mojibake.
+    /// * `filename="..."` — a quoted-string, with `\"` escapes undone and an
+    ///   embedded `;` kept as part of the name instead of read as the next
+    ///   parameter.
+    /// * `filename=%E6%97%A0%E6%9E%81.exe` — a percent-encoded name in the
+    ///   plain parameter. Not legal, common anyway, and decoded only when the
+    ///   result is unambiguous; see [`decode_legacy_filename`].
     pub fn suggested_filename(&self) -> Option<String> {
         let d = self.disposition.as_ref()?;
-        let lower = d.to_ascii_lowercase();
-        let idx = lower.find("filename=")?;
-        let rest = d[idx + 9..].trim();
-        let name = rest
-            .trim_start_matches('"')
-            .split(['"', ';'])
-            .next()?
-            .trim();
-        // A server-supplied name must never escape the output directory.
-        let base = std::path::Path::new(name)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())?;
-        if base.is_empty() || base == "." || base == ".." {
-            None
-        } else {
-            Some(base)
+        let params = disposition_params(d);
+        let named = |key: &str| params.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+        let name = named("filename*")
+            .and_then(|v| decode_ext_value(v))
+            .or_else(|| named("filename").map(|v| decode_legacy_filename(v)))?;
+        safe_leaf(&name)
+    }
+}
+
+/// The parameters of a `Content-Disposition`: lowercased keys with their raw
+/// values, in the order the header states them. The disposition type itself
+/// (`attachment`) carries no `=` and so is not one.
+///
+/// Splitting on `;` alone is wrong for this header: `filename="a;b.zip"` is
+/// ONE parameter, and cutting at the semicolon truncates the name to `a`.
+fn disposition_params(d: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for c in d.chars() {
+        if escaped {
+            cur.push(c);
+            escaped = false;
+            continue;
         }
+        match c {
+            // Kept, not consumed: unescaping belongs to whoever reads the
+            // value, which needs the quoted-string intact to know it was one.
+            '\\' if quoted => {
+                cur.push(c);
+                escaped = true;
+            }
+            '"' => {
+                quoted = !quoted;
+                cur.push(c);
+            }
+            ';' if !quoted => {
+                push_param(&mut out, &cur);
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    push_param(&mut out, &cur);
+    out
+}
+
+fn push_param(out: &mut Vec<(String, String)>, raw: &str) {
+    if let Some((k, v)) = raw.split_once('=') {
+        let k = k.trim().to_ascii_lowercase();
+        if !k.is_empty() {
+            out.push((k, v.trim().to_string()));
+        }
+    }
+}
+
+/// An RFC 8187 extended value: `charset'language'pct-encoded`.
+///
+/// Only the two charsets the specifications actually define are decoded.
+/// RFC 8187 narrowed the extended value to UTF-8; RFC 5987 before it also
+/// allowed ISO-8859-1. Anything else is a server naming an encoding this
+/// crate would have to carry a conversion table for — GBK, EUC-KR,
+/// Shift_JIS, windows-1256 — and GUESSING one is worse than refusing: a
+/// wrong table yields mojibake that still LOOKS like a filename (`æ— æž`
+/// for `无极`, `ÙÙØ§ÛÙ` for `فایل`), so it is saved, listed and
+/// categorised as if it were right. Refusing hands the caller back to the
+/// plain `filename` parameter or the URL, which are at least honest.
+///
+/// Bytes that do not decode are refused for the same reason, and that is
+/// why the fallback is not `from_utf8_lossy`: a name is not improved by
+/// having its Korean or Arabic replaced with U+FFFD.
+fn decode_ext_value(v: &str) -> Option<String> {
+    // The quotes are not part of the grammar, but servers add them.
+    let v = v.trim().trim_matches('"');
+    let (charset, rest) = v.split_once('\'')?;
+    // The language tag is advisory for a filename; only its delimiter matters.
+    let (_lang, encoded) = rest.split_once('\'')?;
+    let bytes = percent_decode(encoded);
+    let s = match charset.trim().to_ascii_lowercase().as_str() {
+        // Latin-1 is the one legacy encoding that needs no table: every byte
+        // is its own code point.
+        "iso-8859-1" | "latin1" => bytes.iter().map(|&c| c as char).collect(),
+        // UTF-8, and any charset whose bytes turn out to BE UTF-8 — servers
+        // mislabel the parameter far more often than they mean a codepage.
+        _ => String::from_utf8(bytes).ok()?,
+    };
+    (!s.trim().is_empty()).then_some(s)
+}
+
+/// A plain `filename=` value: unquoted, and percent-decoded where the server
+/// used an encoding the header has no room for.
+///
+/// The decoding is guarded from both sides, because a filename is not a URL
+/// and `%` is a character names really contain.
+///
+/// * The value must be pure ASCII to begin with. Percent-encoding produces
+///   nothing else, so a value carrying `و` or `한` or `の` is a raw name
+///   being read literally — and one that happens to contain `%20` as well
+///   (`تخفیف 100%20.pdf`) must not be silently reworded by decoding it.
+/// * The result must be non-ASCII valid UTF-8. `100%20off.zip` is a name a
+///   server may mean exactly as written, and its decoding (`100 off.zip`) is
+///   ASCII — indistinguishable from an unencoded name, so it is left alone.
+///   Escapes spelling a non-ASCII name are the opposite: no filename spells
+///   `%D9%81%D8%A7%DB%8C%D9%84` by accident.
+///
+/// Bytes that decode to no valid UTF-8 are left alone too. They are usually
+/// a legacy codepage — GBK, windows-1256, EUC-KR — which cannot be read
+/// without a table, and a lossy read would replace the whole name with
+/// U+FFFD.
+fn decode_legacy_filename(v: &str) -> String {
+    let raw = unquote(v);
+    if !raw.is_ascii() || !raw.contains('%') {
+        return raw;
+    }
+    match String::from_utf8(percent_decode(&raw)) {
+        Ok(d) if !d.is_ascii() && !d.trim().is_empty() => d,
+        _ => raw,
+    }
+}
+
+/// A quoted-string with its `\` escapes resolved; anything unquoted verbatim.
+fn unquote(v: &str) -> String {
+    let v = v.trim();
+    let Some(inner) = v.strip_prefix('"') else {
+        return v.to_string();
+    };
+    let inner = inner.strip_suffix('"').unwrap_or(inner);
+    let mut out = String::with_capacity(inner.len());
+    let mut escaped = false;
+    for c in inner.chars() {
+        match c {
+            _ if escaped => {
+                out.push(c);
+                escaped = false;
+            }
+            '\\' => escaped = true,
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Percent-decoding to BYTES: one escape can spell a byte that is only part
+/// of a character, so this cannot be done a `char` at a time.
+fn percent_decode(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex_nibble(b[i + 1]), hex_nibble(b[i + 2])) {
+                out.push(h << 4 | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
+}
+
+fn hex_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// A server-supplied name reduced to a leaf that is safe to write: inside the
+/// output directory, free of the characters that only ever lie about what a
+/// name says, and short enough for a filesystem to accept.
+///
+/// Both path separators are cut, not just the platform's. A Windows path in
+/// the header (`..\..\evil.exe`) reaches a Unix client as a string
+/// `file_name` sees no separator in and hands back whole — at best a
+/// bizarrely named file, and on a Windows client a write outside the download
+/// folder. `file_name` still runs after the cut, because it is what strips a
+/// drive-relative `C:` prefix on the platform where that means something.
+fn safe_leaf(name: &str) -> Option<String> {
+    let leaf = strip_invisibles(name.rsplit(['/', '\\']).next().unwrap_or(name));
+    let base = std::path::Path::new(leaf.trim())
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())?;
+    if base.is_empty() || base == "." || base == ".." {
+        None
+    } else {
+        Some(clamp_name(&base))
+    }
+}
+
+/// The characters a filename is never made of, removed.
+///
+/// Controls (C0, DEL, C1) go because a newline or a NUL in a name is a
+/// truncated write or a mangled log line, never a name.
+///
+/// The bidi formatting characters go for a sharper reason, and it is the one
+/// that makes this matter for Persian, Arabic and Hebrew names specifically.
+/// `U+202E` (RIGHT-TO-LEFT OVERRIDE) reverses the display of everything after
+/// it, so a server can offer `عکس\u{202e}gpj.exe` and have every renderer —
+/// the download list, the File Info dialog, the system file manager — draw it
+/// as `عکس‏exe.jpg`, while what lands on disk and runs is an `.exe`. Nothing
+/// in the header distinguishes that from a real RTL name, and no RTL name
+/// needs it: the bidi algorithm takes direction from the letters themselves,
+/// so Arabic script and Hebrew render right-to-left with no marks at all.
+///
+/// Two invisible characters are deliberately KEPT, because removing them
+/// corrupts real names rather than protecting them: `U+200C` (ZERO WIDTH
+/// NON-JOINER) is the نیم‌فاصله that Persian spelling depends on — `می‌روم`
+/// is one word, `میروم` is a misspelling — and `U+200D` (ZERO WIDTH JOINER)
+/// is what holds Indic conjuncts and multi-person emoji together. Neither
+/// reorders anything, so neither can spoof an extension.
+fn strip_invisibles(s: &str) -> String {
+    s.chars()
+        .filter(|&c| {
+            !matches!(c,
+                '\u{0}'..='\u{1f}'      // C0 controls
+                | '\u{7f}'..='\u{9f}'   // DEL and the C1 controls
+                | '\u{200b}'            // zero width space
+                | '\u{200e}' | '\u{200f}' // LRM / RLM
+                | '\u{202a}'..='\u{202e}' // embeddings and overrides
+                | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
+                | '\u{2066}'..='\u{2069}' // isolates
+                | '\u{feff}') // BOM, when a decode left one in front
+        })
+        .collect()
+}
+
+/// The longest name mainstream filesystems accept: 255 **bytes** on ext4,
+/// APFS and exFAT; NTFS counts 255 UTF-16 units, which 255 UTF-8 bytes can
+/// never exceed.
+///
+/// The unit is the whole point. A 200-character name is unremarkable in
+/// English and unwritable in Persian, Korean or Chinese, where characters
+/// cost two and three bytes each — so a limit counted in characters passes
+/// every Latin test and fails with `ENAMETOOLONG` on exactly the names that
+/// need this code to work.
+const MAX_NAME_BYTES: usize = 255;
+
+/// `name` shortened to fit [`MAX_NAME_BYTES`], cutting the stem and keeping
+/// the extension.
+///
+/// The extension survives because it decides how the file opens and which
+/// category it is filed under; a truncation that ate it would turn a long
+/// Korean title into an extensionless blob. The cut lands on a character
+/// boundary, because half a character is not one: slicing mid-way through a
+/// three-byte `한` leaves bytes no filesystem stores and no UI draws.
+fn clamp_name(name: &str) -> String {
+    if name.len() <= MAX_NAME_BYTES {
+        return name.to_string();
+    }
+    // A leading dot is not an extension separator, and a long tail is not an
+    // extension — `report.نسخهٔ نهایی` keeps its whole name as the stem.
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() && e.len() <= 16 => (s, Some(e)),
+        _ => (name, None),
+    };
+    let budget = MAX_NAME_BYTES - ext.map_or(0, |e| e.len() + 1);
+    let mut cut = budget.min(stem.len());
+    while cut > 0 && !stem.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let stem = stem[..cut].trim_end();
+    match ext {
+        Some(e) => format!("{stem}.{e}"),
+        None => stem.to_string(),
     }
 }
 
@@ -2457,5 +2733,266 @@ mod tests {
             "a body that ends mid-chunk must not be reported as complete"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Build a probe that says nothing except how it named the object.
+    fn named(disposition: &str) -> Probe {
+        Probe {
+            disposition: Some(disposition.to_string()),
+            ..Probe::default()
+        }
+    }
+
+    /// The reported defect: a cloud drive naming a non-ASCII file.
+    ///
+    /// The only place such a name can go is the extended parameter, and a
+    /// scan for the substring `filename=` does not find `filename*=`. So the
+    /// header was read as naming nothing, every caller fell back to the last
+    /// segment of the URL — an opaque object id with an unrelated extension —
+    /// and the download dialog offered `211784095912171.rar` for a file the
+    /// user had just picked by its real name.
+    #[test]
+    fn an_extended_filename_is_read_and_beats_the_ascii_one_beside_it() {
+        assert_eq!(
+            named("attachment; filename*=UTF-8''%E6%97%A0%E6%9E%81.exe").suggested_filename(),
+            Some("无极.exe".into())
+        );
+
+        // Both forms present is the common shape, and RFC 6266 §4.3 says the
+        // extended one wins: the plain parameter is what the server keeps for
+        // clients that cannot read the other, so it is the degraded copy.
+        assert_eq!(
+            named("attachment; filename=\"211784095912171.rar\"; filename*=UTF-8''%E6%97%A0%E6%9E%81.exe")
+                .suggested_filename(),
+            Some("无极.exe".into())
+        );
+
+        // Order in the header is not preference, and neither is spacing or case.
+        assert_eq!(
+            named("attachment;FileName*=utf-8''%E6%97%A0.exe;filename=x.rar").suggested_filename(),
+            Some("无.exe".into())
+        );
+
+        // Latin-1 is the other charset RFC 8187 names.
+        assert_eq!(
+            named("attachment; filename*=ISO-8859-1'en'r%E9sum%E9.pdf").suggested_filename(),
+            Some("résumé.pdf".into())
+        );
+
+        // A `filename*` too broken to decode must not shadow a usable plain
+        // one: no charset delimiters at all is not an extended value.
+        assert_eq!(
+            named("attachment; filename*=junk; filename=setup.exe").suggested_filename(),
+            Some("setup.exe".into())
+        );
+
+        // And a header naming nothing still names nothing.
+        assert_eq!(named("attachment").suggested_filename(), None);
+        assert_eq!(named("inline; size=42").suggested_filename(), None);
+    }
+
+    /// `filename` is a PARAMETER, so its value ends where the grammar says it
+    /// does — not at the first `;` in the header.
+    #[test]
+    fn a_quoted_filename_keeps_what_is_inside_the_quotes() {
+        // A semicolon inside the quotes is part of the name; splitting the
+        // header on `;` first would have truncated it to `Live`.
+        assert_eq!(
+            named("attachment; filename=\"Live; Loud.mp3\"").suggested_filename(),
+            Some("Live; Loud.mp3".into())
+        );
+        // An escaped quote is one character of the name.
+        assert_eq!(
+            named("attachment; filename=\"say \\\"hi\\\".txt\"").suggested_filename(),
+            Some("say \"hi\".txt".into())
+        );
+        // Unquoted token, with a parameter after it.
+        assert_eq!(
+            named("attachment; filename=setup.exe; size=99").suggested_filename(),
+            Some("setup.exe".into())
+        );
+    }
+
+    /// A percent-encoded name in the PLAIN parameter is not legal and is sent
+    /// anyway. Decoding it is right; decoding everything is not.
+    #[test]
+    fn a_percent_encoded_legacy_name_is_decoded_only_where_it_means_something() {
+        assert_eq!(
+            named("attachment; filename=%E6%97%A0%E6%9E%81.exe").suggested_filename(),
+            Some("无极.exe".into())
+        );
+        // `100%20off.zip` is a name a server may mean literally, and its
+        // decoding is pure ASCII — indistinguishable from an unencoded name,
+        // so the file is not renamed on a guess.
+        assert_eq!(
+            named("attachment; filename=\"100%20off.zip\"").suggested_filename(),
+            Some("100%20off.zip".into())
+        );
+        // Escapes that spell no valid UTF-8 (GBK bytes, say) are left alone
+        // rather than replaced with U+FFFD.
+        assert_eq!(
+            named("attachment; filename=%CE%DE%BC%AB.exe").suggested_filename(),
+            Some("%CE%DE%BC%AB.exe".into())
+        );
+    }
+
+    /// A name comes from the server, so it may not choose where the file goes.
+    #[test]
+    fn a_server_supplied_name_cannot_escape_the_download_folder() {
+        assert_eq!(
+            named("attachment; filename=\"/etc/cron.d/payload\"").suggested_filename(),
+            Some("payload".into())
+        );
+        // A Windows path on a Unix client: no separator `file_name` knows, so
+        // the whole traversal used to survive as one filename.
+        assert_eq!(
+            named("attachment; filename=\"..\\\\..\\\\evil.exe\"").suggested_filename(),
+            Some("evil.exe".into())
+        );
+        // The traversal segments are not names either, however they arrive.
+        assert_eq!(
+            named("attachment; filename=\"..\"").suggested_filename(),
+            None
+        );
+        assert_eq!(
+            named("attachment; filename*=UTF-8''%2E%2E%2F%2E%2E%2F").suggested_filename(),
+            None
+        );
+        assert_eq!(
+            named("attachment; filename=\"\"").suggested_filename(),
+            None
+        );
+        assert_eq!(
+            named("attachment; filename=\"   \"").suggested_filename(),
+            None
+        );
+    }
+
+    /// The header names files in every script that has files, so the decoder
+    /// has to be indifferent to which one. Each name is asserted in the three
+    /// shapes a server actually sends it in: the extended parameter, the
+    /// plain parameter carrying percent-escapes, and the plain parameter
+    /// carrying the raw UTF-8 bytes.
+    ///
+    /// A loop rather than thirteen tests because the point is the ABSENCE of
+    /// per-script behaviour: nothing here should be able to pass for Latin
+    /// text and fail for Hangul, and a table makes a regression that does
+    /// name the language it broke.
+    #[test]
+    fn a_name_in_any_script_survives_every_form_of_the_header() {
+        /// Percent-encode every byte, which is always a legal encoding and
+        /// keeps the fixture independent of which bytes need escaping.
+        fn pct(s: &str) -> String {
+            s.bytes().map(|b| format!("%{b:02X}")).collect()
+        }
+
+        for (script, name) in [
+            ("Persian", "دانلود فایل.pdf"),
+            ("Arabic", "ملف البرنامج.exe"),
+            ("Hebrew", "קובץ ההתקנה.exe"),
+            ("Turkish", "Çalışma Günlüğü.docx"),
+            ("Korean", "설치 프로그램.exe"),
+            ("Japanese", "無極アシスタント.exe"),
+            ("Chinese", "无极助手3.3 用不习惯可退回此版本.exe"),
+            ("Russian", "Установка.exe"),
+            ("Greek", "Εγκατάσταση.exe"),
+            ("Thai", "ตัวติดตั้ง.exe"),
+            ("Hindi", "स्थापना.exe"),
+            ("Vietnamese", "Cài đặt.exe"),
+            ("Emoji", "report 📊 final.xlsx"),
+        ] {
+            let want = Some(name.to_string());
+            assert_eq!(
+                named(&format!("attachment; filename*=UTF-8''{}", pct(name))).suggested_filename(),
+                want,
+                "{script}: extended parameter"
+            );
+            assert_eq!(
+                named(&format!("attachment; filename=\"{}\"", pct(name))).suggested_filename(),
+                want,
+                "{script}: percent-escaped plain parameter"
+            );
+            assert_eq!(
+                named(&format!("attachment; filename=\"{name}\"")).suggested_filename(),
+                want,
+                "{script}: raw UTF-8 plain parameter"
+            );
+        }
+
+        // The language tag is part of the grammar and part of nothing else:
+        // a Persian name tagged `fa` is the same name.
+        assert_eq!(
+            named("attachment; filename*=utf-8'fa'%D9%81%D8%A7%DB%8C%D9%84.zip")
+                .suggested_filename(),
+            Some("فایل.zip".into())
+        );
+    }
+
+    /// Invisible characters: the two that must go, and the two that must not.
+    #[test]
+    fn invisible_characters_are_judged_by_what_they_do() {
+        // U+202E reverses everything after it, so this name is DRAWN ending
+        // in `.jpg` while the file is an executable. It is the one spoof an
+        // RTL-aware download manager invites, and it must not survive.
+        assert_eq!(
+            named("attachment; filename*=UTF-8''%D8%B9%DA%A9%D8%B3%E2%80%AEgpj.exe")
+                .suggested_filename(),
+            Some("عکسgpj.exe".into())
+        );
+        // A BOM left in front of a decoded name is not part of the name.
+        assert_eq!(
+            named("attachment; filename*=UTF-8''%EF%BB%BF%ED%8C%8C%EC%9D%BC.zip")
+                .suggested_filename(),
+            Some("파일.zip".into())
+        );
+        // Controls are not names either, whatever they interrupt.
+        assert_eq!(
+            named("attachment; filename*=UTF-8''%D9%81%00%D8%A7%DB%8C%D9%84.pdf")
+                .suggested_filename(),
+            Some("فایل.pdf".into())
+        );
+
+        // U+200C is the Persian نیم‌فاصله: `می‌روم` is one word spelled with
+        // it and a misspelling without, so stripping it would corrupt the
+        // name it was meant to protect.
+        assert_eq!(
+            named("attachment; filename=\"می‌روم.pdf\"").suggested_filename(),
+            Some("می\u{200c}روم.pdf".into())
+        );
+        // U+200D holds a multi-person emoji together; without it the name
+        // grows two extra characters.
+        assert_eq!(
+            named("attachment; filename=\"family 👨\u{200d}👩\u{200d}👧.png\"")
+                .suggested_filename(),
+            Some("family 👨\u{200d}👩\u{200d}👧.png".into())
+        );
+    }
+
+    /// A limit counted in characters passes every Latin test and fails on the
+    /// scripts that need it: 200 Hangul syllables are 600 bytes, and no
+    /// mainstream filesystem takes a name past 255.
+    #[test]
+    fn a_long_name_is_clamped_by_bytes_with_its_extension_intact() {
+        let long = format!("{}.exe", "설치프로그램".repeat(50));
+        let got = named(&format!("attachment; filename=\"{long}\""))
+            .suggested_filename()
+            .expect("a long name is still a name");
+        assert!(
+            got.len() <= 255,
+            "clamped to {} bytes, which no filesystem accepts",
+            got.len()
+        );
+        // The extension decides how the file opens and where it is filed, so
+        // it is the stem that gives way.
+        assert!(got.ends_with(".exe"), "lost its extension: {got}");
+        // And the cut is on a character boundary — half a `설` is not a
+        // character, and would not have survived the trip back through UTF-8.
+        assert!(long.starts_with(got.trim_end_matches(".exe")));
+
+        // A name that already fits is returned untouched, extension or not.
+        assert_eq!(
+            named("attachment; filename=\"보고서\"").suggested_filename(),
+            Some("보고서".into())
+        );
     }
 }

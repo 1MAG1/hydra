@@ -5625,12 +5625,21 @@ pub fn sanitize_file_name(raw: &str) -> String {
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     // Leading dots hide the file; a name that is only dots is not a name.
     let trimmed = collapsed.trim_matches(['.', ' ']).to_string();
-    trimmed
-        .chars()
-        .take(120)
-        .collect::<String>()
-        .trim()
-        .to_string()
+    // Two caps, because they bind on different names. 120 characters keeps a
+    // page-title capture from becoming an unreadable line of text. The byte
+    // cap is what the filesystem actually enforces: ext4, APFS and exFAT stop
+    // at 255 bytes, and 120 characters of Hangul, Persian or Chinese is 360
+    // of them — a cap counted only in characters passes every Latin test and
+    // fails the write with ENAMETOOLONG on exactly the names that need it.
+    // The margin under 255 is for the extension callers append afterwards.
+    const MAX_BYTES: usize = 250;
+    let capped: String = trimmed.chars().take(120).collect();
+    let mut cut = capped.len().min(MAX_BYTES);
+    // Half a character is not a character: the cut lands on a boundary.
+    while cut > 0 && !capped.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    capped[..cut].trim().to_string()
 }
 
 pub fn sanitize_spans(spans: &[(u64, u64)], size: Option<u64>) -> Vec<(u64, u64)> {
@@ -6119,6 +6128,17 @@ mod tests {
         // Control characters are not names either.
         assert_eq!(sanitize_file_name("a\u{0}b\nc"), "a b c");
         assert!(sanitize_file_name(&"x".repeat(400)).chars().count() <= 120);
+        // 120 CHARACTERS of Hangul is 360 bytes, which no mainstream
+        // filesystem will store — the cap has to bind in bytes too, on a
+        // character boundary, with room left for the extension the stream
+        // path appends.
+        let korean = sanitize_file_name(&"설치프로그램".repeat(60));
+        assert!(
+            korean.len() <= 250,
+            "{} bytes is past what a filesystem takes",
+            korean.len()
+        );
+        assert!("설치프로그램".repeat(60).starts_with(&korean));
     }
 
     #[test]
