@@ -819,6 +819,50 @@ fn status_badge<'a>(label: String, colour: iced::Color) -> El<'a> {
     .into()
 }
 
+/// What the FFmpeg row has to say, worked out before anything is laid out.
+///
+/// A built row is a tree of shapes, and none of the questions worth asking
+/// about this one survive being turned into one: is the guide offered only
+/// while it has something to tell you? is a path shown only when there is
+/// one? So the answers are decided here, and the widgets below merely draw
+/// them.
+struct FfmpegRow {
+    found: bool,
+    badge: String,
+    about: String,
+    /// The path as the row shows it and as the clipboard gets it: elided for
+    /// the eye, whole for the paste.
+    path: Option<(String, String)>,
+    action: String,
+    /// The setup guide, offered only when it can still help.
+    guide: Option<&'static str>,
+}
+
+impl FfmpegRow {
+    fn of(found: Option<&std::path::Path>) -> Self {
+        match found {
+            Some(path) => Self {
+                found: true,
+                badge: tr("Installed"),
+                about: tr(
+                    "MPEG-TS is remuxed to MP4, and DASH video and audio are merged into one file.",
+                ),
+                path: Some((elide_path(path, 58), path.display().to_string())),
+                action: tr("Copy path"),
+                guide: None,
+            },
+            None => Self {
+                found: false,
+                badge: tr("Not found"),
+                about: tr("Not found on PATH. HLS and DASH still download, but MPEG-TS is saved as .ts instead of .mp4, and DASH audio stays in its own file."),
+                path: None,
+                action: tr("FFmpeg setup guide"),
+                guide: Some(FFMPEG_WIKI),
+            },
+        }
+    }
+}
+
 /// The FFmpeg row, which reports what is actually on THIS machine rather
 /// than describing ffmpeg in the abstract: a green badge and the path it was
 /// found at, or a red one and the guide.
@@ -827,45 +871,44 @@ fn status_badge<'a>(label: String, colour: iced::Color) -> El<'a> {
 /// sentence. Glued on, a Windows path wraps as one unbreakable word, runs
 /// out past the panel and straight under the button — and it buried the part
 /// that matters (which ffmpeg is this?) inside a paragraph.
-fn ffmpeg_row<'a>() -> El<'a> {
-    let found = hya_stream::ffmpeg();
-    let (badge, about, action) = match &found {
-        Some(path) => (
-            status_badge(tr("Installed"), hex(theme::PROGRESS_GREEN)),
-            tr("MPEG-TS is remuxed to MP4, and DASH video and audio are merged into one file."),
-            dlg_btn_auto(
-                tr("Copy path"),
-                Some(Message::OptCopy(path.display().to_string())),
-            ),
-        ),
-        None => (
-            status_badge(tr("Not found"), hex(OFFLINE_RED)),
-            tr("Not found on PATH. HLS and DASH still download, but MPEG-TS is saved as .ts instead of .mp4, and DASH audio stays in its own file."),
-            dlg_btn_auto_primary(
-                tr("FFmpeg setup guide"),
-                Some(Message::OptExtStore(FFMPEG_WIKI)),
-            ),
+fn ffmpeg_row<'a>(found: Option<std::path::PathBuf>) -> El<'a> {
+    let st = FfmpegRow::of(found.as_deref());
+    let colour = if st.found {
+        hex(theme::PROGRESS_GREEN)
+    } else {
+        hex(OFFLINE_RED)
+    };
+    let action = match st.guide {
+        Some(url) => dlg_btn_auto_primary(st.action, Some(Message::OptExtStore(url))),
+        None => dlg_btn_auto(
+            st.action,
+            st.path
+                .as_ref()
+                .map(|(_, full)| Message::OptCopy(full.clone())),
         ),
     };
     let mut info = column![
-        row![text("FFmpeg").size(theme::FONT_SIZE + 1.0), badge]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-        text(about)
+        row![
+            text("FFmpeg").size(theme::FONT_SIZE + 1.0),
+            status_badge(st.badge, colour)
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+        text(st.about)
             .size(theme::FONT_SIZE - 1.0)
             .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
             .color(theme::dim_text(&iced::Theme::Light)),
     ]
     .spacing(3)
     .width(Length::Fill);
-    if let Some(path) = &found {
+    if let Some((shown, full)) = st.path {
         info = info.push(tooltip(
-            text(elide_path(path, 58))
+            text(shown)
                 .size(theme::FONT_SIZE - 1.0)
                 .wrapping(iced::widget::text::Wrapping::None)
                 .color(theme::dim_text(&iced::Theme::Light)),
             container(
-                text(path.display().to_string())
+                text(full)
                     .size(theme::FONT_SIZE - 1.0)
                     .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             )
@@ -935,7 +978,7 @@ fn extensions(_app: &App) -> El<'_> {
             None,
         ),
         section(tr("Media tools")),
-        ffmpeg_row(),
+        ffmpeg_row(hya_stream::ffmpeg()),
     ]
     .spacing(10)
     .into()
@@ -1094,6 +1137,53 @@ mod tests {
         let out = elide_path(p, 40);
         assert!(out.starts_with("/\u{2026}/"), "lost the root: {out}");
         assert!(out.ends_with("/bin/ffmpeg"), "lost the binary: {out}");
+    }
+
+    #[test]
+    fn an_installed_ffmpeg_shows_which_one_and_offers_no_guide() {
+        let path = Path::new("/opt/homebrew/bin/ffmpeg");
+        let st = FfmpegRow::of(Some(path));
+        assert!(st.found);
+        assert_eq!(st.badge, tr("Installed"));
+        assert_eq!(st.action, tr("Copy path"));
+        // Nothing to guide anyone to: it is already here.
+        assert_eq!(st.guide, None);
+        let (shown, full) = st.path.expect("an installed ffmpeg shows its path");
+        assert_eq!(shown, "/opt/homebrew/bin/ffmpeg");
+        // The clipboard gets the whole thing, never the elided line.
+        assert_eq!(full, "/opt/homebrew/bin/ffmpeg");
+    }
+
+    #[test]
+    fn a_deep_install_is_elided_for_the_row_but_not_for_the_clipboard() {
+        let full = "C:\\Users\\javad\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-7.1-full_build\\bin\\ffmpeg.exe";
+        let st = FfmpegRow::of(Some(Path::new(full)));
+        let (shown, copied) = st.path.expect("an installed ffmpeg shows its path");
+        assert!(shown.chars().count() <= 58, "row line too long: {shown}");
+        assert!(shown.contains('\u{2026}'), "not elided: {shown}");
+        assert_eq!(copied, full);
+    }
+
+    #[test]
+    fn a_missing_ffmpeg_offers_the_guide_and_shows_no_path() {
+        let st = FfmpegRow::of(None);
+        assert!(!st.found);
+        assert_eq!(st.badge, tr("Not found"));
+        assert_eq!(st.guide, Some(FFMPEG_WIKI));
+        assert_eq!(st.action, tr("FFmpeg setup guide"));
+        assert!(st.path.is_none(), "no path to show, and none shown");
+        // The sentence has to say what still works, not just what is absent.
+        assert!(st.about.len() > st.badge.len());
+    }
+
+    /// Both states build. The row is the one place in this dialog that
+    /// changes shape — a third line and a different button — and a widget
+    /// tree that does not survive being built takes the whole window down
+    /// with it.
+    #[test]
+    fn both_states_of_the_row_lay_out() {
+        let _found: El<'_> = ffmpeg_row(Some("/usr/local/bin/ffmpeg".into()));
+        let _missing: El<'_> = ffmpeg_row(None);
     }
 
     /// A budget the file name alone cannot meet still shows the file name:

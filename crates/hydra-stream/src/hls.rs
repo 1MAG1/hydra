@@ -1543,15 +1543,26 @@ fn executable(p: &std::path::Path) -> bool {
     true
 }
 
+/// The process environment, read through a function rather than directly.
+///
+/// The search is the part worth testing and the machine it runs on is the
+/// part that makes that hard: a Linux CI box has no `%LOCALAPPDATA%`, and
+/// mutating the real environment from a test races every other test in the
+/// binary. Handing the lookup in costs one indirection and buys a search
+/// that can be driven over either platform's layout from anywhere.
+type Var<'a> = &'a dyn Fn(&str) -> Option<std::ffi::OsString>;
+
 fn find_ffmpeg() -> Option<std::path::PathBuf> {
-    let exe = if cfg!(target_os = "windows") {
-        "ffmpeg.exe"
-    } else {
-        "ffmpeg"
-    };
+    locate(cfg!(target_os = "windows"), &|k| std::env::var_os(k))
+}
+
+/// The search itself: override, `PATH`, the well-known directories, and —
+/// on Windows — winget's unpacked package tree.
+fn locate(windows: bool, var: Var<'_>) -> Option<std::path::PathBuf> {
+    let exe = if windows { "ffmpeg.exe" } else { "ffmpeg" };
     // An explicit override wins, and is the answer for an install in a place
     // nobody could reasonably guess.
-    if let Some(p) = std::env::var_os("HYDRA_FFMPEG") {
+    if let Some(p) = var("HYDRA_FFMPEG") {
         let p = std::path::PathBuf::from(p);
         if executable(&p) {
             return Some(p);
@@ -1561,22 +1572,28 @@ fn find_ffmpeg() -> Option<std::path::PathBuf> {
         // happens.
         return None;
     }
-    if let Some(paths) = std::env::var_os("PATH") {
-        if let Some(p) = std::env::split_paths(&paths)
-            .map(|d| d.join(exe))
-            .find(|p| executable(p))
-        {
+    if let Some(paths) = var("PATH") {
+        if let Some(p) = first_executable(std::env::split_paths(&paths), exe) {
             return Some(p);
         }
     }
-    if let Some(p) = well_known()
-        .into_iter()
-        .map(|d| d.join(exe))
-        .find(|p| executable(p))
-    {
+    if let Some(p) = first_executable(well_known(windows, var), exe) {
         return Some(p);
     }
-    winget_package()
+    if windows {
+        return winget_package(var);
+    }
+    None
+}
+
+/// The first of `dirs` that holds a runnable `exe`.
+fn first_executable(
+    dirs: impl IntoIterator<Item = std::path::PathBuf>,
+    exe: &str,
+) -> Option<std::path::PathBuf> {
+    dirs.into_iter()
+        .map(|d| d.join(exe))
+        .find(|p| executable(p))
 }
 
 /// The directories package managers install into, for a GUI process whose
@@ -1586,12 +1603,12 @@ fn find_ffmpeg() -> Option<std::path::PathBuf> {
 /// out: `C:\Users\<name>` is not a constant, and a Windows install that has
 /// not been signed out of since it happened has the shim directory on disk
 /// but not yet on this process's `PATH`.
-fn well_known() -> Vec<std::path::PathBuf> {
+fn well_known(windows: bool, var: Var<'_>) -> Vec<std::path::PathBuf> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-    let env_dir = |var: &str, tail: &str| -> Option<std::path::PathBuf> {
-        std::env::var_os(var).map(|v| std::path::PathBuf::from(v).join(tail))
+    let env_dir = |name: &str, tail: &str| -> Option<std::path::PathBuf> {
+        var(name).map(|v| std::path::PathBuf::from(v).join(tail))
     };
-    if cfg!(target_os = "windows") {
+    if windows {
         // winget's own shim directory, then the Store alias directory both
         // it and Microsoft's packages publish through.
         dirs.extend(env_dir("LOCALAPPDATA", "Microsoft\\WinGet\\Links"));
@@ -1626,20 +1643,21 @@ fn well_known() -> Vec<std::path::PathBuf> {
 /// winget installs ffmpeg as an unpacked archive rather than a shim: the
 /// binary sits at
 /// `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg…\ffmpeg-<ver>-full_build\bin\ffmpeg.exe`,
-/// where the version is part of the path and changes on every upgrade. Two
-/// bounded directory reads find it without guessing the version.
-fn winget_package() -> Option<std::path::PathBuf> {
-    if !cfg!(target_os = "windows") {
-        return None;
-    }
-    let root = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
-        .join("Microsoft\\WinGet\\Packages");
-    for pkg in std::fs::read_dir(&root).ok()?.flatten() {
+/// where the version is part of the path and changes on every upgrade.
+fn winget_package(var: Var<'_>) -> Option<std::path::PathBuf> {
+    let root = std::path::PathBuf::from(var("LOCALAPPDATA")?).join("Microsoft\\WinGet\\Packages");
+    winget_scan(&root)
+}
+
+/// Two bounded directory reads over winget's package tree — the package
+/// folder, then the versioned build folder inside it — so the version never
+/// has to be guessed.
+fn winget_scan(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    for pkg in std::fs::read_dir(root).ok()?.flatten() {
         let name = pkg.file_name();
-        let name = name.to_string_lossy();
         // Every publisher that ships ffmpeg through winget (Gyan, BtbN,
         // FFmpeg.FFmpeg) names the package after it.
-        if !name.to_ascii_lowercase().contains("ffmpeg") {
+        if !name.to_string_lossy().to_lowercase().contains("ffmpeg") {
             continue;
         }
         let direct = pkg.path().join("bin").join("ffmpeg.exe");
@@ -2182,6 +2200,263 @@ v2/index.m3u8\n";
         let d = std::env::temp_dir().join(format!("hydra-hls-{}-{name}", std::process::id()));
         let _ = std::fs::create_dir_all(&d);
         d
+    }
+
+    /// A scratch directory with nothing left in it from an earlier run: the
+    /// ffmpeg searches assert on what they find, and a stale fixture is
+    /// indistinguishable from a fresh one.
+    fn fresh(name: &str) -> std::path::PathBuf {
+        let d = scratch(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A file the search will accept as runnable, parents and all.
+    fn fake_exe(path: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path.to_path_buf()
+    }
+
+    /// An environment of exactly these variables, in place of the process's.
+    fn env_of(
+        pairs: Vec<(&'static str, std::ffi::OsString)>,
+    ) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+        move |want: &str| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == want)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    /// `PATH` as the OS spells it, from directories rather than a string
+    /// with a separator this test would have to guess.
+    fn path_var(dirs: &[&std::path::Path]) -> std::ffi::OsString {
+        std::env::join_paths(dirs).unwrap()
+    }
+
+    #[test]
+    fn an_override_beats_whatever_is_on_path() {
+        let dir = fresh("ff-override");
+        let on_path = fake_exe(&dir.join("path-copy").join("ffmpeg"));
+        let chosen = fake_exe(&dir.join("elsewhere").join("ffmpeg"));
+        let var = env_of(vec![
+            ("HYDRA_FFMPEG", chosen.clone().into_os_string()),
+            ("PATH", path_var(&[on_path.parent().unwrap()])),
+        ]);
+        assert_eq!(locate(false, &var), Some(chosen));
+    }
+
+    /// A wrong override is a mistake to be seen, not routed around: falling
+    /// back to another ffmpeg is how "why is it still using the old one?"
+    /// happens.
+    #[test]
+    fn an_override_that_points_at_nothing_finds_nothing() {
+        let dir = fresh("ff-bad-override");
+        let on_path = fake_exe(&dir.join("path-copy").join("ffmpeg"));
+        let var = env_of(vec![
+            (
+                "HYDRA_FFMPEG",
+                dir.join("gone").join("ffmpeg").into_os_string(),
+            ),
+            ("PATH", path_var(&[on_path.parent().unwrap()])),
+        ]);
+        assert_eq!(locate(false, &var), None);
+    }
+
+    #[test]
+    fn path_is_searched_in_its_own_order() {
+        let dir = fresh("ff-path");
+        let empty = dir.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let wanted = fake_exe(&dir.join("second").join("ffmpeg"));
+        let var = env_of(vec![(
+            "PATH",
+            path_var(&[&empty, wanted.parent().unwrap()]),
+        )]);
+        assert_eq!(locate(false, &var), Some(wanted));
+    }
+
+    /// The macOS case the well-known list exists for: an app bundle opened
+    /// from Finder inherits a `PATH` that holds none of the places a package
+    /// manager installs into.
+    ///
+    /// Asserted over the home-derived entries alone. The rest of the list is
+    /// `/usr/local/bin` and friends, and a developer machine with a real
+    /// ffmpeg in one of them would otherwise decide the answer.
+    #[test]
+    fn a_home_install_is_found_with_nothing_useful_on_path() {
+        let dir = fresh("ff-home");
+        let wanted = fake_exe(&dir.join("home").join(".local/bin").join("ffmpeg"));
+        let var = env_of(vec![("HOME", dir.join("home").into_os_string())]);
+        let from_home: Vec<_> = well_known(false, &var)
+            .into_iter()
+            .filter(|d| d.starts_with(&dir))
+            .collect();
+        assert_eq!(from_home.len(), 2, "both ~/.local/bin and ~/bin");
+        assert_eq!(first_executable(from_home, "ffmpeg"), Some(wanted));
+    }
+
+    /// The Windows counterpart, and the reason for it: winget puts its shim
+    /// directory on `PATH` at install time, so a session started before the
+    /// install has the directory on disk but not in its environment.
+    #[test]
+    fn the_winget_shim_directory_is_searched_when_path_has_not_caught_up() {
+        let dir = fresh("ff-winget-shim");
+        let local = dir.join("local");
+        let wanted = fake_exe(&local.join("Microsoft\\WinGet\\Links").join("ffmpeg.exe"));
+        // The unpacked package is there too: the shim is the cheaper answer
+        // and has to be the one that wins.
+        fake_exe(
+            &local
+                .join("Microsoft\\WinGet\\Packages")
+                .join("Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe")
+                .join("ffmpeg-7.1-full_build")
+                .join("bin")
+                .join("ffmpeg.exe"),
+        );
+        let var = env_of(vec![("LOCALAPPDATA", local.into_os_string())]);
+        assert_eq!(locate(true, &var), Some(wanted));
+    }
+
+    /// The path from the bug report: winget unpacks an archive rather than
+    /// installing a shim, and the version is part of the directory name.
+    #[test]
+    fn a_versioned_winget_build_folder_is_found_without_knowing_the_version() {
+        let dir = fresh("ff-winget-pkg");
+        let local = dir.join("local");
+        let packages = local.join("Microsoft\\WinGet\\Packages");
+        // A package that is not ffmpeg, and happens to ship a binary by that
+        // name, must not be mistaken for one.
+        fake_exe(
+            &packages
+                .join("Some.Vendor_Microsoft.Winget.Source_8wekyb3d8bbwe")
+                .join("bin")
+                .join("ffmpeg.exe"),
+        );
+        let wanted = fake_exe(
+            &packages
+                .join("Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe")
+                .join("ffmpeg-7.1-full_build")
+                .join("bin")
+                .join("ffmpeg.exe"),
+        );
+        // `winget_package` rather than `locate`: the fixed `C:\...` entries
+        // ahead of it in the search are real directories on a Windows runner
+        // and would decide this test's answer instead of the fixture.
+        let var = env_of(vec![("LOCALAPPDATA", local.into_os_string())]);
+        assert_eq!(winget_package(&var), Some(wanted));
+    }
+
+    /// Some publishers unpack straight into `bin`, with no version folder.
+    #[test]
+    fn a_winget_package_without_a_version_folder_is_found_too() {
+        let dir = fresh("ff-winget-flat");
+        let packages = dir.join("Packages");
+        let wanted = fake_exe(
+            &packages
+                .join("BtbN.FFmpeg.GPL.Shared")
+                .join("bin")
+                .join("ffmpeg.exe"),
+        );
+        assert_eq!(winget_scan(&packages), Some(wanted));
+    }
+
+    #[test]
+    fn an_empty_package_tree_is_no_answer_at_all() {
+        let dir = fresh("ff-winget-empty");
+        assert_eq!(winget_scan(&dir), None);
+        // Nor is a tree that is not there.
+        assert_eq!(winget_scan(&dir.join("absent")), None);
+    }
+
+    #[test]
+    fn the_well_known_list_follows_the_platform_it_is_asked_about() {
+        let var = env_of(vec![
+            ("LOCALAPPDATA", "L".into()),
+            ("USERPROFILE", "U".into()),
+            ("ProgramFiles", "P".into()),
+            ("HOME", "/home/me".into()),
+        ]);
+        let win = well_known(true, &var);
+        assert!(win.contains(&std::path::PathBuf::from("L").join("Microsoft\\WinGet\\Links")));
+        assert!(win.contains(&std::path::PathBuf::from("U").join("scoop\\shims")));
+        assert!(win.contains(&std::path::PathBuf::from("P").join("ffmpeg\\bin")));
+        assert!(win.contains(&std::path::PathBuf::from(
+            "C:\\ProgramData\\chocolatey\\bin"
+        )));
+        // Unset variables drop out rather than contributing a relative path
+        // that would be searched against the working directory.
+        assert!(!win.iter().any(|d| d.starts_with("shims")));
+
+        let unix = well_known(false, &var);
+        assert!(unix.contains(&std::path::PathBuf::from("/opt/homebrew/bin")));
+        assert!(unix.contains(&std::path::PathBuf::from("/home/me/.local/bin")));
+        assert!(!unix.iter().any(|d| d.to_string_lossy().contains("scoop")));
+    }
+
+    /// The winget tree is the last resort, reached only once `PATH` and the
+    /// shim directories have all come up empty.
+    ///
+    /// Driven over the Windows layout from a machine that is not Windows —
+    /// which is the whole point of the seam, and also keeps a real Windows
+    /// host's own `C:\ffmpeg\bin` out of the answer.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_package_tree_is_reached_when_no_directory_holds_a_shim() {
+        let dir = fresh("ff-winget-fallback");
+        let local = dir.join("local");
+        let wanted = fake_exe(
+            &local
+                .join("Microsoft\\WinGet\\Packages")
+                .join("Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe")
+                .join("ffmpeg-7.1-full_build")
+                .join("bin")
+                .join("ffmpeg.exe"),
+        );
+        let empty = dir.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let var = env_of(vec![
+            ("PATH", path_var(&[&empty])),
+            ("LOCALAPPDATA", local.into_os_string()),
+        ]);
+        assert_eq!(locate(true, &var), Some(wanted));
+    }
+
+    /// Whatever this machine has, it has to keep saying the same thing: the
+    /// UI asks on every frame and the cache is what stops that being a stat
+    /// per frame.
+    #[test]
+    fn the_lookup_is_cached_and_only_ever_names_a_runnable_file() {
+        let first = ffmpeg();
+        assert_eq!(first, ffmpeg(), "the cached answer changed under us");
+        assert_eq!(first.is_some(), ffmpeg_available());
+        if let Some(path) = first {
+            assert!(executable(&path), "named an unrunnable {}", path.display());
+        }
+    }
+
+    #[test]
+    fn only_a_runnable_file_counts_as_an_executable() {
+        let dir = fresh("ff-executable");
+        assert!(executable(&fake_exe(&dir.join("ffmpeg"))));
+        // A directory of the right name is not a program.
+        std::fs::create_dir_all(dir.join("bin").join("ffmpeg")).unwrap();
+        assert!(!executable(&dir.join("bin").join("ffmpeg")));
+        assert!(!executable(&dir.join("absent")));
+        #[cfg(unix)]
+        {
+            let readme = dir.join("ffmpeg.txt");
+            std::fs::write(&readme, b"not a program").unwrap();
+            assert!(!executable(&readme));
+        }
     }
 
     #[tokio::test]
