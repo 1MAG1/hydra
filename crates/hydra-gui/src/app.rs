@@ -720,6 +720,8 @@ pub enum Message {
     OptTabSet(OptTab),
     /// Extensions page: open a browser's add-on store in the default browser.
     OptExtStore(&'static str),
+    /// Put a value the page only displays (the ffmpeg path) on the clipboard.
+    OptCopy(String),
     // Add URL: stream inspection
     /// The address looks like a manifest; go and read what it offers.
     AddrProbeStream,
@@ -3970,6 +3972,7 @@ impl App {
                 let _ = open::that_detached(url);
                 Task::none()
             }
+            Message::OptCopy(value) => iced::clipboard::write(value),
             Message::OptOk => {
                 self.cfg.settings = self.options.draft.clone();
                 self.cfg.categories = self.options.draft_cats.clone();

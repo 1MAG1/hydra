@@ -1493,8 +1493,11 @@ pub fn finish(
 /// launched from Finder inherits a minimal `PATH` that does NOT include
 /// `/opt/homebrew/bin` or `/usr/local/bin`, so an ffmpeg the user installed
 /// with Homebrew is invisible to it while being obviously present in their
-/// terminal. The well-known locations are therefore checked too, and
-/// `HYDRA_FFMPEG` overrides everything for an install somewhere else.
+/// terminal. Windows has the same problem for a different reason: winget,
+/// scoop and chocolatey all put their shim directory on `PATH` at install
+/// time, and a session started before that install does not have it. The
+/// well-known locations are therefore checked too, and `HYDRA_FFMPEG`
+/// overrides everything for an install somewhere else.
 ///
 /// The answer is cached briefly rather than permanently: a UI that shows
 /// "installed / not installed" would otherwise stat the filesystem on every
@@ -1566,23 +1569,94 @@ fn find_ffmpeg() -> Option<std::path::PathBuf> {
             return Some(p);
         }
     }
-    // The places package managers put it, for a GUI process whose PATH came
-    // from launchd rather than a shell.
-    const WELL_KNOWN: &[&str] = &[
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/opt/local/bin",
-        "/snap/bin",
-        "/var/lib/flatpak/exports/bin",
-        "C:\\Program Files\\ffmpeg\\bin",
-        "C:\\ffmpeg\\bin",
-    ];
-    WELL_KNOWN
-        .iter()
-        .map(|d| std::path::Path::new(d).join(exe))
+    if let Some(p) = well_known()
+        .into_iter()
+        .map(|d| d.join(exe))
         .find(|p| executable(p))
+    {
+        return Some(p);
+    }
+    winget_package()
+}
+
+/// The directories package managers install into, for a GUI process whose
+/// `PATH` came from launchd or a desktop session rather than a shell.
+///
+/// The per-user ones are derived from the environment rather than spelled
+/// out: `C:\Users\<name>` is not a constant, and a Windows install that has
+/// not been signed out of since it happened has the shim directory on disk
+/// but not yet on this process's `PATH`.
+fn well_known() -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    let env_dir = |var: &str, tail: &str| -> Option<std::path::PathBuf> {
+        std::env::var_os(var).map(|v| std::path::PathBuf::from(v).join(tail))
+    };
+    if cfg!(target_os = "windows") {
+        // winget's own shim directory, then the Store alias directory both
+        // it and Microsoft's packages publish through.
+        dirs.extend(env_dir("LOCALAPPDATA", "Microsoft\\WinGet\\Links"));
+        dirs.extend(env_dir("LOCALAPPDATA", "Microsoft\\WindowsApps"));
+        // scoop (per user, and the machine-wide variant), then chocolatey.
+        dirs.extend(env_dir("USERPROFILE", "scoop\\shims"));
+        dirs.extend(env_dir("SCOOP", "shims"));
+        dirs.extend(env_dir("ChocolateyInstall", "bin"));
+        dirs.push("C:\\ProgramData\\chocolatey\\bin".into());
+        // A plain unzip-it-yourself install, in the two places the guides
+        // tell people to put it.
+        dirs.extend(env_dir("ProgramFiles", "ffmpeg\\bin"));
+        dirs.push("C:\\Program Files\\ffmpeg\\bin".into());
+        dirs.push("C:\\ffmpeg\\bin".into());
+    } else {
+        dirs.extend([
+            "/opt/homebrew/bin".into(),
+            "/usr/local/bin".into(),
+            "/usr/bin".into(),
+            "/bin".into(),
+            "/opt/local/bin".into(),
+            "/snap/bin".into(),
+            "/var/lib/flatpak/exports/bin".into(),
+            "/home/linuxbrew/.linuxbrew/bin".into(),
+        ]);
+        dirs.extend(env_dir("HOME", ".local/bin"));
+        dirs.extend(env_dir("HOME", "bin"));
+    }
+    dirs
+}
+
+/// winget installs ffmpeg as an unpacked archive rather than a shim: the
+/// binary sits at
+/// `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg…\ffmpeg-<ver>-full_build\bin\ffmpeg.exe`,
+/// where the version is part of the path and changes on every upgrade. Two
+/// bounded directory reads find it without guessing the version.
+fn winget_package() -> Option<std::path::PathBuf> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    let root = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+        .join("Microsoft\\WinGet\\Packages");
+    for pkg in std::fs::read_dir(&root).ok()?.flatten() {
+        let name = pkg.file_name();
+        let name = name.to_string_lossy();
+        // Every publisher that ships ffmpeg through winget (Gyan, BtbN,
+        // FFmpeg.FFmpeg) names the package after it.
+        if !name.to_ascii_lowercase().contains("ffmpeg") {
+            continue;
+        }
+        let direct = pkg.path().join("bin").join("ffmpeg.exe");
+        if executable(&direct) {
+            return Some(direct);
+        }
+        let Ok(inner) = std::fs::read_dir(pkg.path()) else {
+            continue;
+        };
+        for sub in inner.flatten() {
+            let cand = sub.path().join("bin").join("ffmpeg.exe");
+            if executable(&cand) {
+                return Some(cand);
+            }
+        }
+    }
+    None
 }
 
 /// Remux `src` into `dst`. Stream copy only — no re-encoding, so this is
