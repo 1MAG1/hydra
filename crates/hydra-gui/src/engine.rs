@@ -490,7 +490,16 @@ pub fn parse_url(url: &str) -> Result<ParsedUrl, String> {
     hya_stream::parse_url(url).map_err(|e| crate::i18n::tr(&e))
 }
 
-pub fn file_name_from_url(url: &str) -> String {
+/// The name `url` itself states, or `None` when it states none — a bare
+/// host, a directory address, a redirector whose own path carries nothing.
+///
+/// [`file_name_from_url`] invents `index.html` for those so a download always
+/// has somewhere to go, but a caller deciding whether a name MEANS anything
+/// must be able to tell the invented one apart: the duplicate check reported
+/// "a file with this name already exists" about an `index.html` left by some
+/// unrelated download, for a link whose real name the probe had not resolved
+/// yet.
+pub fn url_file_name(url: &str) -> Option<String> {
     let path = parse_url(url).map(|p| p.path).unwrap_or_default();
     let seg = path
         .split('?')
@@ -500,11 +509,11 @@ pub fn file_name_from_url(url: &str) -> String {
         .next()
         .unwrap_or("");
     let name = percent_decode(seg);
-    if name.is_empty() {
-        "index.html".into()
-    } else {
-        name
-    }
+    (!name.is_empty()).then_some(name)
+}
+
+pub fn file_name_from_url(url: &str) -> String {
+    url_file_name(url).unwrap_or_else(|| "index.html".into())
 }
 
 fn percent_decode(s: &str) -> String {
@@ -1358,6 +1367,32 @@ fn finish_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_url_that_names_no_file_says_so() {
+        // A URL that names a file: the name means something, and the
+        // duplicate check may warn on it.
+        assert_eq!(
+            url_file_name("https://host/dir/setup.exe"),
+            Some("setup.exe".into())
+        );
+        assert_eq!(
+            url_file_name("https://host/a%20b.zip?token=1"),
+            Some("a b.zip".into())
+        );
+        // A URL that names none. `file_name_from_url` still has to answer
+        // with somewhere to put the bytes, but callers deciding whether a
+        // name is the download's must be able to see that it is invented.
+        assert_eq!(url_file_name("https://host/"), None);
+        assert_eq!(url_file_name("https://host"), None);
+        assert_eq!(url_file_name("https://host/download/?id=7"), None);
+        assert_eq!(file_name_from_url("https://host/"), "index.html");
+        // ...and a page that really is called index.html is not invented.
+        assert_eq!(
+            url_file_name("https://host/index.html"),
+            Some("index.html".into())
+        );
+    }
 
     /// The stamp must survive an ETag. A server sending BOTH headers — GitHub,
     /// S3, most CDNs — is the common case, and reading the collapsed
