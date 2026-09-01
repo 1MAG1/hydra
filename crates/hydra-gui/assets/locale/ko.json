@@ -388,7 +388,6 @@
   "FFmpeg setup guide": "FFmpeg 설정 가이드",
   "Reading playlist...": "재생목록을 읽는 중...",
   "Remuxing...": "리먹싱 중...",
-  "FFmpeg installed!": "FFmpeg이 설치되었습니다!",
   "Installed": "설치됨",
   "Not found on PATH. HLS and DASH still download, but MPEG-TS is saved as .ts instead of .mp4, and DASH audio stays in its own file.": "PATH에 없습니다. HLS와 DASH는 여전히 다운로드하지만, MPEG-TS는 .mp4 대신 .ts로 저장되며 DASH 오디오는 별도의 파일에 남아 있습니다.",
   "Reading the stream's quality list...": "스트림의 품질 목록을 읽는 중...",
@@ -407,5 +406,8 @@
   "Combining video and audio...": "동영상과 오디오 결합...",
   "Recorded": "녹화됨",
   "Close to system tray": "시스템 트레이로 닫기",
-  "Closing the main window leaves Hydra running in the tray, where queues and transfers carry on; open it again from the tray icon. Off: closing the window exits Hydra.": "기본 창을 닫아도 Hydra는 시스템 트레이에서 계속 실행되며, 대기열과 전송 작업도 계속 진행됩니다. 시스템 트레이 아이콘을 클릭하여 다시 창을 열 수 있습니다. 종료: 창을 닫으면 Hydra가 종료됩니다."
+  "Closing the main window leaves Hydra running in the tray, where queues and transfers carry on; open it again from the tray icon. Off: closing the window exits Hydra.": "기본 창을 닫아도 Hydra는 시스템 트레이에서 계속 실행되며, 대기열과 전송 작업도 계속 진행됩니다. 시스템 트레이 아이콘을 클릭하여 다시 창을 열 수 있습니다. 종료: 창을 닫으면 Hydra가 종료됩니다.",
+  "Copy path": "경로 복사",
+  "Not found": "찾을 수 없음",
+  "MPEG-TS is remuxed to MP4, and DASH video and audio are merged into one file.": "MPEG-TS는 MP4로 리먹싱되고, DASH의 비디오와 오디오는 하나의 파일로 병합됩니다."
 }
