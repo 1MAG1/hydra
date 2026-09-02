@@ -44,14 +44,7 @@ pub fn probe(download_dir: &str, autostart_expected: bool) -> PermStatus {
     let full_disk = None;
 
     #[cfg(target_os = "macos")]
-    let login_item = autostart_expected.then(|| {
-        dirs::home_dir()
-            .map(|h| {
-                h.join("Library/LaunchAgents/io.github.ja7ad.hydra.plist")
-                    .exists()
-            })
-            .unwrap_or(false)
-    });
+    let login_item = autostart_expected.then(crate::autostart::is_registered);
     #[cfg(not(target_os = "macos"))]
     let login_item = {
         let _ = autostart_expected;

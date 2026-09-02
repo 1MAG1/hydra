@@ -23,9 +23,54 @@ fn exe() -> Option<String> {
     if let Some(img) = hya_updater::appimage_path() {
         return Some(img.to_string_lossy().into_owned());
     }
-    std::env::current_exe()
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
+    let cur = std::env::current_exe().ok()?;
+    #[cfg(target_os = "macos")]
+    let cur = stable_bundle_exe(cur)?;
+    Some(cur.to_string_lossy().into_owned())
+}
+
+/// A quarantined app's first launch runs from a Gatekeeper App Translocation
+/// mount, and launching straight out of the DMG runs from /Volumes — both
+/// paths are gone by the next login, so a login item recorded at that first
+/// launch never fires. Map such a path onto the same bundle under
+/// /Applications or ~/Applications; if no installed copy exists, report
+/// nothing rather than write a dead entry.
+#[cfg(target_os = "macos")]
+fn stable_bundle_exe(cur: PathBuf) -> Option<PathBuf> {
+    let text = cur.to_string_lossy();
+    let transient = text.contains("/AppTranslocation/")
+        || text.starts_with("/Volumes/")
+        || text.starts_with("/private/var/folders/")
+        || text.starts_with("/var/folders/");
+    if !transient {
+        return Some(cur);
+    }
+    let comps: Vec<_> = cur.components().collect();
+    let app_idx = comps
+        .iter()
+        .rposition(|c| c.as_os_str().to_string_lossy().ends_with(".app"))?;
+    let bundle_name = comps[app_idx].as_os_str().to_owned();
+    let inner: PathBuf = comps[app_idx + 1..].iter().collect();
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join("Applications"));
+    }
+    for root in roots {
+        let candidate = root.join(&bundle_name).join(&inner);
+        if candidate.is_file() {
+            crate::log::info(&format!(
+                "login item: running from transient {} — using installed {}",
+                cur.display(),
+                candidate.display()
+            ));
+            return Some(candidate);
+        }
+    }
+    crate::log::warn(&format!(
+        "login item: running from transient {} and no installed copy found; entry left as is",
+        cur.display()
+    ));
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -79,8 +124,13 @@ pub fn apply(enabled: bool, minimized: bool) {
     } else {
         format!("\"{exe}\"")
     };
+    if run.get_value::<String, _>(RUN_VALUE).ok().as_deref() == Some(cmd.as_str()) {
+        return;
+    }
     match run.set_value(RUN_VALUE, &cmd) {
-        Ok(()) => crate::log::info(&format!("login item written: HKCU\\{RUN_KEY}\\{RUN_VALUE}")),
+        Ok(()) => crate::log::info(&format!(
+            "login item written: HKCU\\{RUN_KEY}\\{RUN_VALUE} = {cmd}"
+        )),
         Err(e) => crate::log::warn(&format!("login item write failed: {e}")),
     }
 }
@@ -147,11 +197,56 @@ pub fn apply(enabled: bool, minimized: bool) {
             "[Desktop Entry]\nType=Application\nName=Hydra Download Manager\nExec=\"{exe}\" {arg}\nX-GNOME-Autostart-enabled=true\n"
         );
     }
+    // Already correct: leave it alone (a rewrite would only bump the
+    // Background Task Management generation on macOS for no change).
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(content.as_str()) {
+        return;
+    }
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     match std::fs::write(&path, content) {
-        Ok(()) => crate::log::info(&format!("login item written: {}", path.display())),
+        Ok(()) => crate::log::info(&format!(
+            "login item written: {} -> {exe}",
+            path.display()
+        )),
         Err(e) => crate::log::warn(&format!("login item write failed: {e}")),
+    }
+}
+
+/// Whether the login item is registered and points at an executable that
+/// still exists. Used by the permissions guide.
+#[cfg(target_os = "macos")]
+pub fn is_registered() -> bool {
+    let Some(path) = entry_path() else { return false };
+    let Ok(plist) = std::fs::read_to_string(&path) else { return false };
+    // First <string> inside ProgramArguments is the executable.
+    let Some(start) = plist.find("<array>") else { return false };
+    let rest = &plist[start..];
+    let Some(s) = rest.find("<string>") else { return false };
+    let rest = &rest[s + "<string>".len()..];
+    let Some(e) = rest.find("</string>") else { return false };
+    std::path::Path::new(&rest[..e]).is_file()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::stable_bundle_exe;
+    use std::path::PathBuf;
+
+    #[test]
+    fn installed_paths_pass_through() {
+        let p = PathBuf::from("/Applications/Hydra Download Manager.app/Contents/MacOS/Hydra Download Manager");
+        assert_eq!(stable_bundle_exe(p.clone()), Some(p));
+    }
+
+    #[test]
+    fn transient_paths_without_an_installed_copy_are_rejected() {
+        for p in [
+            "/private/var/folders/ab/xyz/T/AppTranslocation/1234/d/NoSuchHydra.app/Contents/MacOS/NoSuchHydra",
+            "/Volumes/Hydra/NoSuchHydra.app/Contents/MacOS/NoSuchHydra",
+        ] {
+            assert_eq!(stable_bundle_exe(PathBuf::from(p)), None, "{p}");
+        }
     }
 }
