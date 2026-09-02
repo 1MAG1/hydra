@@ -20,8 +20,14 @@ hya-stream = { workspace = true }
 # Startup update check + the Update-Now download/extract/finisher pipeline.
 hya-updater = { workspace = true }
 # WebSocket handshake for the browser-extension bridge (extbus): the accept
-# key is base64(SHA-1(key+GUID)) per RFC 6455.
+# key is base64(SHA-1(key+GUID)) per RFC 6455 — and, separately, verifying a
+# Metalink digest, since SHA-1 is what most Metalink 3.0 documents publish.
 sha1 = { workspace = true }
+# The other digests a Metalink may publish. Verifying only the ones this build
+# happens to find convenient would silently skip the check on the documents
+# most likely to need it.
+sha2 = { workspace = true }
+md-5 = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
