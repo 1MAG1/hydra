@@ -546,7 +546,7 @@ impl Default for SchState {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BatchState {
     pub text: iced::widget::text_editor::Content,
     pub checks: Vec<(String, bool)>,
@@ -580,6 +580,134 @@ pub struct BatchState {
     /// network or add the document itself as a 6 KB file named after the object
     /// the user wanted.
     pub metalinks: std::collections::HashMap<String, crate::engine::MetalinkProbe>,
+    /// Column the table is ordered by and whether ascending; `None` keeps
+    /// the pasted order.
+    pub sort: Option<(BatchSortKey, bool)>,
+    /// Drop links that resolve to web pages (`.html`, `.php`, …): what a
+    /// page-wide "download all links" mostly turns up.
+    pub hide_html: bool,
+    /// Show each distinct URL once, however often it was pasted.
+    pub hide_dups: bool,
+}
+
+impl Default for BatchState {
+    fn default() -> Self {
+        Self {
+            text: Default::default(),
+            checks: Vec::new(),
+            sizes: Default::default(),
+            names: Default::default(),
+            parsed: false,
+            to_category: false,
+            category: String::new(),
+            to_dir: false,
+            dir: String::new(),
+            stream_quality: BatchQuality::default(),
+            stream_container: String::new(),
+            metalinks: Default::default(),
+            sort: None,
+            hide_html: false,
+            // A duplicate never adds a second download, so hiding it is the
+            // sensible default — the same one IDM ships with.
+            hide_dups: true,
+        }
+    }
+}
+
+/// A sortable column of the batch dialog's table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchSortKey {
+    Name,
+    Kind,
+    Size,
+    Source,
+    Dest,
+}
+
+/// One line of the batch dialog's table, resolved: name and size from the
+/// probe where it has answered, destination from the Save To choice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchRow {
+    /// Index into `BatchState::checks` — the row's identity across filtering
+    /// and sorting, so a checkbox toggles the link it shows.
+    pub idx: usize,
+    pub url: String,
+    pub name: String,
+    pub kind: String,
+    pub size: Option<u64>,
+    pub save_to: String,
+    pub blocked: bool,
+    pub checked: bool,
+}
+
+/// The batch table as shown: hidden duplicates and web pages left out, then
+/// ordered by the chosen column. `save_to` maps a resolved file name to the
+/// folder it would land in; `blocked` says whether a URL's host is on the
+/// "don't start automatically" list. Both are passed in so the view, the OK
+/// handler and the tests all see the same rows.
+pub fn batch_rows(
+    st: &BatchState,
+    save_to: impl Fn(&str) -> String,
+    blocked: impl Fn(&str) -> bool,
+) -> Vec<BatchRow> {
+    let mut seen = std::collections::HashSet::new();
+    let mut rows: Vec<BatchRow> = st
+        .checks
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (url, on))| {
+            if st.hide_dups && !seen.insert(url.as_str()) {
+                return None;
+            }
+            // The probe's answer where there is one: a redirector link
+            // (`href.li/?<url>`) has no filename of its own and would
+            // otherwise list — and save — as `index.html`.
+            let name = st
+                .names
+                .get(url)
+                .cloned()
+                .unwrap_or_else(|| engine::file_name_from_url(url));
+            if st.hide_html && crate::ext_info::is_web_page(&name) {
+                return None;
+            }
+            let kind = if st.metalinks.contains_key(url) {
+                i18n::tr("Metalink mirror list")
+            } else {
+                crate::ext_info::kind_for_name(&name)
+            };
+            Some(BatchRow {
+                idx,
+                save_to: save_to(&name),
+                blocked: blocked(url),
+                size: st.sizes.get(url).copied(),
+                url: url.clone(),
+                name,
+                kind,
+                checked: *on,
+            })
+        })
+        .collect();
+    if let Some((key, asc)) = st.sort {
+        // Stable, so ties keep the pasted order. Unknown sizes stay at the
+        // bottom whichever way the column is sorted — "biggest first" must
+        // not put the files nobody has measured yet on top.
+        rows.sort_by(|a, b| {
+            let flip = |o: std::cmp::Ordering| if asc { o } else { o.reverse() };
+            match key {
+                BatchSortKey::Name => flip(a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                BatchSortKey::Kind => flip(a.kind.cmp(&b.kind)),
+                BatchSortKey::Size => match (a.size, b.size) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (Some(x), Some(y)) => flip(x.cmp(&y)),
+                },
+                BatchSortKey::Source => flip(a.url.cmp(&b.url)),
+                BatchSortKey::Dest => flip(a.save_to.cmp(&b.save_to)),
+            }
+        });
+    }
+    rows
 }
 
 /// The rendition a batch asks for, as a preference rather than an exact
@@ -843,6 +971,10 @@ pub enum Message {
     BatchOk,
     BatchStreamQuality(BatchQuality),
     BatchStreamContainer(String),
+    BatchSort(BatchSortKey),
+    BatchHideHtml(bool),
+    BatchHideDups(bool),
+    BatchBrowseDir,
     // generic dialog buttons
     ConfirmYes,
     ConfirmRemoveFile(bool),
@@ -1101,6 +1233,29 @@ impl App {
 
     pub fn selected_item(&self) -> Option<&DownloadItem> {
         self.selected.first().and_then(|id| self.item(*id))
+    }
+
+    /// The batch dialog's table, filtered and ordered as shown.
+    pub fn batch_rows(&self) -> Vec<BatchRow> {
+        let st = &self.batch;
+        batch_rows(
+            st,
+            |name| {
+                if st.to_dir {
+                    st.dir.clone()
+                } else {
+                    let cat = if st.to_category {
+                        Some(st.category.clone())
+                    } else {
+                        categorize(name, &self.cfg.categories)
+                    };
+                    self.cat_dir(cat.as_deref())
+                        .or_else(|| self.cat_dir(None))
+                        .unwrap_or_default()
+                }
+            },
+            |url| site_blocked(url, &self.cfg.settings.dont_start_sites),
+        )
     }
 
     /// Folder a download filed under `cat` saves into, honouring Options >
@@ -4813,8 +4968,13 @@ impl App {
             }
             Message::BatchCheckAll(b) => {
                 self.parse_batch();
-                for c in &mut self.batch.checks {
-                    c.1 = b;
+                // Only the rows on screen: "Check All" with web pages hidden
+                // must not quietly opt the hidden pages in.
+                let shown: Vec<usize> = self.batch_rows().iter().map(|r| r.idx).collect();
+                for i in shown {
+                    if let Some(c) = self.batch.checks.get_mut(i) {
+                        c.1 = b;
+                    }
                 }
                 Task::none()
             }
@@ -4839,14 +4999,41 @@ impl App {
                 self.batch.stream_container = c;
                 Task::none()
             }
+            Message::BatchSort(k) => {
+                // Same column again flips the direction, like the main list.
+                self.batch.sort = Some(match self.batch.sort {
+                    Some((cur, asc)) if cur == k => (k, !asc),
+                    _ => (k, true),
+                });
+                Task::none()
+            }
+            Message::BatchHideHtml(b) => {
+                self.batch.hide_html = b;
+                Task::none()
+            }
+            Message::BatchHideDups(b) => {
+                self.batch.hide_dups = b;
+                Task::none()
+            }
+            Message::BatchBrowseDir => {
+                // Synchronous picker on purpose: AppKit dialogs must run on
+                // the main thread — the async variant on a worker hangs.
+                if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                    self.batch.dir = p.to_string_lossy().into_owned();
+                    self.batch.to_dir = true;
+                    self.batch.to_category = false;
+                }
+                Task::none()
+            }
             Message::BatchOk => {
                 self.parse_batch();
+                // Only what the table shows: a hidden duplicate or a hidden
+                // web page is not added however its checkbox was left.
                 let checked: Vec<String> = self
-                    .batch
-                    .checks
-                    .iter()
-                    .filter(|(_, on)| *on)
-                    .map(|(u, _)| u.clone())
+                    .batch_rows()
+                    .into_iter()
+                    .filter(|r| r.checked)
+                    .map(|r| r.url)
                     .collect();
                 if checked.is_empty() {
                     self.confirm = Some(ConfirmKind::NoneChecked);
@@ -6325,6 +6512,63 @@ pub fn combo_string(key: &iced::keyboard::Key, mods: iced::keyboard::Modifiers) 
 mod tests {
     use super::*;
     use crate::model::Schedule;
+
+    fn batch_with(urls: &[&str]) -> BatchState {
+        BatchState {
+            checks: urls.iter().map(|u| (u.to_string(), true)).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn shown(st: &BatchState) -> Vec<usize> {
+        batch_rows(st, |_| "d".into(), |_| false)
+            .iter()
+            .map(|r| r.idx)
+            .collect()
+    }
+
+    #[test]
+    fn batch_rows_hide_duplicates_and_web_pages() {
+        let mut st = batch_with(&[
+            "https://a.b/x.zip",
+            "https://a.b/index.html",
+            "https://a.b/x.zip",
+            "https://a.b/y.iso",
+        ]);
+        // Duplicates hidden by default; the first copy stays.
+        assert_eq!(shown(&st), vec![0, 1, 3]);
+        st.hide_html = true;
+        assert_eq!(shown(&st), vec![0, 3]);
+        st.hide_dups = false;
+        st.hide_html = false;
+        assert_eq!(shown(&st), vec![0, 1, 2, 3]);
+        // A probed name decides, not the pasted URL's own tail.
+        st.hide_html = true;
+        st.names
+            .insert("https://a.b/y.iso".into(), "page.php".into());
+        assert_eq!(shown(&st), vec![0, 2]);
+    }
+
+    #[test]
+    fn batch_rows_sort_keeps_unknown_sizes_last() {
+        let mut st = batch_with(&[
+            "https://a.b/big.zip",
+            "https://a.b/none.zip",
+            "https://a.b/small.zip",
+        ]);
+        st.sizes.insert("https://a.b/big.zip".into(), 100);
+        st.sizes.insert("https://a.b/small.zip".into(), 1);
+        st.sort = Some((BatchSortKey::Size, true));
+        assert_eq!(shown(&st), vec![2, 0, 1]);
+        st.sort = Some((BatchSortKey::Size, false));
+        assert_eq!(shown(&st), vec![0, 2, 1]);
+        st.sort = Some((BatchSortKey::Name, false));
+        assert_eq!(shown(&st), vec![2, 1, 0]);
+        let rows = batch_rows(&st, |n| format!("/dl/{n}"), |u| u.contains("none"));
+        assert_eq!(rows[1].save_to, "/dl/none.zip");
+        assert!(rows[1].blocked && !rows[0].blocked);
+        assert_eq!(rows[0].kind, "ZIP archive");
+    }
 
     fn item(id: DlId, dir: &str, name: &str, queue: Option<&str>, state: DlState) -> DownloadItem {
         DownloadItem {

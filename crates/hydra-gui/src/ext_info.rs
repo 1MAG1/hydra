@@ -94,6 +94,13 @@ fn describe(ext: &str) -> Option<&'static str> {
         "otf" => "OpenType font",
         "woff" | "woff2" => "Web font",
         "torrent" => "BitTorrent metadata file",
+        // Web pages, stream manifests, mirror lists — what the batch
+        // dialog's File Type column names, and what "Hide HTML files" hides.
+        "html" | "htm" | "xhtml" | "shtml" => "HTML web page",
+        "php" | "asp" | "aspx" | "jsp" => "Server web page",
+        "m3u8" => "HLS stream manifest",
+        "mpd" => "DASH stream manifest",
+        "meta4" | "metalink" => "Metalink mirror list",
         _ => return None,
     })
 }
@@ -149,6 +156,29 @@ pub fn hint_for_url(url: &str) -> Option<String> {
     Some(format!("{} — {}", ext.to_ascii_uppercase(), tr(desc)))
 }
 
+/// The batch dialog's File Type column: `ZIP archive` for a known
+/// extension, `XYZ file` for an unknown one, plain `File` when the name has
+/// no extension at all. Version-looking tails (`tool-v1.2.3`) count as no
+/// extension rather than a `3 file`.
+pub fn kind_for_name(name: &str) -> String {
+    match url_ext(name).filter(|e| !e.chars().all(|c| c.is_ascii_digit())) {
+        Some(ext) => match describe(&ext) {
+            Some(d) => tr(d),
+            None => format!("{} {}", ext.to_ascii_uppercase(), tr("file")),
+        },
+        None => tr("File"),
+    }
+}
+
+/// Whether a name is a web page rather than a file worth downloading — the
+/// batch dialog's "Hide HTML files" filter.
+pub fn is_web_page(name: &str) -> bool {
+    matches!(
+        url_ext(name).as_deref(),
+        Some("html" | "htm" | "xhtml" | "shtml" | "php" | "asp" | "aspx" | "jsp")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +194,18 @@ mod tests {
             Some("tar.gz".into())
         );
         assert_eq!(url_ext("https://x.y/archive.ZIP"), Some("zip".into()));
+    }
+
+    #[test]
+    fn kinds_and_web_pages() {
+        assert_eq!(kind_for_name("setup.tar.gz"), "gzip-compressed tar archive");
+        assert_eq!(kind_for_name("weird.xyz"), "XYZ file");
+        assert_eq!(kind_for_name("meilisearch-linux-aarch64"), "File");
+        assert_eq!(kind_for_name("tool-v1.2.3"), "File");
+        assert!(is_web_page("index.html"));
+        assert!(is_web_page("download.php"));
+        assert!(!is_web_page("archive.zip"));
+        assert!(!is_web_page("readme"));
     }
 
     #[test]
