@@ -25,6 +25,16 @@
 ;   * Browser extensions      - packed .zip/.xpi + unpacked chrome/ and
 ;                               firefox/, with INSTALL.txt instructions
 ;
+; Silent install (Chocolatey, winget, scripted deployments):
+;
+;   hydra-<ver>-windows-x64-setup.exe /S [/NODESKTOP] [/D=C:\path]
+;
+; Every section that is selected by default runs, so a silent install gets
+; the same Start-menu AND desktop shortcuts as clicking through the wizard;
+; /NODESKTOP drops the desktop shortcut. Chocolatey runs the installer
+; elevated, and a per-user install lands in the profile of the account that
+; elevated - the shortcuts (and the app) show up for that account.
+;
 ; Windows has no NativeMessagingHosts directory: each browser reads a
 ; registry value pointing at a manifest file. Chromium browsers key it by
 ; extension origin, Firefox by add-on id, so two manifests are written. The
@@ -109,6 +119,7 @@ VIAddVersionKey "LegalCopyright"  "(C) 2026 ${PUBLISHER}. GPL-3.0-or-later."
 !include "FileFunc.nsh"
 !include "WinMessages.nsh"
 !include "StrFunc.nsh"
+!include "Sections.nsh"
 ${Using:StrFunc} StrRep
 ${Using:StrFunc} StrStr
 ${Using:StrFunc} UnStrRep
@@ -339,7 +350,12 @@ Section "Logo & Branding Assets" SEC_LOGO
   File "..\..\docs\logo.png"
 SectionEnd
 
-Section /o "Desktop Shortcut" SEC_DESKTOP
+; Selected by default (no /o): a silent /S install takes the default
+; selection and never shows the Components page, so an opt-in section would
+; be silently skipped - which is exactly how Chocolatey installs ended up
+; without a desktop shortcut. Wizard users untick it; scripted installs
+; pass /NODESKTOP.
+Section "Desktop Shortcut" SEC_DESKTOP
   CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\hydra-gui.exe"
 SectionEnd
 
@@ -354,6 +370,28 @@ SectionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_LOGO}    "Hydra logo image installed alongside the application."
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_DESKTOP} "Shortcut to Hydra Download Manager on the desktop."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
+
+;--------------------------------
+; Callbacks
+
+Function .onInit
+  ; /NODESKTOP: opt out of the desktop shortcut from the command line
+  ; (Chocolatey: --install-arguments="'/NODESKTOP'", appended to /S).
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} $0 "/NODESKTOP" $1
+  IfErrors no_desktop_done      ; switch absent -> keep the default selection
+  !insertmacro UnselectSection ${SEC_DESKTOP}
+no_desktop_done:
+FunctionEnd
+
+Function .onInstSuccess
+  ; Tell Explorer the shell items changed so the new Start-menu entry and
+  ; desktop icon appear at once. Explorer usually notices new .lnk files on
+  ; its own, but a silent install run from a background process (Chocolatey)
+  ; can leave the desktop stale until the next refresh.
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+FunctionEnd
 
 ;--------------------------------
 ; Uninstaller
