@@ -8,7 +8,9 @@
 //! - Pointers passed into hydra functions are borrowed only for the duration of the call.
 
 use crate::abi::{
-    hydra_job_id_array_t, hydra_job_id_t, hydra_source_array_t, hydra_source_info_t, hydra_string_t,
+    hydra_job_id_array_t, hydra_job_id_t, hydra_metalink_file_array_t, hydra_metalink_file_t,
+    hydra_metalink_url_array_t, hydra_metalink_url_t, hydra_source_array_t, hydra_source_info_t,
+    hydra_string_t,
 };
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -128,4 +130,58 @@ pub(crate) fn ids_out(v: Vec<hydra_job_id_t>) -> hydra_job_id_array_t {
 pub(crate) unsafe fn ids_drop(a: hydra_job_id_array_t) {
     // SAFETY: array allocation was created by `vec_out`.
     unsafe { vec_drop(a.items, a.len) }
+}
+
+/// Exports a list of Metalink file entries to an ABI-compatible array.
+pub(crate) fn metalink_files_out(v: Vec<hydra_metalink_file_t>) -> hydra_metalink_file_array_t {
+    let (items, len) = vec_out(v);
+    hydra_metalink_file_array_t { items, len }
+}
+
+/// Frees an owned file array and its internal string allocations.
+///
+/// # Safety
+/// `a` must be an array created by `metalink_files_out`.
+pub(crate) unsafe fn metalink_files_drop(a: hydra_metalink_file_array_t) {
+    if a.items.is_null() || a.len == 0 {
+        return;
+    }
+    // SAFETY: reconstructs the boxed slice from original pointer and length.
+    let items = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(a.items, a.len)) };
+    for it in items.iter() {
+        for s in [&it.name, &it.digest, &it.version] {
+            string_drop(hydra_string_t {
+                data: s.data,
+                len: s.len,
+            });
+        }
+    }
+    drop(items);
+}
+
+/// Exports a list of Metalink mirrors to an ABI-compatible array.
+pub(crate) fn metalink_urls_out(v: Vec<hydra_metalink_url_t>) -> hydra_metalink_url_array_t {
+    let (items, len) = vec_out(v);
+    hydra_metalink_url_array_t { items, len }
+}
+
+/// Frees an owned mirror array and its internal string allocations.
+///
+/// # Safety
+/// `a` must be an array created by `metalink_urls_out`.
+pub(crate) unsafe fn metalink_urls_drop(a: hydra_metalink_url_array_t) {
+    if a.items.is_null() || a.len == 0 {
+        return;
+    }
+    // SAFETY: reconstructs the boxed slice from original pointer and length.
+    let items = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(a.items, a.len)) };
+    for it in items.iter() {
+        for s in [&it.url, &it.location, &it.protocol] {
+            string_drop(hydra_string_t {
+                data: s.data,
+                len: s.len,
+            });
+        }
+    }
+    drop(items);
 }

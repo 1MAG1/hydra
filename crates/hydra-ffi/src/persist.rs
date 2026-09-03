@@ -59,6 +59,25 @@ struct JobRecord {
     resume: bool,
     #[serde(default = "yes")]
     adaptive: bool,
+    /// Mirror ranking as `(priority, max_connections)`, index-aligned with
+    /// `urls`. Empty for a job that never read a mirror list.
+    ///
+    /// Persisted because a restored job that lost its ranking would open the
+    /// same mirrors in a different order and lose its reserve bench — a
+    /// difference invisible until the mirror that failed before fails again.
+    #[serde(default)]
+    source_plans: Vec<(u32, u32)>,
+    /// The size a Metalink document attested. Without it a restored job falls
+    /// back to the pairwise validator gate, which a real mirror list cannot
+    /// satisfy, so it would resume from one source instead of four.
+    #[serde(default)]
+    attested_size: Option<u64>,
+    /// The document's `<pieces>` manifest, in its on-disk JSON form.
+    #[serde(default)]
+    pieces: Option<String>,
+    /// Where the attestation came from, for the log.
+    #[serde(default)]
+    attested_by: Option<String>,
 
     state: u32,
     #[serde(default)]
@@ -182,6 +201,25 @@ pub(crate) fn save(engine: &Arc<Engine>) -> Result<(), Detail> {
                     max_bytes_per_second: job.cfg.max_bytes_per_second,
                     resume: job.cfg.resume,
                     adaptive: job.cfg.adaptive,
+                    source_plans: job
+                        .cfg
+                        .source_plans
+                        .iter()
+                        .map(|p| (p.priority, p.max_connections.unwrap_or(0).min(64) as u32))
+                        .collect(),
+                    attested_size: job.cfg.attested_size,
+                    // Bounded: the state file is rewritten on every autosave,
+                    // and the parser admits piece lists that serialize to tens
+                    // of megabytes. Past the cap the grid is dropped from the
+                    // RECORD only — the running job keeps verifying with it,
+                    // and a restored job falls back to the whole-file checksum.
+                    pieces: job
+                        .cfg
+                        .pieces
+                        .as_ref()
+                        .map(|m| m.to_json())
+                        .filter(|j| j.len() <= 4 << 20),
+                    attested_by: job.cfg.attested_by.clone(),
                     // A job that was executing when the process stopped is recorded
                     // as paused. It is the truth about the file on disk — bytes are
                     // there, nothing is moving — and it is the state from which
@@ -330,6 +368,24 @@ pub(crate) fn restore(engine: &Arc<Engine>) -> Result<usize, Detail> {
             max_bytes_per_second: r.max_bytes_per_second,
             resume: r.resume,
             adaptive: r.adaptive,
+            source_plans: r
+                .source_plans
+                .iter()
+                .map(|&(priority, cap)| hya_core::SourcePlan {
+                    priority,
+                    max_connections: (cap > 0).then_some(cap as usize),
+                })
+                .collect(),
+            attested_size: r.attested_size,
+            // A manifest that no longer parses is dropped rather than failing
+            // the restore: the object is still fetchable and still checked
+            // against its whole-file digest, and refusing to restore the job
+            // would lose the range map as well.
+            pieces: r
+                .pieces
+                .as_deref()
+                .and_then(|j| hya_net::manifest::Manifest::parse(j).ok()),
+            attested_by: r.attested_by,
         };
         let job = engine.insert_job_with_id(
             r.id,

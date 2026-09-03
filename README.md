@@ -39,6 +39,7 @@
 - [Usage](#usage)
   - [Basic Download](#basic-download)
   - [Multi-Connection & Mirror Sources](#multi-connection--mirror-sources)
+  - [Metalink](#metalink)
   - [CLI Compatibility (`wget` / `curl` Mode)](#cli-compatibility-wget--curl-mode)
   - [Interactive Queue Manager (TUI)](#interactive-queue-manager-tui)
   - [Remote Checksum Lookup & Verification](#remote-checksum-lookup--verification)
@@ -401,6 +402,83 @@ hydra -x 8 https://example.com/largefile.iso
 # Fetch across multiple mirror origins serving identical files
 hydra https://mirror1.example.org/file.iso https://mirror2.example.org/file.iso
 ```
+
+### Metalink
+
+A Metalink document supplies the three things a bare URL cannot: **every mirror
+that holds the object**, its **exact size**, and **what it must hash to**. HYDRA
+reads both dialects — Metalink 3.0 (`.metalink`, what mirrormanager and most
+distribution redirectors emit) and Metalink 4 / RFC 5854 (`.meta4`) — and needs
+no flag to do it:
+
+```bash
+# A document on disk, whatever it is called: the content is read.
+hydra ./Fedora-Workstation.metalink
+
+# A redirector that serves one. Detected from its Content-Type on the probe
+# that was going to happen anyway.
+hydra "https://mirrors.fedoraproject.org/metalink?repo=fedora-40&arch=x86_64"
+
+# Or name it outright, when a URL reveals nothing about itself.
+hydra --metalink https://example.org/big.iso.meta4
+```
+
+What that buys, over the same object fetched from one URL:
+
+- **Mirrors that can actually be assembled together.** Splicing ranges across
+  hosts is normally gated on every source agreeing about a strong validator —
+  and independent mirror operators cannot share an `ETag`, so that gate keeps
+  exactly one source out of a nineteen-mirror list. A document states the size
+  and a content digest from *outside* the mirrors, so agreement is established
+  against the document instead. Stronger, and satisfiable.
+- **A reserve bench.** Politeness authorises a handful of connections; the rest
+  of the list is held back. When a mirror dies or goes silent mid-transfer, its
+  connections are re-pointed at a reserve **in place** — the socket count stays
+  what politeness allowed, and no range is stranded.
+- **Localised repair.** Where the document publishes `<pieces>`, each chunk is
+  verified as the file lands and a bad one costs a single chunk refetched from a
+  *different* mirror, not a whole re-download.
+
+Read one without fetching anything, including what HYDRA would do with it:
+
+```bash
+hydra metalink ./Fedora-Workstation.metalink
+hydra metalink --json https://example.org/big.iso.meta4
+```
+
+Narrow the choice:
+
+```bash
+# Prefer mirrors near you; the rest stay as reserves.
+hydra --metalink-location de,nl,fr ./mirrors.meta4
+
+# One entry from a document that describes several.
+hydra --metalink-file netinst.iso ./mirrors.meta4
+
+# Only entries for one platform, and only one protocol.
+hydra --metalink-os linux --metalink-preferred-protocol https \
+      --metalink-enable-unique-protocol ./mirrors.meta4
+```
+
+HTTP(S) mirrors are used first and `ftp://` mirrors wait behind them as
+fallbacks, whatever the publisher's ranking says — ranges can be spliced and
+chunks repaired over HTTP, while FTP streams from a single connection
+(`--metalink-preferred-protocol ftp` restores the old order). Mirrors on schemes
+this build cannot fetch (`rsync://` and friends) are reported
+and skipped rather than attempted; `<metaurl>` indirections such as BitTorrent
+are recorded and not followed; and a `<file name>` that tries to escape the
+output directory is refused outright. A `<signature>` is reported and **not**
+verified — verify it yourself before trusting the digests it covers.
+
+Servers that implement **Metalink over HTTP (RFC 6249)** need no document at
+all: `Link: <...>; rel=duplicate` headers on an ordinary download become
+reserves, discovered on the probe that already happened.
+
+The desktop app reads the same documents: paste a `.meta4`/`.metalink` path or
+URL into **Add URL** and it shows what the list offers — files, sizes, how many
+mirrors are usable, whether per-chunk verification is available — before adding
+one download per entry. `libhydra` exposes it too, through
+`hydra_metalink_parse`/`_open`/`_fetch` and `hydra_job_create_from_metalink`.
 
 ### CLI Compatibility (`wget` / `curl` Mode)
 

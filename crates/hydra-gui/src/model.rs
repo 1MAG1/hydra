@@ -110,6 +110,12 @@ pub struct DownloadItem {
     /// instead of the range scheduler.
     #[serde(default)]
     pub stream: Option<StreamInfo>,
+    /// Set when this item came from a Metalink document. Its presence is what
+    /// gives the transfer a mirror list, a size it can trust, a digest, and —
+    /// where the document published `<pieces>` — per-chunk verification with
+    /// targeted refetch instead of starting over.
+    #[serde(default)]
+    pub metalink: Option<MetalinkInfo>,
     /// The user named this file themselves — in the File Info / Properties
     /// dialog, or by taking the renamed copy the duplicate dialog offered.
     ///
@@ -153,6 +159,67 @@ pub struct StreamInfo {
     /// Stop a live recording after this many seconds and finish the file.
     #[serde(default)]
     pub max_seconds: Option<u64>,
+}
+
+/// One mirror from a Metalink document, as the engine will use it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct MirrorRef {
+    pub url: String,
+    /// Rank after the document's ordering has been normalised: 1 is best,
+    /// always in the RFC 5854 direction whichever dialect it came from.
+    ///
+    /// Metalink 3.0 states preference on a scale that runs the OTHER way
+    /// (0-100, higher better). Storing the document's own number would mean
+    /// every consumer had to remember which dialect it came from, and the one
+    /// that forgot would give most of the work to the mirror the publisher
+    /// ranked last — a transfer that still succeeds, just slower, and
+    /// indistinguishably from bad luck.
+    #[serde(default)]
+    pub priority: u32,
+    /// A ceiling the MIRROR stated for itself. Narrows the user's per-host
+    /// setting; never widens it.
+    #[serde(default)]
+    pub max_connections: Option<usize>,
+}
+
+/// What a Metalink document said about one file.
+///
+/// Persisted with the item for the same reason `held` is: a download resumed
+/// after a restart that had lost its mirror list would fall back to one source
+/// and lose its reserve bench — a difference invisible until the mirror that
+/// failed before fails again.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct MetalinkInfo {
+    /// Every mirror this build can fetch from, best first.
+    #[serde(default)]
+    pub mirrors: Vec<MirrorRef>,
+    /// The size the document stated.
+    ///
+    /// This is what admits a second mirror at all. Agreement between mirrors is
+    /// otherwise established on a strong validator, and independent mirror
+    /// operators running independent web servers cannot share an `ETag` — so
+    /// without a stated size a nineteen-mirror list downloads from one host.
+    #[serde(default)]
+    pub size: Option<u64>,
+    /// The strongest digest the document published, as `algorithm:hex`.
+    #[serde(default)]
+    pub digest: Option<String>,
+    /// The document's `<pieces>` as a chunk manifest, in its on-disk JSON form.
+    ///
+    /// Stored as text rather than a parsed structure so the GUI's state file
+    /// stays independent of `hya-net`'s manifest type: this file is written by
+    /// one version of Hydra and read by the next.
+    #[serde(default)]
+    pub pieces: Option<String>,
+    /// Where the document came from, for the file-info dialog.
+    #[serde(default)]
+    pub origin: String,
+    /// The document carried an OpenPGP `<signature>` over this file.
+    ///
+    /// Recorded and NOT verified. Saying nothing would let a user assume there
+    /// was nothing to check; reporting it as verified would be worse.
+    #[serde(default)]
+    pub signed: bool,
 }
 
 /// How far a live recording has got, as a fraction.

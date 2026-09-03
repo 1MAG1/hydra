@@ -57,6 +57,9 @@ enum hydra_log_level_t.HYDRA_LOG_ERROR 0
 enum hydra_log_level_t.HYDRA_LOG_INFO 2
 enum hydra_log_level_t.HYDRA_LOG_TRACE 4
 enum hydra_log_level_t.HYDRA_LOG_WARN 1
+enum hydra_metalink_version_t.HYDRA_METALINK_UNKNOWN 0
+enum hydra_metalink_version_t.HYDRA_METALINK_V3 3
+enum hydra_metalink_version_t.HYDRA_METALINK_V4 4
 enum hydra_network_policy_t.HYDRA_NETWORK_ANY 0
 enum hydra_network_policy_t.HYDRA_NETWORK_UNMETERED 1
 enum hydra_network_policy_t.HYDRA_NETWORK_WIFI_ONLY 2
@@ -143,6 +146,30 @@ field hydra_job_snapshot_t.progress 16 72
 field hydra_job_snapshot_t.started_at_ms 160 8
 field hydra_job_snapshot_t.state 8 4
 field hydra_job_snapshot_t.url 88 16
+field hydra_metalink_file_array_t.items 0 8
+field hydra_metalink_file_array_t.len 8 8
+field hydra_metalink_file_t.digest 16 16
+field hydra_metalink_file_t.fetchable_count 80 8
+field hydra_metalink_file_t.max_connections 88 4
+field hydra_metalink_file_t.mirror_count 72 8
+field hydra_metalink_file_t.name 0 16
+field hydra_metalink_file_t.name_usable 94 1
+field hydra_metalink_file_t.piece_count 64 8
+field hydra_metalink_file_t.piece_length 56 8
+field hydra_metalink_file_t.pieces_tile 92 1
+field hydra_metalink_file_t.reserved 95 5
+field hydra_metalink_file_t.signed_ 93 1
+field hydra_metalink_file_t.size 48 8
+field hydra_metalink_file_t.version 32 16
+field hydra_metalink_url_array_t.items 0 8
+field hydra_metalink_url_array_t.len 8 8
+field hydra_metalink_url_t.fetchable 56 1
+field hydra_metalink_url_t.location 16 16
+field hydra_metalink_url_t.max_connections 52 4
+field hydra_metalink_url_t.priority 48 4
+field hydra_metalink_url_t.protocol 32 16
+field hydra_metalink_url_t.reserved 57 7
+field hydra_metalink_url_t.url 0 16
 field hydra_metrics_t.bytes_received 0 8
 field hydra_metrics_t.bytes_written 8 8
 field hydra_metrics_t.error_count 32 8
@@ -198,6 +225,10 @@ struct hydra_header_t 16
 struct hydra_job_config_t 160
 struct hydra_job_id_array_t 16
 struct hydra_job_snapshot_t 176
+struct hydra_metalink_file_array_t 16
+struct hydra_metalink_file_t 104
+struct hydra_metalink_url_array_t 16
+struct hydra_metalink_url_t 64
 struct hydra_metrics_t 80
 struct hydra_progress_t 72
 struct hydra_proxy_config_t 32
@@ -229,6 +260,7 @@ symbol hydra_ffi_version_string
 symbol hydra_job_cancel
 symbol hydra_job_config_init
 symbol hydra_job_create
+symbol hydra_job_create_from_metalink
 symbol hydra_job_get_progress
 symbol hydra_job_get_snapshot
 symbol hydra_job_get_sources
@@ -243,6 +275,16 @@ symbol hydra_job_set_output_path
 symbol hydra_job_snapshot_free
 symbol hydra_job_start
 symbol hydra_last_error
+symbol hydra_metalink_fetch
+symbol hydra_metalink_file_array_free
+symbol hydra_metalink_files
+symbol hydra_metalink_find_file
+symbol hydra_metalink_free
+symbol hydra_metalink_mirrors
+symbol hydra_metalink_open
+symbol hydra_metalink_parse
+symbol hydra_metalink_url_array_free
+symbol hydra_metalink_version
 symbol hydra_runtime_policy_init
 symbol hydra_source_array_free
 symbol hydra_string_free

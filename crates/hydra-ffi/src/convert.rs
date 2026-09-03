@@ -359,6 +359,13 @@ pub(crate) unsafe fn job_cfg(
             max_bytes_per_second: c.max_bytes_per_second,
             resume,
             adaptive,
+            // A job built from a plain URL list has no publisher ranking and no
+            // attestation; `hydra_job_create_from_metalink` is what supplies
+            // them. See `crate::metalink`.
+            source_plans: Vec::new(),
+            attested_size: None,
+            pieces: None,
+            attested_by: None,
         },
         output.to_string(),
         Creds { username, password },

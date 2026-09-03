@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "hya-core"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -2054,7 +2054,7 @@ dependencies = [
 
 [[package]]
 name = "hya-ffi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "hya-core",
@@ -2085,6 +2085,7 @@ dependencies = [
  "hya-updater",
  "iced",
  "ksni",
+ "md-5",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "open",
@@ -2095,6 +2096,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "sha2",
  "system_shutdown",
  "tokio",
  "toml",
@@ -2112,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "hya-net"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -2123,6 +2125,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "tokio",
  "tokio-rustls",

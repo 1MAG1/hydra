@@ -41,12 +41,33 @@ impl Trust {
 /// Digest algorithms permitted in a manifest.
 ///
 /// Narrower than [`Algo`] on purpose: CRC32 is an error-detecting code whose
-/// collisions are arithmetic, and a manifest is exactly where that matters.
+/// collisions are arithmetic, and MD5 is broken cheaply enough that a manifest
+/// built on it would license repairs an attacker chooses. A manifest is exactly
+/// where that matters.
+///
+/// # Why SHA-1 is in this list and MD5 is not
+///
+/// Not because SHA-1 is sound — it is not; chosen-prefix collisions against it
+/// are a purchased commodity. It is here because Metalink 3.0 `<pieces>` are
+/// overwhelmingly SHA-1 (the format inherited the choice from BitTorrent), so
+/// refusing it does not make anything safer, it just deletes per-chunk
+/// verification for most real mirror lists and leaves the whole-object SHA-256
+/// as the only check — which localises nothing.
+///
+/// The distinction is drawn where it belongs instead: [`Self::is_collision_resistant`]
+/// is false for SHA-1, and [`ChunkVerifier::new`] refuses to grant
+/// [`Trust::Trusted`] to a manifest built on an algorithm that is not. So SHA-1
+/// pieces can *detect* a bad chunk and drive a refetch from another mirror —
+/// which is what they are for, and what a transmission fault needs — while never
+/// being allowed to name erasure positions for a Reed-Solomon decode, where a
+/// forged position rewrites bytes the attacker chooses.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChunkAlgo {
     Blake3,
     Sha256,
+    Sha512,
+    Sha1,
 }
 
 impl ChunkAlgo {
@@ -54,15 +75,35 @@ impl ChunkAlgo {
         match self {
             ChunkAlgo::Blake3 => "blake3",
             ChunkAlgo::Sha256 => "sha256",
+            ChunkAlgo::Sha512 => "sha512",
+            ChunkAlgo::Sha1 => "sha1",
         }
     }
 
+    /// Is finding two inputs with this digest infeasible?
+    ///
+    /// False for SHA-1. See the type note: this is what keeps a Metalink piece
+    /// list useful for detection without letting it drive a parity repair.
+    pub fn is_collision_resistant(self) -> bool {
+        !matches!(self, ChunkAlgo::Sha1)
+    }
+
     pub fn hash(self, bytes: &[u8]) -> String {
+        use sha2::Digest as _;
         match self {
             ChunkAlgo::Blake3 => blake3::hash(bytes).to_hex().to_string(),
             ChunkAlgo::Sha256 => {
-                use sha2::{Digest as _, Sha256};
-                let mut h = Sha256::new();
+                let mut h = sha2::Sha256::new();
+                h.update(bytes);
+                crate::digest::to_lower_hex(&h.finalize())
+            }
+            ChunkAlgo::Sha512 => {
+                let mut h = sha2::Sha512::new();
+                h.update(bytes);
+                crate::digest::to_lower_hex(&h.finalize())
+            }
+            ChunkAlgo::Sha1 => {
+                let mut h = sha1::Sha1::new();
                 h.update(bytes);
                 crate::digest::to_lower_hex(&h.finalize())
             }
@@ -197,8 +238,26 @@ pub struct ChunkVerifier {
 }
 
 impl ChunkVerifier {
+    /// # Trust is granted by the CALLER and capped by the ALGORITHM
+    ///
+    /// `trust` says where the manifest came from, which is the caller's
+    /// question. Whether that provenance can license a Reed-Solomon repair is
+    /// also a function of the digest itself, and that is not the caller's to
+    /// judge — so a manifest built on an algorithm that is not collision
+    /// resistant is capped at [`Trust::Advertised`] here, however it arrived.
+    ///
+    /// The case this exists for is a Metalink `<pieces type="sha1">` handed over
+    /// as a local file. The file is trusted; SHA-1 is not. Detection and targeted
+    /// refetch still work — that is what piece digests are for — while an
+    /// erasure decode, which trusts its positions absolutely, does not get to
+    /// take them from a digest whose collisions can be purchased.
     pub fn new(manifest: Manifest, trust: Trust) -> Self {
         let n = manifest.chunks.digests.len();
+        let trust = if manifest.chunks.algo.is_collision_resistant() {
+            trust
+        } else {
+            Trust::Advertised
+        };
         ChunkVerifier {
             manifest,
             trust,
@@ -376,8 +435,83 @@ pub fn from_file(
 pub fn algo_for(a: Algo) -> Option<ChunkAlgo> {
     match a {
         Algo::Sha256 => Some(ChunkAlgo::Sha256),
-        _ => None,
+        Algo::Sha512 => Some(ChunkAlgo::Sha512),
+        // Detection only; see the `ChunkAlgo` note on why it is admitted at all.
+        Algo::Sha1 => Some(ChunkAlgo::Sha1),
+        Algo::Md5 | Algo::Crc32 | Algo::Crc32c => None,
     }
+}
+
+/// Build a chunk manifest from a Metalink `<file>` entry.
+///
+/// # Why this conversion is the point of the whole feature
+///
+/// `<pieces>` is a per-chunk digest list published by whoever built the object,
+/// on a host that is usually not one of the mirrors. That is precisely the input
+/// [`ChunkVerifier`] was written for, and it is the difference between "the
+/// download is corrupt, start again" and "chunk 412 is corrupt, refetch 4 MiB
+/// from a different mirror". On a multi-gigabyte image over a flaky mirror set
+/// that is the difference between finishing and not.
+///
+/// The grid comes from the document and is NOT reconciled with
+/// [`DEFAULT_CHUNK`]: a digest is a function of an exact byte span, so the only
+/// grid that can be verified is the one the digests were computed over.
+///
+/// Fails rather than approximates when the document is internally inconsistent —
+/// a piece list that does not tile the stated size describes a different object,
+/// and applying it anyway reports every chunk as corrupt.
+pub fn from_metalink(f: &crate::metalink::MetalinkFile) -> Result<Manifest, String> {
+    let size = f
+        .size
+        .ok_or("the document states no <size>, so its pieces cannot be placed")?;
+    let p = f
+        .pieces
+        .as_ref()
+        .ok_or("the document publishes no <pieces>")?;
+    let algo = algo_for(p.algo).ok_or_else(|| {
+        format!(
+            "<pieces type={:?}> is not an algorithm a manifest may be built on",
+            p.algo.as_str()
+        )
+    })?;
+    if !p.covers(size) {
+        return Err(format!(
+            "the document lists {} pieces of {} bytes, which does not tile a {size}-byte object ({} expected); these pieces describe a different file",
+            p.hashes.len(),
+            p.length,
+            Manifest::chunk_count(size, p.length)
+        ));
+    }
+    // A v3 document numbers its pieces with `piece="N"` and the reader sizes
+    // the grid to the largest index it sees — so a document that SKIPS an index
+    // yields a grid of the right length with empty strings in the holes. An
+    // empty digest matches nothing: every affected chunk would "fail
+    // verification", be refetched, and fail again, reporting mirror corruption
+    // about a malformed document. Refusing here keeps the investigation pointed
+    // at the document, and the whole-file digest still verifies the object.
+    if let Some(gap) = p.hashes.iter().position(String::is_empty) {
+        return Err(format!(
+            "the document numbers its pieces but skips index {gap}; a grid with holes \
+             cannot verify anything"
+        ));
+    }
+    Ok(Manifest {
+        hydra_manifest: FORMAT_VERSION,
+        object: ObjectMeta {
+            size,
+            chunk_size: p.length,
+            digest: f.best_hash().map(|h| h.spec()),
+            // A Metalink says nothing about ETags, and inventing one here would
+            // make `matches_validator` compare a fabricated value.
+            validator: None,
+            url: f.urls.first().map(|u| u.url.clone()),
+        },
+        chunks: ChunkList {
+            algo,
+            digests: p.hashes.clone(),
+        },
+        parity: None,
+    })
 }
 
 #[cfg(test)]
@@ -579,19 +713,128 @@ mod tests {
     }
 
     #[test]
-    fn both_algorithms_produce_stable_hex() {
-        for a in [ChunkAlgo::Blake3, ChunkAlgo::Sha256] {
+    fn every_algorithm_produces_stable_hex_of_its_own_width() {
+        for (a, width) in [
+            (ChunkAlgo::Blake3, 64),
+            (ChunkAlgo::Sha256, 64),
+            (ChunkAlgo::Sha512, 128),
+            (ChunkAlgo::Sha1, 40),
+        ] {
             let h = a.hash(b"hydra");
-            assert_eq!(h.len(), 64, "{} must be 256-bit hex", a.as_str());
+            assert_eq!(h.len(), width, "{} hex width", a.as_str());
             assert_eq!(h, a.hash(b"hydra"), "must be deterministic");
+            assert!(h.bytes().all(|b| b.is_ascii_hexdigit()));
         }
         assert_ne!(ChunkAlgo::Blake3.hash(b"x"), ChunkAlgo::Sha256.hash(b"x"));
+        // The well-known vector, so a wrong wiring of the sha1 crate is caught
+        // here rather than as a chunk mismatch against a real mirror.
+        assert_eq!(
+            ChunkAlgo::Sha1.hash(b"abc"),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
     }
 
     #[test]
-    fn crc_algorithms_are_not_offered_for_manifests() {
+    fn crc_and_md5_are_not_offered_for_manifests() {
         assert!(algo_for(Algo::Crc32).is_none());
+        assert!(algo_for(Algo::Crc32c).is_none());
         assert!(algo_for(Algo::Md5).is_none());
         assert_eq!(algo_for(Algo::Sha256), Some(ChunkAlgo::Sha256));
+        assert_eq!(algo_for(Algo::Sha512), Some(ChunkAlgo::Sha512));
+        assert_eq!(algo_for(Algo::Sha1), Some(ChunkAlgo::Sha1));
+    }
+
+    #[test]
+    fn a_sha1_manifest_can_detect_but_never_drive_a_parity_repair() {
+        // The Metalink 3.0 case: the document is a local file the user handed
+        // over, so its provenance is Trusted, but SHA-1 collisions are a
+        // purchased commodity and an erasure decode trusts its positions
+        // absolutely. Detection and targeted refetch stay; repair does not.
+        let mut m = obj(2, 4, 8);
+        m.chunks.algo = ChunkAlgo::Sha1;
+        m.chunks.digests = vec![ChunkAlgo::Sha1.hash(b"aaaa"), ChunkAlgo::Sha1.hash(b"bbbb")];
+        let v = ChunkVerifier::new(m, Trust::Trusted);
+        assert_eq!(v.trust(), Trust::Advertised);
+        assert!(!v.trust().may_drive_repair());
+
+        // A collision-resistant algorithm keeps the trust it was given.
+        let mut m2 = obj(1, 4, 4);
+        m2.chunks.digests = vec![ChunkAlgo::Blake3.hash(b"aaaa")];
+        assert_eq!(
+            ChunkVerifier::new(m2, Trust::Trusted).trust(),
+            Trust::Trusted
+        );
+    }
+
+    #[test]
+    fn metalink_pieces_become_a_manifest_the_verifier_already_understands() {
+        use crate::metalink;
+        let src = r#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="f">
+            <size>10</size>
+            <hash type="sha-256">d201bd1eeb17086cd3aaf82b156810a5ba3f389e10b4472c9b2c7182f771a9ef</hash>
+            <pieces length="4" type="sha-1">
+              <hash>1111111111111111111111111111111111111111</hash>
+              <hash>2222222222222222222222222222222222222222</hash>
+              <hash>3333333333333333333333333333333333333333</hash>
+            </pieces>
+            <url priority="1">https://a.example/f</url>
+          </file></metalink>"#;
+        let ml = metalink::parse(src).unwrap();
+        let m = from_metalink(&ml.files[0]).unwrap();
+        // The grid is the DOCUMENT's, not DEFAULT_CHUNK: a digest is a function
+        // of an exact span, so any other grid verifies nothing.
+        assert_eq!(m.object.chunk_size, 4);
+        assert_eq!(m.object.size, 10);
+        assert_eq!(m.chunks.algo, ChunkAlgo::Sha1);
+        assert_eq!(m.chunks.digests.len(), 3);
+        assert_eq!(
+            m.object.digest.as_deref(),
+            Some("sha256:d201bd1eeb17086cd3aaf82b156810a5ba3f389e10b4472c9b2c7182f771a9ef")
+        );
+        assert_eq!(m.object.url.as_deref(), Some("https://a.example/f"));
+        // And it satisfies the same structural check a manifest read off disk does.
+        Manifest::parse(&m.to_json()).expect("must round-trip through the on-disk form");
+    }
+
+    #[test]
+    fn a_document_whose_pieces_do_not_tile_its_size_is_refused_with_the_reason() {
+        use crate::metalink;
+        // Reporting "471 chunks are corrupt" about a mismatched document sends
+        // the investigation to the mirrors instead of to the document.
+        let src = r#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="f">
+            <size>100</size>
+            <pieces length="4" type="sha-1">
+              <hash>1111111111111111111111111111111111111111</hash>
+            </pieces></file></metalink>"#;
+        let ml = metalink::parse(src).unwrap();
+        let e = from_metalink(&ml.files[0]).unwrap_err();
+        assert!(e.contains("describe a different file"), "{e}");
+
+        // No pieces, and no size, each say so rather than producing an empty grid.
+        let bare = r#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="f">
+            <size>100</size><url>https://a/f</url></file></metalink>"#;
+        let ml = metalink::parse(bare).unwrap();
+        assert!(from_metalink(&ml.files[0])
+            .unwrap_err()
+            .contains("no <pieces>"));
+    }
+
+    #[test]
+    fn a_v3_piece_grid_with_a_skipped_index_is_refused_not_verified_against() {
+        use crate::metalink;
+        // `piece="0"` and `piece="2"`, nothing at 1: the reader sizes the grid
+        // to fit and index 1 is an empty string. The COUNT is right, so
+        // `covers` alone would admit it — and an empty digest matches nothing,
+        // so every hole would present as a corrupt chunk refetched forever.
+        let src = r#"<metalink version="3.0" xmlns="http://www.metalinker.org/"><files>
+          <file name="f"><size>12</size>
+            <verification><pieces length="4" type="sha1">
+              <hash piece="0">1111111111111111111111111111111111111111</hash>
+              <hash piece="2">3333333333333333333333333333333333333333</hash>
+            </pieces></verification>
+            <resources><url>https://a/f</url></resources></file></files></metalink>"#;
+        let ml = metalink::parse(src).unwrap();
+        let e = from_metalink(&ml.files[0]).unwrap_err();
+        assert!(e.contains("skips index 1"), "{e}");
     }
 }

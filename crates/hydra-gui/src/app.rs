@@ -282,7 +282,50 @@ pub struct AddUrlState {
     /// Minutes to record a live stream for, as typed. Empty means "until I
     /// press Stop".
     pub record_minutes: String,
+    /// What the address turned out to be, when it is a Metalink document.
+    ///
+    /// Read BEFORE the download starts, like a stream manifest and for a
+    /// related reason: a mirror list decides how many files are about to be
+    /// added and what they will be called, and neither is changeable halfway
+    /// through.
+    pub metalink: Option<crate::engine::MetalinkProbe>,
+    /// The address `metalink` describes, so an edited address invalidates it.
+    pub metalink_of: String,
+    pub metalink_probing: bool,
+    pub metalink_error: Option<String>,
 }
+
+/// Height the Add URL dialog must reserve for the mirror-list panel.
+///
+/// A heading row, then one line per file the panel shows, then a "+N" line when
+/// there are more than it shows. Kept as a function of what the panel DRAWS
+/// rather than inlined at the call site because the two have to agree and
+/// nothing at run time notices when they do not: the window simply opens too
+/// short and the OK button is below the bottom edge — which is how the stream
+/// panel shipped a probed manifest whose quality picker could not be reached.
+///
+/// `MAX_ROWS` is the same cap `windows::add_url` draws to.
+fn metalink_panel_height(probing: bool, files: Option<usize>) -> f32 {
+    const HEADING: f32 = 34.0;
+    const ROW: f32 = 24.0;
+    if probing {
+        return 28.0;
+    }
+    match files {
+        None => 0.0,
+        Some(n) => {
+            let rows = n.min(METALINK_PANEL_ROWS) + usize::from(n > METALINK_PANEL_ROWS);
+            HEADING + ROW * rows as f32
+        }
+    }
+}
+
+/// Files the mirror-list panel lists before collapsing into a "+N" line.
+///
+/// One definition, read by both the drawing and the measuring, because a panel
+/// that draws more rows than the window reserved is a dialog whose OK button
+/// cannot be clicked.
+pub const METALINK_PANEL_ROWS: usize = 3;
 
 /// A capture parked behind the duplicate-confirmation dialog.
 #[derive(Clone, Debug)]
@@ -527,6 +570,14 @@ pub struct BatchState {
     pub stream_quality: BatchQuality,
     /// "MP4" or "TS".
     pub stream_container: String,
+    /// Mirror lists among the pasted links, by URL.
+    ///
+    /// A Metalink in a batch is not one download but a list of them, so it is
+    /// read in the background alongside the size probes and expanded when OK is
+    /// pressed. Reading it at OK instead would either block the dialog on the
+    /// network or add the document itself as a 6 KB file named after the object
+    /// the user wanted.
+    pub metalinks: std::collections::HashMap<String, crate::engine::MetalinkProbe>,
 }
 
 /// The rendition a batch asks for, as a preference rather than an exact
@@ -726,6 +777,9 @@ pub enum Message {
     /// The address looks like a manifest; go and read what it offers.
     AddrProbeStream,
     AddrStreamProbed(Box<Result<crate::engine::StreamProbe, String>>),
+    /// The address looks like a Metalink document; go and read what it offers.
+    AddrProbeMetalink,
+    AddrMetalinkProbed(Box<Result<crate::engine::MetalinkProbe, String>>),
     AddrQuality(crate::engine::StreamQuality),
     AddrContainer(String),
     AddrRecordMinutes(String),
@@ -762,6 +816,8 @@ pub enum Message {
     BatchEdit(iced::widget::text_editor::Action),
     BatchLoaded(Option<String>),
     BatchProbed(String, Option<engine::LinkMeta>),
+    /// A pasted link turned out to be a Metalink document.
+    BatchMetalinkProbed(String, Box<Option<engine::MetalinkProbe>>),
     /// A File Info dialog's own probe answered: the real name and size of a
     /// link that is not being downloaded yet.
     InfoProbed(DlId, Option<engine::LinkMeta>),
@@ -1339,6 +1395,10 @@ impl App {
                     Some(_) => 68.0,
                     None => 0.0,
                 };
+                h += metalink_panel_height(
+                    self.add_url.metalink_probing,
+                    self.add_url.metalink.as_ref().map(|m| m.files.len()),
+                );
                 (760.0, h)
             }
             // New-download layout is short; Properties adds status/size/
@@ -1758,6 +1818,18 @@ impl App {
             limit: None,
             adaptive,
             remote_time,
+            // A Metalink item carries its mirrors, its attested size and its
+            // digests into every start — including a resume after a restart,
+            // which is why they are persisted with the item rather than held
+            // only in the dialog that created it.
+            mirrors: d
+                .metalink
+                .as_ref()
+                .map(|m| m.mirrors.clone())
+                .unwrap_or_default(),
+            attested_size: d.metalink.as_ref().and_then(|m| m.size),
+            attested_digest: d.metalink.as_ref().and_then(|m| m.digest.clone()),
+            pieces: d.metalink.as_ref().and_then(|m| m.pieces.clone()),
         };
         let url = d.url.clone();
         let limit = self.effective_limit(self.item(id).unwrap());
@@ -1940,10 +2012,99 @@ impl App {
             shutdown_after: false,
             shutdown_action: PowerAction::default(),
             stream: None,
+            metalink: None,
             name_locked: false,
         });
         self.save_state();
         id
+    }
+
+    /// Turn the Metalink document in the Add URL dialog into download items.
+    ///
+    /// One item per file entry, because one download fetches one object and a
+    /// document may describe several. Each carries the whole mirror list, the
+    /// document's size and digest, and its `<pieces>` — which is the difference
+    /// between a list of URLs and a mirror list: the size admits every agreeing
+    /// mirror without the `ETag` match independent operators cannot produce, the
+    /// surplus mirrors become a reserve bench, and a corrupt chunk costs one
+    /// chunk refetched from elsewhere rather than the whole object.
+    ///
+    /// Started sequentially through the ordinary queue, not fanned out: a mirror
+    /// list is a list of volunteer machines, and opening four connections per
+    /// file across six files against the same hosts is precisely what the
+    /// politeness ceilings exist to prevent.
+    fn add_metalink_items(&mut self) -> Task<Message> {
+        let Some(doc) = self.add_url.metalink.clone() else {
+            return Task::none();
+        };
+        let auth = self
+            .add_url
+            .use_auth
+            .then(|| (self.add_url.login.clone(), self.add_url.password.clone()));
+        let mut added = 0usize;
+        for f in &doc.files {
+            // The same duplicate rule the single-URL path follows: an address
+            // already in the list is not added twice.
+            if self.state.downloads.iter().any(|d| d.url == f.primary) {
+                continue;
+            }
+            let id = self.add_item(f.primary.clone(), auth.clone(), None);
+            let cat = crate::model::categorize(&f.name, &self.cfg.categories);
+            let dir = self
+                .cat_dir(cat.as_deref())
+                .or_else(|| self.cat_dir(None))
+                .unwrap_or_default();
+            if let Some(d) = self.item_mut(id) {
+                // The document names the file. A redirector URL
+                // (`metalink?repo=fedora-40`) names nothing, and the last path
+                // segment of the first mirror is a guess the document does not
+                // need us to make.
+                d.file_name = f.name.clone();
+                d.name_locked = true;
+                d.category = cat;
+                d.save_dir = dir;
+                d.size = f.info.size;
+                // Every mirror in the list honours ranges — a source that does
+                // not is dropped at probe time — and the document's size is
+                // what makes resuming across them safe.
+                d.resume = Some(true);
+                d.metalink = Some(f.info.clone());
+            }
+            if f.info.signed {
+                crate::log::warn(&format!(
+                    "#{id} the mirror list carries an OpenPGP signature over {}; Hydra records it but does not verify it",
+                    f.name
+                ));
+            }
+            added += 1;
+        }
+        crate::log::info(&format!(
+            "metalink {} ({}): added {added} of {} file(s)",
+            doc.origin,
+            doc.version,
+            doc.files.len()
+        ));
+        self.add_url = AddUrlState::default();
+        let close = self.close_window(WinKind::AddUrl);
+        if added == 0 {
+            return close;
+        }
+        let starts: Vec<DlId> = self
+            .state
+            .downloads
+            .iter()
+            .rev()
+            .take(added)
+            .map(|d| d.id)
+            .collect();
+        let mut tasks = vec![close];
+        for (i, id) in starts.into_iter().rev().enumerate() {
+            // Only the first opens a progress window: a document describing six
+            // files would otherwise bury the desktop under six of them.
+            tasks.push(self.start_download(id, i == 0));
+        }
+        self.save_state();
+        Task::batch(tasks)
     }
 
     // -------------------------------------------------------- virus scan
@@ -3258,7 +3419,21 @@ impl App {
                     self.add_url.stream_error = None;
                     self.add_url.quality = None;
                 }
+                if self.add_url.metalink_of != addr {
+                    self.add_url.metalink = None;
+                    self.add_url.metalink_error = None;
+                }
                 let resize = self.resize_open(WinKind::AddUrl);
+                // A mirror list reads itself for the same reason a manifest
+                // does: it decides how many files are about to be added and
+                // what they will be called, and a user should see that before
+                // pressing OK rather than afterwards.
+                if crate::engine::metalink_address(&addr)
+                    && !self.add_url.metalink_probing
+                    && self.add_url.metalink_of != addr
+                {
+                    return Task::batch([resize, self.update(Message::AddrProbeMetalink)]);
+                }
                 // Automatic: a manifest address inspects itself, so the user
                 // is choosing a quality rather than discovering afterwards
                 // that they could have.
@@ -3306,6 +3481,32 @@ impl App {
                 }
                 self.resize_open(WinKind::AddUrl)
             }
+            Message::AddrProbeMetalink => {
+                let src = self.add_url.address.trim().to_string();
+                if src.is_empty() || self.add_url.metalink_probing {
+                    return Task::none();
+                }
+                self.add_url.metalink_probing = true;
+                self.add_url.metalink_error = None;
+                self.add_url.metalink_of = src.clone();
+                let ua = self.cfg.settings.user_agent.clone();
+                Task::perform(crate::engine::probe_metalink(src, ua), |r| {
+                    Message::AddrMetalinkProbed(Box::new(r))
+                })
+            }
+            Message::AddrMetalinkProbed(result) => {
+                self.add_url.metalink_probing = false;
+                match *result {
+                    Ok(doc) => self.add_url.metalink = Some(doc),
+                    Err(e) => {
+                        // Not a mirror list after all: fall back silently to an
+                        // ordinary download rather than blocking the dialog.
+                        self.add_url.metalink = None;
+                        self.add_url.metalink_error = Some(e);
+                    }
+                }
+                self.resize_open(WinKind::AddUrl)
+            }
             Message::AddrQuality(q) => {
                 self.add_url.quality = Some(q);
                 Task::none()
@@ -3335,6 +3536,12 @@ impl App {
             }
             Message::AddUrlOk => {
                 let url = self.add_url.address.trim().to_string();
+                // A mirror list is not a download; it is a list of them. Handled
+                // before the URL check because the address may be a local
+                // `.meta4` path, which `parse_url` correctly refuses.
+                if self.add_url.metalink.is_some() && self.add_url.metalink_of == url {
+                    return self.add_metalink_items();
+                }
                 if let Err(e) = engine::parse_url(&url) {
                     self.add_url.error = Some(e);
                     return self.resize_open(WinKind::AddUrl);
@@ -4362,9 +4569,20 @@ impl App {
                     .map(|(u, _)| {
                         let url = u.clone();
                         let ua = ua.clone();
-                        Task::perform(engine::probe_link(url.clone(), ua), move |meta| {
-                            Message::BatchProbed(url.clone(), meta)
-                        })
+                        // A mirror list answers a different question than a
+                        // size probe: not "how big is this file" but "which
+                        // files are these, and where else do they live". One
+                        // request either way, so it replaces the size probe
+                        // rather than being added to it.
+                        if engine::metalink_address(&url) {
+                            Task::perform(engine::probe_metalink(url.clone(), ua), move |r| {
+                                Message::BatchMetalinkProbed(url.clone(), Box::new(r.ok()))
+                            })
+                        } else {
+                            Task::perform(engine::probe_link(url.clone(), ua), move |meta| {
+                                Message::BatchProbed(url.clone(), meta)
+                            })
+                        }
                     })
                     .collect();
                 Task::batch(probes)
@@ -4376,11 +4594,57 @@ impl App {
             },
             Message::BatchProbed(url, meta) => {
                 if let Some(meta) = meta {
+                    // A redirector URL reveals itself only here. Reading the
+                    // document now is what lets the batch add every file it
+                    // describes, rather than the engine falling back to the
+                    // first one at transfer time.
+                    if meta.is_metalink && !self.batch.metalinks.contains_key(&url) {
+                        let ua = self.cfg.settings.user_agent.clone();
+                        return Task::perform(engine::probe_metalink(url.clone(), ua), move |r| {
+                            Message::BatchMetalinkProbed(url.clone(), Box::new(r.ok()))
+                        });
+                    }
                     if let Some(size) = meta.size {
                         self.batch.sizes.insert(url.clone(), size);
                     }
                     if !meta.file_name.is_empty() {
                         self.batch.names.insert(url, meta.file_name);
+                    }
+                }
+                Task::none()
+            }
+            Message::BatchMetalinkProbed(url, doc) => {
+                match *doc {
+                    Some(doc) => {
+                        // Show what the list will actually add, so the row does
+                        // not read as one 6 KB XML file. The size column gets
+                        // the TOTAL, because that is what the batch is about to
+                        // pull down.
+                        let total: u64 = doc.files.iter().filter_map(|f| f.info.size).sum();
+                        if total > 0 {
+                            self.batch.sizes.insert(url.clone(), total);
+                        }
+                        self.batch.names.insert(
+                            url.clone(),
+                            if doc.files.len() == 1 {
+                                doc.files[0].name.clone()
+                            } else {
+                                format!("{} ({} files)", i18n::tr("Mirror list"), doc.files.len())
+                            },
+                        );
+                        self.batch.metalinks.insert(url, doc);
+                    }
+                    // Not a mirror list after all — a `.meta4` that 404s, or a
+                    // document this build cannot use. Fill the row in from the
+                    // URL alone rather than re-probing: `BatchProbed` routes a
+                    // metalink `Content-Type` straight back here, so a document
+                    // that parses badly but is served correctly would bounce
+                    // between the two forever.
+                    None => {
+                        self.batch
+                            .names
+                            .entry(url.clone())
+                            .or_insert_with(|| engine::file_name_from_url(&url));
                     }
                 }
                 Task::none()
@@ -4442,6 +4706,44 @@ impl App {
                     "MP4"
                 };
                 for url in checked {
+                    // A mirror list in the batch is not one download but a list
+                    // of them: one item per file entry, each carrying the whole
+                    // mirror list, the document's size and digest, and its
+                    // `<pieces>`. Adding the document itself would save a few
+                    // kilobytes of XML under the name of the object the user
+                    // wanted.
+                    if let Some(doc) = self.batch.metalinks.get(&url).cloned() {
+                        for f in &doc.files {
+                            if self.state.downloads.iter().any(|d| d.url == f.primary) {
+                                continue;
+                            }
+                            let id = self.add_item(f.primary.clone(), None, queue.clone());
+                            let cat = cat_override
+                                .clone()
+                                .or_else(|| categorize(&f.name, &self.cfg.categories));
+                            let dir = dir_override
+                                .clone()
+                                .or_else(|| self.cat_dir(cat.as_deref()));
+                            if let Some(d) = self.item_mut(id) {
+                                // The document names the file; a redirector URL
+                                // names nothing worth using.
+                                d.file_name = f.name.clone();
+                                d.name_locked = true;
+                                d.size = f.info.size;
+                                // Every mirror that survives resolution honours
+                                // ranges, and the document's size is what makes
+                                // resuming across them safe.
+                                d.resume = Some(true);
+                                d.metalink = Some(f.info.clone());
+                                d.category = cat;
+                                if let Some(dir) = dir {
+                                    d.save_dir = dir;
+                                }
+                                d.state = DlState::Queued;
+                            }
+                        }
+                        continue;
+                    }
                     // A manifest in the list is a STREAM, not a file: the
                     // batch's one quality choice is resolved against each
                     // manifest's own ladder when it starts.
@@ -5886,8 +6188,34 @@ mod tests {
             shutdown_after: false,
             shutdown_action: PowerAction::default(),
             stream: None,
+            metalink: None,
             name_locked: false,
         }
+    }
+
+    #[test]
+    fn the_mirror_list_panel_is_measured_by_what_it_actually_draws() {
+        // The failure this guards against is silent: too short a window puts
+        // the OK button below the bottom edge, and nothing at run time
+        // notices. The panel draws at most three file rows and then one "+N"
+        // row, so the height must stop growing at four rows however many files
+        // the document describes.
+        assert_eq!(
+            metalink_panel_height(false, None),
+            0.0,
+            "no panel, no space"
+        );
+        assert!(metalink_panel_height(true, None) > 0.0, "the probing line");
+        let one = metalink_panel_height(false, Some(1));
+        let three = metalink_panel_height(false, Some(3));
+        assert!(three > one, "each file adds a row");
+        let four = metalink_panel_height(false, Some(4));
+        assert!(four > three, "the \"+N\" row is drawn and must be reserved");
+        assert_eq!(
+            metalink_panel_height(false, Some(40)),
+            four,
+            "a forty-file document draws the same four rows as a four-file one"
+        );
     }
 
     #[test]

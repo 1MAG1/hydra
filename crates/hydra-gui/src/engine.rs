@@ -56,6 +56,60 @@ pub struct StartSpec {
     /// opaque, so a server that sends no date leaves the file's own time
     /// alone rather than getting a fabricated one.
     pub remote_time: bool,
+    /// Every mirror a Metalink document named, best first. Empty for an
+    /// ordinary one-URL download, which is what every other caller passes.
+    ///
+    /// `url` stays the primary and is still probed first, so a failure to reach
+    /// a mirror is reported against the same address the item shows.
+    pub mirrors: Vec<crate::model::MirrorRef>,
+    /// The size the document attested.
+    ///
+    /// Admission for a mirror is normally "same size AND the same strong
+    /// validator as the first source", and that test is unsatisfiable across a
+    /// real mirror list: independent operators cannot share an `ETag`. A size
+    /// published by whoever built the object replaces it, and the digest below
+    /// is what actually catches a mirror serving something else.
+    pub attested_size: Option<u64>,
+    /// The document's strongest digest, as `algorithm:hex`.
+    pub attested_digest: Option<String>,
+    /// The document's `<pieces>` chunk manifest, in its on-disk JSON form.
+    pub pieces: Option<String>,
+}
+
+impl StartSpec {
+    /// The mirror-list fields of an ORDINARY download: none of them.
+    ///
+    /// Spelled as a constructor rather than a `Default` on the whole struct
+    /// because the rest of `StartSpec` has no sensible default — an id of 0 and
+    /// an empty output path are not a download, and a `..Default::default()`
+    /// that silently supplied them would turn a forgotten field into a runtime
+    /// mystery instead of a compile error.
+    ///
+    /// Test-only for exactly that reason: the real call sites in `app.rs` spell
+    /// every field out, so adding one to `StartSpec` fails to compile there
+    /// instead of silently defaulting.
+    #[cfg(test)]
+    pub fn plain() -> Self {
+        StartSpec {
+            id: 0,
+            url: String::new(),
+            auth: None,
+            conns: 1,
+            user_agent: String::new(),
+            temp_path: String::new(),
+            final_path: String::new(),
+            held: Vec::new(),
+            expected_size: None,
+            cookies: None,
+            limit: None,
+            adaptive: false,
+            remote_time: false,
+            mirrors: Vec::new(),
+            attested_size: None,
+            attested_digest: None,
+            pieces: None,
+        }
+    }
 }
 
 /// An adaptive stream to assemble. Deliberately NOT a `StartSpec`: there is
@@ -385,6 +439,14 @@ pub struct LinkMeta {
     /// The name the object should be saved under: `Content-Disposition` if the
     /// server named one, else the last path segment of the FINAL URL.
     pub file_name: String,
+    /// The URL serves a Metalink DOCUMENT rather than the object.
+    ///
+    /// Read from `Content-Type` on the probe that had to happen anyway, which
+    /// is the only place the answer is free — and the only place it exists at
+    /// all for a redirector like `.../metalink?repo=x`, whose name reveals
+    /// nothing. A batch that misses this adds a few kilobytes of XML as a
+    /// download and calls it done.
+    pub is_metalink: bool,
 }
 
 /// Probe a link for the batch dialog's File Name and Size columns.
@@ -435,9 +497,298 @@ pub async fn probe_link(url: String, user_agent: String) -> Option<LinkMeta> {
             file_name: p
                 .suggested_filename()
                 .unwrap_or_else(|| file_name_from_url(&url)),
+            is_metalink: p.serves_metalink(),
         });
     }
     None
+}
+
+// ------------------------------------------------------------------ metalink
+
+/// One file a Metalink document describes, resolved into what an item needs.
+#[derive(Clone, Debug)]
+pub struct MetalinkChoice {
+    /// The document's `name`, as a safe relative path.
+    pub name: String,
+    pub info: crate::model::MetalinkInfo,
+    /// The mirror the item's own `url` should be, i.e. the publisher's first
+    /// choice. The item shows one address; the rest are its mirrors.
+    pub primary: String,
+    /// Piece count, for the dialog. Zero when the document published none, or
+    /// when the pieces do not tile the stated size and were therefore dropped.
+    pub piece_count: usize,
+    /// Mirrors listed against mirrors this build can fetch from. A list that
+    /// silently loses two thirds of its entries to `rsync://` is worth seeing
+    /// before a multi-gigabyte download rather than after.
+    pub mirrors_listed: usize,
+}
+
+/// What an address turned out to be, when it is a Metalink document.
+#[derive(Clone, Debug)]
+pub struct MetalinkProbe {
+    /// "3.0" or "4 (RFC 5854)".
+    pub version: String,
+    pub origin: String,
+    pub files: Vec<MetalinkChoice>,
+}
+
+/// Does this address name a Metalink document by its NAME alone?
+///
+/// The cheap half of detection, and the only half available for a remote URL
+/// before it is fetched. A URL with no usable extension
+/// (`.../metalink?repo=fedora-40`) is settled by `Content-Type` inside
+/// [`probe_metalink`], where the fetch has to happen anyway.
+pub fn metalink_address(addr: &str) -> bool {
+    let a = addr.trim();
+    if a.is_empty() {
+        return false;
+    }
+    if hya_net::metalink::is_metalink_filename(a.split(['?', '#']).next().unwrap_or(a)) {
+        return true;
+    }
+    // A local file whose CONTENT says so. Free to check, and necessary: a
+    // document saved by a browser is as likely to be called `metalink.xml` or
+    // `download(1)` as anything else.
+    if a.contains("://") {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(a) else {
+        return false;
+    };
+    use std::io::Read as _;
+    let mut head = [0u8; 4096];
+    match f.read(&mut head) {
+        Ok(n) if n > 0 => hya_net::metalink::looks_like_metalink(&head[..n]),
+        _ => false,
+    }
+}
+
+/// Read a Metalink document — a local path or a URL — and resolve every file
+/// entry it describes into something the download list can hold.
+///
+/// Refuses the two cases where continuing would produce a wrong file quietly: a
+/// `name` that escapes the destination directory (RFC 5854 §4.1.2.1, including
+/// the Windows spellings a POSIX-only check misses), and an entry with no mirror
+/// this build has a transport for.
+pub async fn probe_metalink(source: String, user_agent: String) -> Result<MetalinkProbe, String> {
+    let doc = if source.contains("://") {
+        fetch_metalink(&source, &user_agent).await?
+    } else {
+        let text = std::fs::read_to_string(&source)
+            .map_err(|e| format!("{}: {e}", crate::i18n::tr("Cannot read the mirror list")))?;
+        hya_net::metalink::parse(&text).map_err(|e| e.to_string())?
+    };
+    let mut files = Vec::new();
+    for f in &doc.files {
+        let Ok(name) = f.safe_name() else {
+            crate::log::warn(&format!(
+                "metalink: refusing entry {:?}: the name escapes the destination directory",
+                f.name
+            ));
+            continue;
+        };
+        let mut mirrors: Vec<&hya_net::MetaUrl> = f.fetchable_urls();
+        // Transport first, the publisher's ranking within it — and then ONE
+        // transport per item. An FTP mirror at rank 1 would not merely lead:
+        // the engine routes on the item's own URL, so it would drop the whole
+        // transfer to a single FTP stream and silently abandon the list. And a
+        // trailing ftp mirror in a mixed list is no reserve either — the
+        // multi-source engine probes and substitutes over HTTP targets, so it
+        // would be a request sent to port 21. The leading tier carries the
+        // item; an all-ftp document keeps its ftp mirrors and streams, as
+        // before. See `UrlKind::transport_tier`.
+        mirrors.sort_by_key(|u| (u.kind.transport_tier(), u.priority, u.url.clone()));
+        if let Some(lead) = mirrors.first().map(|u| u.kind.transport_tier()) {
+            mirrors.retain(|u| u.kind.transport_tier() == lead);
+        }
+        if mirrors.is_empty() {
+            crate::log::warn(&format!(
+                "metalink: {name} lists {} mirror(s), none on a scheme this build can fetch",
+                f.urls.len()
+            ));
+            continue;
+        }
+        // The document's grid, not a convenient one: a digest is a function of
+        // an exact byte span, so any other grid verifies nothing. Dropped
+        // entirely when it does not tile the stated size, because applying it
+        // anyway would report every chunk as corrupt.
+        //
+        // Capped by serialized size because this string is PERSISTED: it rides
+        // in `MetalinkInfo` inside the GUI state, which is rewritten on every
+        // state change for the life of the item. The parser admits up to a
+        // million pieces, which serialize to ~65 MB — a document (a hostile
+        // one, or merely a huge object on a tiny grid) could make every state
+        // save write that. Four MiB covers every real distribution image (a
+        // 4 GB ISO at Fedora's 256 KiB grid is ~1 MB); past it the piece list
+        // is dropped with a log line and the whole-file digest still verifies
+        // the object — coarser, never weaker.
+        const PIECES_PERSIST_CAP: usize = 4 << 20;
+        let pieces = hya_net::manifest::from_metalink(f).ok();
+        let piece_count = pieces.as_ref().map(|m| m.chunks.digests.len()).unwrap_or(0);
+        files.push(MetalinkChoice {
+            name: name.to_string(),
+            primary: mirrors[0].url.clone(),
+            piece_count,
+            mirrors_listed: f.urls.len(),
+            info: crate::model::MetalinkInfo {
+                // Dense ranks from 1: the document's own numbers run on two
+                // different scales depending on dialect, and one field reaches
+                // the allocator.
+                mirrors: mirrors
+                    .iter()
+                    .enumerate()
+                    .map(|(i, u)| crate::model::MirrorRef {
+                        url: u.url.clone(),
+                        priority: (i + 1) as u32,
+                        max_connections: u.max_connections,
+                    })
+                    .collect(),
+                size: f.size,
+                digest: f.best_hash().map(|h| h.spec()),
+                pieces: pieces.map(|m| m.to_json()).filter(|j| {
+                    let keep = j.len() <= PIECES_PERSIST_CAP;
+                    if !keep {
+                        crate::log::warn(&format!(
+                            "metalink: {name}: the piece list serializes to {} bytes; \
+                             dropping it and verifying by whole-file digest instead",
+                            j.len()
+                        ));
+                    }
+                    keep
+                }),
+                origin: source.clone(),
+                signed: f.signature.is_some(),
+            },
+        });
+    }
+    if files.is_empty() {
+        return Err(crate::i18n::tr(
+            "The mirror list describes no file this build can download.",
+        ));
+    }
+    Ok(MetalinkProbe {
+        version: doc
+            .version
+            .map(|v| v.as_str().to_string())
+            .unwrap_or_else(|| "?".into()),
+        origin: source,
+        files,
+    })
+}
+
+/// Point a running job at the sources a document turned out to describe.
+///
+/// A job fetches ONE object, so a document describing several is narrowed to a
+/// single entry here. Which one is not arbitrary: the job's existing filename is
+/// tried first, so a row the user already named — from the Add URL dialog, or
+/// from a batch whose document resolved before the transfer started — keeps
+/// pointing at the file they picked. Only a job that arrived with nothing but a
+/// redirector URL falls back to the first entry, and that is logged, because the
+/// user typed one address and is about to receive a differently named file.
+fn adopt_metalink(
+    doc: &hya_net::Metalink,
+    spec: &mut StartSpec,
+    id: DlId,
+) -> Result<(String, Option<u64>), String> {
+    let wanted = std::path::Path::new(&spec.final_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned());
+    let usable: Vec<(&hya_net::MetalinkFile, &str)> = doc
+        .files
+        .iter()
+        .filter_map(|f| f.safe_name().ok().map(|n| (f, n)))
+        .filter(|(f, _)| !f.fetchable_urls().is_empty())
+        .collect();
+    let (file, name) = usable
+        .iter()
+        .find(|(_, n)| Some(*n) == wanted.as_deref())
+        .or_else(|| usable.first())
+        .copied()
+        .ok_or_else(|| {
+            crate::i18n::tr("The mirror list describes no file this build can download.")
+        })?;
+    if usable.len() > 1 && wanted.as_deref() != Some(name) {
+        crate::log::warn(&format!(
+            "#{id} the document describes {} files; fetching {name:?}",
+            usable.len()
+        ));
+    }
+
+    let mut mirrors: Vec<&hya_net::MetaUrl> = file.fetchable_urls();
+    // Transport first, then one transport per item — same rule and same
+    // reason as `probe_metalink`.
+    mirrors.sort_by_key(|u| (u.kind.transport_tier(), u.priority, u.url.clone()));
+    let lead = mirrors[0].kind.transport_tier();
+    mirrors.retain(|u| u.kind.transport_tier() == lead);
+    spec.url = mirrors[0].url.clone();
+    spec.mirrors = mirrors
+        .iter()
+        .enumerate()
+        .map(|(i, u)| crate::model::MirrorRef {
+            url: u.url.clone(),
+            priority: (i + 1) as u32,
+            max_connections: u.max_connections,
+        })
+        .collect();
+    spec.attested_size = file.size;
+    spec.attested_digest = file.best_hash().map(|h| h.spec());
+    spec.pieces = hya_net::manifest::from_metalink(file)
+        .ok()
+        .map(|m| m.to_json());
+    // Held spans were recorded against whatever the redirector URL served,
+    // which was the document. Splicing them into the object would be the same
+    // corruption the size gate refuses.
+    spec.held.clear();
+    spec.expected_size = file.size;
+    // The document names the file; a redirector URL names nothing worth using.
+    if let Some(dir) = std::path::Path::new(&spec.final_path).parent() {
+        spec.final_path = dir.join(name).to_string_lossy().into_owned();
+    }
+    crate::log::info(&format!(
+        "#{id} mirror list: {name:?}, {} mirror(s), {} bytes, {} piece(s)",
+        spec.mirrors.len(),
+        spec.attested_size.unwrap_or(0),
+        file.pieces.as_ref().map(|p| p.hashes.len()).unwrap_or(0)
+    ));
+    Ok((name.to_string(), file.size))
+}
+
+/// Fetch a document over HTTP, following redirects, with the body capped.
+///
+/// The cap is not defensiveness for its own sake: the body is fetched before
+/// anything about it is known, and an unbounded read of a body chosen by
+/// whoever answers is a memory-exhaustion primitive no care in the parser can
+/// undo.
+async fn fetch_metalink(url: &str, user_agent: &str) -> Result<hya_net::Metalink, String> {
+    let connector = shared_connector()?;
+    let mut url = url.to_string();
+    for _ in 0..10 {
+        let u = parse_url(&url)?;
+        let base = if u.tls {
+            Target::direct_tls(&u.host, u.port, &u.path)
+        } else {
+            Target::direct(&u.host, u.port, &u.path)
+        };
+        let t = base.with_headers(vec![], Some(user_agent.to_string()));
+        if let Ok(p) = probe_resilient(connector.as_ref(), &t).await {
+            if p.is_redirect() {
+                match join_url(&u, p.location.as_deref().unwrap_or("")) {
+                    Some(next) => {
+                        url = next;
+                        continue;
+                    }
+                    None => return Err(crate::i18n::tr("Unusable redirect")),
+                }
+            }
+        }
+        let body = hya_net::fetch_small(connector.as_ref(), &t, hya_net::metalink::MAX_DOCUMENT)
+            .await
+            .map_err(|e| format!("{}: {e}", crate::i18n::tr("Cannot read the mirror list")))?;
+        let text = String::from_utf8(body)
+            .map_err(|_| crate::i18n::tr("The mirror list is not valid UTF-8."))?;
+        return hya_net::metalink::parse(&text).map_err(|e| e.to_string());
+    }
+    Err(crate::i18n::tr("Too many redirects"))
 }
 
 /// Make `dir` exist and be writable, healing one specific corruption seen in
@@ -588,10 +939,511 @@ fn target_for(u: &ParsedUrl, spec: &StartSpec) -> Target {
     base.with_headers(headers, Some(spec.user_agent.clone()))
 }
 
+/// Probe the mirror list and decide who fetches, who waits, and with how many
+/// connections.
+///
+/// # Two admission tests, because there are two kinds of evidence
+///
+/// Without a document the only evidence is what the mirrors themselves say, so
+/// agreement has to be pairwise: same size, same strong validator. That test is
+/// deliberately strict — two mirrors serving different builds produce a file of
+/// exactly the right length that is not either object — and it is also
+/// unsatisfiable across a real mirror list, because independent operators
+/// running independent web servers cannot share an `ETag`.
+///
+/// `attested_size` is different evidence: it comes from whoever built the
+/// object, on a host that is usually not one of the mirrors, alongside a content
+/// digest. A mirror is admitted if it agrees with the DOCUMENT, and the digest —
+/// per chunk where `<pieces>` was published — is what catches one serving
+/// something else.
+///
+/// Returns `(targets, connections per target, reserve bench, scheduler
+/// sources)`. With no mirrors this is exactly the single-source tuple the
+/// transfer used before mirror lists existed.
+#[allow(clippy::too_many_arguments)]
+async fn plan_sources(
+    spec: &StartSpec,
+    primary_url: &ParsedUrl,
+    primary_target: &Target,
+    primary_probe: &Probe,
+    size: u64,
+    delta: f64,
+    budget: usize,
+    connector: &Arc<TlsCapableConnector>,
+    id: DlId,
+) -> (Vec<Target>, Vec<usize>, hya_net::Bench, Vec<Source>) {
+    let caps_for = |pr: &Probe| {
+        if spec.attested_size.is_some() || !(pr.weak_validator || pr.validator.is_none()) {
+            // A document that states the size and a content digest establishes
+            // agreement more strongly than an `ETag` does, and from outside the
+            // mirrors — so a source admitted on that evidence is a full one.
+            Capability::Full
+        } else {
+            Capability::NoValidator
+        }
+    };
+    // One seated source — and whatever reserves are still on their way.
+    //
+    // The late stream is threaded through here rather than dropped, because
+    // this is the case that needs a bench MOST: with a single source there is
+    // no second connection for repair to move work to, so a mirror that goes
+    // silent has nothing behind it but the reserves. An earlier revision
+    // returned `Bench::default()` on this path and discarded every straggler
+    // the background prober was about to admit.
+    let alone =
+        |sources: Vec<Source>,
+         late: Option<tokio::sync::mpsc::UnboundedReceiver<hya_net::Reserve>>| {
+            (
+                vec![primary_target.clone()],
+                vec![budget],
+                hya_net::Bench {
+                    ready: Vec::new(),
+                    late,
+                },
+                sources,
+            )
+        };
+    if spec.mirrors.is_empty() {
+        // Nothing was ever probed, so there is nothing on its way.
+        return alone(
+            vec![Source {
+                caps: caps_for(primary_probe),
+                delta_est: delta,
+                ..Source::default()
+            }],
+            None,
+        );
+    }
+
+    // The primary was already probed above; only the OTHERS cost a request
+    // here, and they are probed concurrently because a mirror list is a list of
+    // independent hosts and waiting for the slowest one in series is the whole
+    // latency of the list.
+    let host_of = |u: &ParsedUrl| format!("{}:{}", u.host, u.port);
+    let mut kept: Vec<(String, Target, f64, Capability, hya_core::SourcePlan)> = Vec::new();
+    let primary_plan = spec
+        .mirrors
+        .iter()
+        .find(|m| m.url == spec.url)
+        .map(|m| hya_core::SourcePlan {
+            priority: m.priority.max(1),
+            max_connections: m.max_connections,
+        })
+        .unwrap_or_default();
+    kept.push((
+        host_of(primary_url),
+        primary_target.clone(),
+        delta,
+        caps_for(primary_probe),
+        primary_plan,
+    ));
+
+    // Bounded fan-out, but not by politeness: every probe here goes to a
+    // DIFFERENT host and one HEAD each is not something any of them feels — the
+    // per-host ceilings elsewhere answer that question. The cap exists so a
+    // forty-mirror document cannot open forty sockets at once and hit an fd
+    // limit.
+    //
+    // The cost of a small cap is latency paid before the first byte: measured
+    // on the CLI against a real twelve-mirror Fedora document, six in flight
+    // took two waves and 4.1 s of setup against 0.5 s for a single URL. One
+    // wave removes almost all of it.
+    let gate = Arc::new(tokio::sync::Semaphore::new(16));
+    let primary_validator = primary_probe.validator.clone();
+    let mut set = tokio::task::JoinSet::new();
+    for m in spec.mirrors.iter().filter(|m| m.url != spec.url).cloned() {
+        let conn = connector.clone();
+        let spec = spec.clone();
+        let gate = gate.clone();
+        let primary_validator = primary_validator.clone();
+        set.spawn(async move {
+            let _permit = gate.acquire_owned().await.ok()?;
+            let u = parse_url(&m.url).ok()?;
+            let t = target_for(&u, &spec);
+            let hop = std::time::Instant::now();
+            let pr = probe_resilient(conn.as_ref(), &t).await.ok()?;
+            if pr.is_redirect() || pr.status >= 300 || !pr.ranges {
+                return None;
+            }
+            // The document's size is the admission test when there is one.
+            // Without a document, fall back to the pairwise rule: the same size
+            // AND the same strong validator as the source already in hand.
+            let ok = match spec.attested_size {
+                Some(want) => pr.size == want,
+                None => {
+                    pr.size == size
+                        && !pr.weak_validator
+                        && pr.validator.is_some()
+                        && pr.validator == primary_validator
+                }
+            };
+            if !ok {
+                return None;
+            }
+            let caps = if spec.attested_size.is_some() {
+                Capability::Full
+            } else {
+                Capability::NoValidator
+            };
+            Some((
+                format!("{}:{}", u.host, u.port),
+                t,
+                hop.elapsed().as_secs_f64().clamp(0.05, 45.0),
+                caps,
+                hya_core::SourcePlan {
+                    priority: m.priority.max(1),
+                    max_connections: m.max_connections,
+                },
+            ))
+        });
+    }
+    // Collected in RANK order rather than in completion order: which mirror is
+    // seated and which waits on the bench must not depend on which handshake
+    // happened to finish first, or two runs against the same document choose
+    // different mirrors and neither can be debugged from its log.
+    //
+    // And a mirror too slow to answer a HEAD is not one worth waiting for. The
+    // probe phase is paid entirely before the first byte, so its cost is the
+    // SLOWEST mirror in the list rather than the average: measured on the CLI
+    // against a real Fedora document, one host taking eleven seconds to answer
+    // held up a transfer that already had eleven other sources ready. Waiting
+    // buys a source that, on that evidence, will be the first one repair takes
+    // work away from.
+    //
+    // The window is relative rather than fixed, because "slow" is a property of
+    // the path: three times the fastest mirror's own round trip, floored so a
+    // fast first answer cannot make it unreasonably tight and capped so a
+    // pathological one cannot reintroduce the wait. The primary is already
+    // probed and admitted, so abandoning stragglers can never leave the
+    // transfer with no source.
+    // The window is short and it costs nothing to lose: a mirror that misses
+    // it is not abandoned any more — it keeps probing in the background and
+    // joins the reserve bench when it answers. All the window decides is how
+    // long the transfer holds still hoping for one more SEAT, and the loop
+    // stops on its own the moment the connection budget's worth of mirrors
+    // have been admitted. (Unlike the CLI's loop, the clock here may arm
+    // before any secondary has answered — the PRIMARY is already probed and
+    // seated, so a bounded wait can never leave the transfer with nothing.)
+    const GRACE_MULTIPLE: f64 = 3.0;
+    const GRACE_MIN: std::time::Duration = std::time::Duration::from_millis(600);
+    const GRACE_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+    let probe_start = std::time::Instant::now();
+    let mut first_ok: Option<std::time::Duration> = None;
+    let mut probed: Vec<(String, Target, f64, Capability, hya_core::SourcePlan)> = Vec::new();
+    let mut streaming = false;
+    while !set.is_empty() {
+        // The primary holds one seat already; the rest of the budget is what
+        // this loop is filling.
+        if probed.len() + 1 >= budget.max(1) {
+            streaming = true;
+            break;
+        }
+        let window = std::time::Duration::from_secs_f64(
+            first_ok.unwrap_or(GRACE_MIN).as_secs_f64() * GRACE_MULTIPLE,
+        )
+        .clamp(GRACE_MIN, GRACE_MAX);
+        let left = window.saturating_sub(probe_start.elapsed());
+        let joined = match tokio::time::timeout(left, set.join_next()).await {
+            Ok(v) => v,
+            Err(_) => {
+                streaming = true;
+                break;
+            }
+        };
+        let Some(r) = joined else { break };
+        if let Ok(Some(v)) = r {
+            if first_ok.is_none() {
+                first_ok = Some(probe_start.elapsed());
+            }
+            probed.push(v);
+        }
+    }
+    // The stragglers keep probing. Each task is SELF-admitting — it returns
+    // `Some` only for a mirror that passed the same size/validator/ranges test
+    // the seated ones passed — so the forwarder's job is only to turn each
+    // admission into a `Reserve` as it lands.
+    let late = if streaming && !set.is_empty() {
+        crate::log::info(&format!(
+            "#{id} starting on {} source(s) after {:.2}s; {} mirror(s) still probing join the \
+             reserve bench as they answer",
+            probed.len() + 1,
+            probe_start.elapsed().as_secs_f64(),
+            set.len(),
+        ));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(r) = set.join_next().await {
+                let Ok(Some((host, target, _delta, _caps, plan))) = r else {
+                    continue;
+                };
+                if tx.send(hya_net::Reserve { target, plan, host }).is_err() {
+                    // The transfer ended; nothing left to probe for.
+                    return;
+                }
+            }
+        });
+        Some(rx)
+    } else {
+        None
+    };
+    probed.sort_by(|a, b| (a.4.priority, &a.0).cmp(&(b.4.priority, &b.0)));
+    let results = probed;
+    kept.extend(results);
+
+    if kept.len() == 1 {
+        crate::log::info(&format!(
+            "#{id} mirror list: one source so far; {} reserve(s) may still arrive",
+            if late.is_some() { "more" } else { "no" }
+        ));
+        // `late` is handed on, not dropped: a lone source has no second
+        // connection for repair to move work to, so the reserves still being
+        // probed are the only thing between it and a stall.
+        return alone(
+            vec![Source {
+                caps: kept[0].3,
+                delta_est: delta,
+                priority: kept[0].4.priority,
+                ..Source::default()
+            }],
+            late,
+        );
+    }
+
+    let plans: Vec<hya_core::SourcePlan> = kept.iter().map(|k| k.4).collect();
+    // Per-host ceiling: the user's connection setting is what they chose for one
+    // server, so it stays the per-host bound while `budget` is the aggregate.
+    let split = hya_core::plan::allocate(&plans, budget, budget, budget);
+    let seated: Vec<usize> = (0..kept.len()).filter(|&i| split[i] > 0).collect();
+    let targets: Vec<Target> = seated.iter().map(|&i| kept[i].1.clone()).collect();
+    let per: Vec<usize> = seated.iter().map(|&i| split[i]).collect();
+    let sources: Vec<Source> = seated
+        .iter()
+        .map(|&i| Source {
+            caps: kept[i].3,
+            delta_est: kept[i].2.max(1e-3),
+            // The publisher's ranking, consulted once — for the first split,
+            // before anything has been measured. See `hya_core::sched::Source`.
+            priority: kept[i].4.priority,
+            ..Source::default()
+        })
+        .collect();
+    // Everything the split did not seat is the bench, drawn on in place when a
+    // source dies. This is what makes a nineteen-mirror list worth more than a
+    // four-mirror one at four connections.
+    let bench_ready: Vec<hya_net::Reserve> = {
+        let mut idx: Vec<usize> = (0..kept.len()).filter(|&i| split[i] == 0).collect();
+        idx.sort_by_key(|&i| (plans[i].priority, i));
+        idx.into_iter()
+            .map(|i| hya_net::Reserve {
+                target: kept[i].1.clone(),
+                plan: plans[i],
+                host: kept[i].0.clone(),
+            })
+            .collect()
+    };
+    let bench = hya_net::Bench {
+        ready: bench_ready,
+        late,
+    };
+    crate::log::info(&format!(
+        "#{id} mirror list: {} source(s) over {} connection(s), {} in reserve",
+        targets.len(),
+        per.iter().sum::<usize>(),
+        bench.ready.len()
+    ));
+    (targets, per, bench, sources)
+}
+
+/// Check a finished transfer against what the Metalink document promised.
+///
+/// Two checks, in the order that costs least:
+///
+/// 1. **`<pieces>`**, when the document published them. A failing chunk is
+///    refetched from a mirror that did not serve it and re-checked against the
+///    same digest before being accepted, so a second corrupt copy is not taken
+///    on faith merely because it was asked for twice. This is what makes a
+///    mirror list worth more than a URL list at the moment something goes wrong:
+///    the remedy is one chunk, not the whole object.
+/// 2. **The whole-file digest**, which catches everything a piece grid cannot —
+///    including a document whose pieces are absent.
+///
+/// Runs on the STAGING file, before the rename. A file that fails its digest
+/// must never appear in the destination under the name the user asked for.
+///
+/// `Trust::Advertised`, always: nothing here has authenticated the document, and
+/// its `<signature>` is recorded rather than checked. Detection and targeted
+/// refetch are self-correcting and are allowed; naming erasure positions for a
+/// parity decode is not.
+async fn verify_attested(
+    spec: &StartSpec,
+    temp: &str,
+    size: u64,
+    connector: &Arc<TlsCapableConnector>,
+    targets: &[Target],
+) -> Result<(), String> {
+    use hya_net::manifest::{ChunkVerifier, Manifest, Trust};
+
+    if let Some(json) = spec.pieces.as_deref() {
+        match Manifest::parse(json) {
+            // A manifest that no longer parses is not a reason to fail a
+            // byte-complete download: the whole-file digest below still checks
+            // it, and the object itself is fine.
+            Err(e) => crate::log::warn(&format!("#{} unusable piece list: {e}", spec.id)),
+            Ok(m) => {
+                let mut v = ChunkVerifier::new(m, Trust::Advertised);
+                {
+                    let mut f = std::fs::File::open(temp)
+                        .map_err(|e| format!("cannot reopen the staging file to verify: {e}"))?;
+                    v.write_reader(&mut f)
+                        .map_err(|e| format!("read failed while verifying: {e}"))?;
+                }
+                if !v.all_verified() {
+                    let bad = v.failed_indices().to_vec();
+                    crate::log::warn(&format!(
+                        "#{} {} chunk(s) failed their digest; refetching",
+                        spec.id,
+                        bad.len()
+                    ));
+                    let sink =
+                        Arc::new(SparseSink::create(temp, size).map_err(|e| {
+                            format!("cannot reopen the staging file to repair: {e}")
+                        })?);
+                    for (nth, idx) in bad.into_iter().enumerate() {
+                        let (lo, hi) = v.manifest().span(idx);
+                        // Rotate through the mirrors, starting past the primary.
+                        // Which host served the corrupt chunk is unknowable from
+                        // here, so a FIXED alternate is a coin-flip that repeats
+                        // itself: if the alternate happens to be the bad mirror,
+                        // every refetch fails and the whole repair dies on its
+                        // first candidate. Rotation costs nothing and puts each
+                        // retry somewhere new.
+                        let t = targets[(1 + nth) % targets.len()].clone();
+                        hya_net::fetch_range_retry(
+                            connector.clone(),
+                            t,
+                            lo,
+                            hi,
+                            sink.clone(),
+                            3,
+                            30.0,
+                        )
+                        .await
+                        .map_err(|e| format!("chunk {idx} refetch failed: {e}"))?;
+                        let mut fresh = vec![0u8; (hi - lo) as usize];
+                        {
+                            use std::io::{Read as _, Seek as _, SeekFrom};
+                            let mut f = std::fs::File::open(temp).map_err(|e| e.to_string())?;
+                            f.seek(SeekFrom::Start(lo)).map_err(|e| e.to_string())?;
+                            f.read_exact(&mut fresh).map_err(|e| e.to_string())?;
+                        }
+                        v.retry(idx);
+                        if !v.write(lo, &fresh).is_empty() {
+                            return Err(crate::i18n::tr(
+                                "A chunk still fails its checksum after refetching: the mirrors are serving bytes the mirror list does not describe.",
+                            ));
+                        }
+                    }
+                }
+                crate::log::info(&format!(
+                    "#{} {} chunk(s) verified against the mirror list",
+                    spec.id,
+                    v.verified_count()
+                ));
+            }
+        }
+    }
+
+    let Some(spec_digest) = spec.attested_digest.as_deref() else {
+        return Ok(());
+    };
+    let Some((algo, want)) = spec_digest
+        .split_once(':')
+        .and_then(|(a, h)| hya_net::digest::Algo::parse(a).map(|al| (al, h.to_ascii_lowercase())))
+    else {
+        // An algorithm this build cannot compute is reported as unchecked
+        // rather than as a pass: a verification that means nothing is worse
+        // than an honest absence.
+        crate::log::warn(&format!(
+            "#{} cannot check {spec_digest}: unknown digest algorithm",
+            spec.id
+        ));
+        return Ok(());
+    };
+    let path = temp.to_string();
+    let got = tokio::task::spawn_blocking(move || digest_file(&path, algo))
+        .await
+        .map_err(|e| format!("digest task failed: {e}"))?;
+    match got {
+        Some(g) if g == want => {
+            crate::log::info(&format!("#{} {} verified", spec.id, algo.as_str()));
+            Ok(())
+        }
+        Some(g) => Err(format!(
+            "{}: {} {} != {}",
+            crate::i18n::tr("Checksum mismatch"),
+            algo.as_str(),
+            g,
+            want
+        )),
+        None => Err(crate::i18n::tr(
+            "The downloaded file could not be read to verify it.",
+        )),
+    }
+}
+
+/// Hash a file with any algorithm a mirror list may publish.
+///
+/// Streamed in 1 MiB chunks rather than read whole: peak memory must not scale
+/// with the object, which is the one thing a downloader may never do — the
+/// transfer itself writes at exact offsets and holds no reassembly buffer, so
+/// this would otherwise be the only part of the program that could not handle a
+/// file larger than RAM.
+///
+/// MD5 and SHA-1 are computed because they are what most Metalink 3.0 documents
+/// actually publish. They are integrity checks here, not authentication: against
+/// a transmission fault, a truncating proxy or a stale mirror — which is what a
+/// published digest is for — they work, and against an adversary who chose the
+/// bytes they do not, because the digest and the object came down the same wire.
+fn digest_file(path: &str, algo: hya_net::digest::Algo) -> Option<String> {
+    use hya_net::digest::Algo;
+    use sha2::Digest as _;
+    use std::io::Read;
+    if matches!(algo, Algo::Crc32 | Algo::Crc32c) {
+        return None;
+    }
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut sha256 = sha2::Sha256::new();
+    let mut sha512 = sha2::Sha512::new();
+    let mut sha1 = sha1::Sha1::new();
+    let mut md5 = md5::Md5::new();
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => match algo {
+                Algo::Sha256 => sha256.update(&buf[..n]),
+                Algo::Sha512 => sha512.update(&buf[..n]),
+                Algo::Sha1 => sha1.update(&buf[..n]),
+                Algo::Md5 => md5.update(&buf[..n]),
+                Algo::Crc32 | Algo::Crc32c => unreachable!("refused above"),
+            },
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+    Some(hya_net::digest::to_lower_hex(&match algo {
+        Algo::Sha256 => sha256.finalize().to_vec(),
+        Algo::Sha512 => sha512.finalize().to_vec(),
+        Algo::Sha1 => sha1.finalize().to_vec(),
+        Algo::Md5 => md5.finalize().to_vec(),
+        Algo::Crc32 | Algo::Crc32c => unreachable!("refused above"),
+    }))
+}
+
 // ------------------------------------------------------------------ transfer
 
 async fn run_download(
-    spec: StartSpec,
+    mut spec: StartSpec,
     cancel: Arc<AtomicBool>,
     limiter: Arc<RateLimiter>,
     final_path: Arc<Mutex<String>>,
@@ -644,14 +1496,40 @@ async fn run_download(
         line: crate::i18n::tr("Connecting..."),
     });
     let mut url = spec.url.clone();
+    // The mirror the CURRENT attempt started from, as the document spells it.
+    //
+    // Distinct from `url`, which redirects rewrite: when mirror A answers 302
+    // and the redirect target cannot be reached, the dead entry in
+    // `spec.mirrors` is A — and removing by the post-redirect `url` removes
+    // nothing, so `plan_sources` would probe the dead chain a second time.
+    let mut attempt = url.clone();
     let mut probed: Option<(ParsedUrl, Probe)> = None;
+    // Mirrors to fall forward to when the one being probed cannot be reached at
+    // all, best-ranked first and excluding the one already being tried.
+    //
+    // Surviving a dead LEAD mirror is the whole point of a mirror list, and it
+    // is the case a publisher's ranking is least able to help with: a document
+    // says which mirrors it EXPECTS to serve well, and a host that no longer
+    // resolves was expected to serve well right up until it stopped existing.
+    // Without this the transfer fails at the first probe while holding a dozen
+    // working URLs — which is exactly the failure the reserve bench was built
+    // to remove, arriving one step before the bench exists.
+    let mut fallback: std::collections::VecDeque<String> = spec
+        .mirrors
+        .iter()
+        .map(|m| m.url.clone())
+        .filter(|u| *u != spec.url)
+        .collect();
     // Per-request setup estimate for the scheduler. Timed on the FINAL probe
     // hop only: the old whole-loop measurement folded every redirect hop in,
     // so the origins most in need of fast repair decisions (long redirect
     // chains) got the slowest ones. Floored at the CLI's 0.05 s prior so a
     // pooled-connection probe cannot make repairs look free.
     let mut delta = 0.05f64;
-    for _ in 0..10 {
+    // Redirect hops PLUS one attempt per mirror: a dead lead mirror must not
+    // eat the budget a redirect chain needs, and a dozen dead mirrors must
+    // still terminate.
+    for _ in 0..(10 + fallback.len()) {
         let u = match parse_url(&url) {
             Ok(u) => u,
             Err(e) => {
@@ -720,17 +1598,36 @@ async fn run_download(
                     break;
                 }
             }
-            Err(e) => {
-                crate::log::error(&format!("#{id} probe failed: {e}"));
-                ev(Event::Failed {
-                    id,
-                    error: e.to_string(),
-                    done: 0,
-                    held: spec.held.clone(),
-                    permission_denied: false,
-                });
-                return;
-            }
+            Err(e) => match fallback.pop_front() {
+                Some(next) => {
+                    crate::log::warn(&format!(
+                        "#{id} mirror {} could not be reached ({e}); trying the next one",
+                        u.host
+                    ));
+                    // The failed mirror is out of this run entirely: it stays
+                    // out of the source list AND out of the reserve bench, so
+                    // `plan_sources` does not probe it again and a substitution
+                    // cannot pick it later. Removed by the URL the ATTEMPT
+                    // started from, not the one it died at — a mirror that
+                    // redirects before failing dies at an address the document
+                    // never listed.
+                    spec.mirrors.retain(|m| m.url != attempt);
+                    url = next;
+                    attempt.clone_from(&url);
+                    spec.url.clone_from(&url);
+                }
+                None => {
+                    crate::log::error(&format!("#{id} probe failed: {e}"));
+                    ev(Event::Failed {
+                        id,
+                        error: e.to_string(),
+                        done: 0,
+                        held: spec.held.clone(),
+                        permission_denied: false,
+                    });
+                    return;
+                }
+            },
         }
         if cancel.load(Ordering::Relaxed) {
             ev(Event::Stopped {
@@ -767,6 +1664,77 @@ async fn run_download(
         crate::log::info(&format!(
             "#{id} remote time: server sent no Last-Modified header, skipped"
         ));
+    }
+
+    // ---- the URL is a MIRROR LIST, not the object -------------------------
+    //
+    // `https://mirrors.fedoraproject.org/metalink?repo=fedora-41` has no
+    // extension, so nothing the dialog could read told it what this was. The
+    // probe has already happened and already carries the `Content-Type`, so
+    // asking here costs nothing — and asking earlier would cost a round trip on
+    // every download that is not a mirror list.
+    //
+    // Saving it instead would hand the user a few kilobytes of XML under the
+    // name of the multi-gigabyte image they asked for: a file that passes every
+    // check this program makes and is entirely the wrong one.
+    //
+    // One hop only, and only when the job does not already carry a list — a
+    // document that names itself, or a mirror that answers with another mirror
+    // list, then costs one wasted fetch rather than an unbounded chain.
+    if spec.mirrors.is_empty() && p.serves_metalink() {
+        crate::log::info(&format!("#{id} {} serves a Metalink document", u.host));
+        match fetch_metalink(&url, &spec.user_agent).await {
+            Ok(doc) => match adopt_metalink(&doc, &mut spec, id) {
+                Ok((name, size)) => {
+                    // The destination the finisher renames to is held behind a
+                    // lock — File Info can retarget it while a transfer runs —
+                    // so the document's name has to be written THERE and not
+                    // only on the spec, or the object lands under the
+                    // redirector's name after all.
+                    if let Ok(mut g) = final_path.lock() {
+                        g.clone_from(&spec.final_path);
+                    }
+                    // Tell the list what it is really about to receive. The
+                    // user typed one address and is getting a differently named
+                    // file of a very different size; a row that keeps showing
+                    // "metalink" and no size leaves that as a mystery.
+                    ev(Event::Probed {
+                        id,
+                        size,
+                        ranges: true,
+                        file_name: Some(name),
+                    });
+                    ev(Event::Status {
+                        id,
+                        line: crate::i18n::tr("Reading the mirror list..."),
+                    });
+                    // Re-enter with the document's sources in hand. Boxed
+                    // because this is a recursive `async fn` and its future
+                    // would otherwise have to contain itself.
+                    return Box::pin(run_download(spec, cancel, limiter, final_path, tx)).await;
+                }
+                Err(e) => {
+                    ev(Event::Failed {
+                        id,
+                        error: e,
+                        done: 0,
+                        held: spec.held.clone(),
+                        permission_denied: false,
+                    });
+                    return;
+                }
+            },
+            Err(e) => {
+                ev(Event::Failed {
+                    id,
+                    error: e,
+                    done: 0,
+                    held: spec.held.clone(),
+                    permission_denied: false,
+                });
+                return;
+            }
+        }
     }
 
     let file_name = p.suggested_filename().or_else(|| {
@@ -886,16 +1854,11 @@ async fn run_download(
 
     // ---- scheduler path ---------------------------------------------------
     let n = spec.conns.clamp(1, 32);
-    let sources = vec![Source {
-        caps: if p.weak_validator || p.validator.is_none() {
-            Capability::NoValidator
-        } else {
-            Capability::Full
-        },
-        delta_est: delta,
-        ..Source::default()
-    }];
-    let per = [n];
+    // A mirror list turns this into a multi-source transfer. Everything below
+    // degenerates to exactly the previous single-source behaviour when
+    // `spec.mirrors` is empty, which is what every non-Metalink caller passes.
+    let (targets, per, bench, sources) =
+        plan_sources(&spec, &u, &target, &p, size, delta, n, &connector, id).await;
     let mut sched =
         Scheduler::new(size, sources, &per).with_stall_timeout((12.0 * delta).clamp(4.0, 45.0));
     // Adaptive: open the budget but start ONE connection active; the ramp
@@ -1051,9 +2014,23 @@ async fn run_download(
     } else {
         20
     };
-    let result = hya_net::run_transfer_cancellable(
-        connector,
-        vec![target],
+    // Substitutions are logged rather than surfaced in a row: the connection
+    // rows carry no host name, so the only place a user could learn that the
+    // mirror changed under a running transfer is the log — and a download that
+    // took twice as long as expected is exactly when they go looking.
+    let sub_id = id;
+    let mut on_sub = move |src: usize, r: &hya_net::Reserve| {
+        crate::log::warn(&format!(
+            "#{sub_id} source {src} failed; switched to reserve mirror {}",
+            r.host
+        ));
+    };
+    // Kept for the chunk-repair path, which needs somewhere to refetch a bad
+    // chunk from after `targets` has been moved into the transfer.
+    let conn_targets = targets.clone();
+    let result = hya_net::run_transfer_with_reserves(
+        connector.clone(),
+        targets,
         &per,
         size,
         sink,
@@ -1062,6 +2039,8 @@ async fn run_download(
         &mut observe,
         pace,
         Some(cancel.clone()),
+        bench,
+        Some(&mut on_sub),
     )
     .await;
 
@@ -1077,6 +2056,23 @@ async fn run_download(
             crate::log::debug(&format!(
                 "#{id} transfer {elapsed:.2}s, {reqs} requests over {n} conns"
             ));
+            // Verify against what the document said BEFORE the staging file is
+            // renamed into place. A file that fails its digest must never
+            // appear in the destination directory under the name the user
+            // asked for: at that point it looks, to them and to every other
+            // program, exactly like a good one.
+            if let Err(why) = verify_attested(&spec, &temp, size, &connector, &conn_targets).await {
+                crate::log::error(&format!("#{id} verification failed: {why}"));
+                let _ = std::fs::remove_file(&temp);
+                ev(Event::Failed {
+                    id,
+                    error: why,
+                    done,
+                    held: vec![],
+                    permission_denied: false,
+                });
+                return;
+            }
             finish_file(&spec, &final_path, &tx, size, elapsed, stamp);
         }
         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
@@ -1368,6 +2364,255 @@ fn finish_file(
 mod tests {
     use super::*;
 
+    fn scratch(name: &str, body: &str) -> String {
+        let p = std::env::temp_dir().join(format!(
+            "hydra-gui-metalink-{name}-{}.meta4",
+            std::process::id()
+        ));
+        std::fs::write(&p, body).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    const DOC: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="big.iso">
+    <size>4194304</size>
+    <hash type="md5">0123456789abcdef0123456789abcdef</hash>
+    <hash type="sha-256">d201bd1eeb17086cd3aaf82b156810a5ba3f389e10b4472c9b2c7182f771a9ef</hash>
+    <pieces length="1048576" type="sha-256">
+      <hash>0000000000000000000000000000000000000000000000000000000000000001</hash>
+      <hash>0000000000000000000000000000000000000000000000000000000000000002</hash>
+      <hash>0000000000000000000000000000000000000000000000000000000000000003</hash>
+      <hash>0000000000000000000000000000000000000000000000000000000000000004</hash>
+    </pieces>
+    <url priority="9">https://slow.example/big.iso</url>
+    <url priority="1" maxconnections="2">https://fast.example/big.iso</url>
+    <url priority="4">rsync://rs.example/big.iso</url>
+  </file>
+</metalink>"#;
+
+    #[test]
+    fn a_local_document_resolves_into_a_ranked_mirror_list_with_its_attestation() {
+        let path = scratch("resolve", DOC);
+        let doc = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(probe_metalink(path.clone(), "test".into()))
+            .expect("a local document needs no network");
+        assert_eq!(doc.files.len(), 1);
+        let f = &doc.files[0];
+        assert_eq!(f.name, "big.iso");
+        // Best mirror first and the item's own address, so the row a user sees
+        // is the source the transfer actually leads with.
+        assert_eq!(f.primary, "https://fast.example/big.iso");
+        // The rsync mirror is counted as listed and is not a source: a list
+        // that silently shrank would be indistinguishable from one the
+        // publisher wrote that way.
+        assert_eq!(f.mirrors_listed, 3);
+        assert_eq!(f.info.mirrors.len(), 2);
+        assert_eq!(f.info.mirrors[0].priority, 1);
+        assert_eq!(f.info.mirrors[0].max_connections, Some(2));
+        assert_eq!(f.info.mirrors[1].priority, 2);
+        assert_eq!(f.info.size, Some(4_194_304));
+        // The STRONGEST digest, not the first listed: verifying against the md5
+        // with a sha256 in hand is a choice, and it is the wrong one.
+        assert_eq!(
+            f.info.digest.as_deref(),
+            Some("sha256:d201bd1eeb17086cd3aaf82b156810a5ba3f389e10b4472c9b2c7182f771a9ef")
+        );
+        assert_eq!(f.piece_count, 4);
+        assert!(f.info.pieces.is_some());
+        assert!(!f.info.signed);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_ftp_mirror_ranked_first_by_the_publisher_does_not_capture_the_item() {
+        // The engine routes on the item's URL: an ftp primary is not "ftp
+        // first", it is the whole transfer dropped to one sequential stream
+        // with the mirror list abandoned. metalinker.org's own catix sample
+        // ranks its ftp mirrors at preference 100 beside one http mirror.
+        let src = r#"<metalink version="3.0" xmlns="http://www.metalinker.org/"><files>
+          <file name="c.iso"><size>10</size><resources>
+            <url type="ftp" preference="100">ftp://a.example/c.iso</url>
+            <url type="http" preference="1">http://h.example/c.iso</url>
+          </resources></file></files></metalink>"#;
+        let path = scratch("ftp-tier", src);
+        let doc = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(probe_metalink(path.clone(), "test".into()))
+            .unwrap();
+        let f = &doc.files[0];
+        assert_eq!(f.primary, "http://h.example/c.iso");
+        assert_eq!(f.info.mirrors[0].url, "http://h.example/c.iso");
+        // The ftp mirror is not carried as a "reserve" either: the
+        // multi-source engine probes and substitutes over HTTP targets, so a
+        // mixed list would send its fallback requests to port 21. One
+        // transport per item.
+        assert_eq!(f.info.mirrors.len(), 1);
+        assert_eq!(f.mirrors_listed, 2, "the document still shows both");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_document_is_recognised_by_its_name_or_its_content_but_never_guessed_at() {
+        // The name, which is the only signal a remote URL offers before it is
+        // fetched.
+        assert!(metalink_address("https://example.org/f.iso.metalink"));
+        assert!(metalink_address("https://example.org/f.meta4"));
+        assert!(metalink_address("https://example.org/f.meta4?token=1"));
+        // A redirector URL names nothing; it is settled by `Content-Type` at
+        // probe time, not guessed at here.
+        assert!(!metalink_address("https://mirrors.example/metalink?repo=x"));
+        assert!(!metalink_address("https://example.org/big.iso"));
+        assert!(!metalink_address(""));
+
+        // A LOCAL file's content, because a document saved by a browser is as
+        // likely to be called `download(1)` as anything else.
+        let p = std::env::temp_dir().join(format!("hydra-gui-ml-content-{}", std::process::id()));
+        std::fs::write(&p, DOC).unwrap();
+        assert!(metalink_address(&p.to_string_lossy()));
+        // ...and an unrelated XML file that merely mentions the word is not one:
+        // a false positive here means treating a user's real download as a
+        // mirror list.
+        std::fs::write(&p, "<rss><title>metalink news</title></rss>").unwrap();
+        assert!(!metalink_address(&p.to_string_lossy()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn an_entry_with_no_fetchable_mirror_is_dropped_rather_than_added_unusable() {
+        let src = r#"<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+            <file name="only-rsync"><size>1</size><url>rsync://a/f</url></file>
+            <file name="ok"><size>1</size><url>https://a/f</url></file>
+          </metalink>"#;
+        let path = scratch("norsync", src);
+        let doc = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(probe_metalink(path.clone(), "test".into()))
+            .unwrap();
+        assert_eq!(doc.files.len(), 1);
+        assert_eq!(doc.files[0].name, "ok");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_name_that_escapes_the_destination_is_refused_before_anything_is_added() {
+        // RFC 5854 4.1.2.1. A downloader that honours it writes to a path
+        // whoever served the document chose.
+        let src = r#"<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+            <file name="../../etc/cron.d/x"><size>1</size><url>https://a/f</url></file>
+          </metalink>"#;
+        let path = scratch("escape", src);
+        let got = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(probe_metalink(path.clone(), "test".into()));
+        assert!(got.is_err(), "an unusable document must not resolve");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pieces_that_do_not_tile_the_size_are_dropped_and_the_file_is_still_offered() {
+        // The document contradicts itself. Refusing the file would be wrong —
+        // it is perfectly fetchable — and applying the pieces anyway would
+        // report every chunk as corrupt.
+        let src = r#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="f">
+            <size>100</size>
+            <pieces length="4" type="sha-1">
+              <hash>1111111111111111111111111111111111111111</hash>
+            </pieces>
+            <url>https://a/f</url></file></metalink>"#;
+        let path = scratch("mistile", src);
+        let doc = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(probe_metalink(path.clone(), "test".into()))
+            .unwrap();
+        assert_eq!(doc.files[0].piece_count, 0);
+        assert!(doc.files[0].info.pieces.is_none());
+        assert_eq!(doc.files[0].info.size, Some(100));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn adopting_a_document_keeps_the_users_file_and_falls_back_to_the_first() {
+        // The follow path lands on a document that may describe several files,
+        // and one job fetches one object. A row the user already aimed at a
+        // file must keep pointing at it; only a job that arrived with nothing
+        // but a redirector URL takes the first entry.
+        let src = r#"<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+          <file name="a.iso"><size>10</size>
+            <url priority="2">https://s.example/a.iso</url>
+            <url priority="1">https://f.example/a.iso</url></file>
+          <file name="b.iso"><size>20</size>
+            <url>https://f.example/b.iso</url></file>
+        </metalink>"#;
+        let doc = hya_net::metalink::parse(src).unwrap();
+
+        // The row was aimed at b.iso: it stays aimed there.
+        let mut spec = StartSpec {
+            final_path: "/tmp/dl/b.iso".into(),
+            held: vec![(0, 5)],
+            ..StartSpec::plain()
+        };
+        let (name, size) = adopt_metalink(&doc, &mut spec, 1).unwrap();
+        assert_eq!(name, "b.iso");
+        assert_eq!(size, Some(20));
+        assert_eq!(spec.url, "https://f.example/b.iso");
+        assert_eq!(spec.attested_size, Some(20));
+        assert!(
+            spec.held.is_empty(),
+            "held spans described the redirector's own body, not the object"
+        );
+
+        // A redirector URL names nothing worth keeping: first entry, renamed,
+        // best mirror leading and the ranking dense from 1.
+        let mut spec = StartSpec {
+            final_path: "/tmp/dl/metalink".into(),
+            ..StartSpec::plain()
+        };
+        let (name, _) = adopt_metalink(&doc, &mut spec, 1).unwrap();
+        assert_eq!(name, "a.iso");
+        assert_eq!(
+            spec.final_path, "/tmp/dl/a.iso",
+            "the document names the file"
+        );
+        assert_eq!(spec.url, "https://f.example/a.iso", "priority 1 leads");
+        assert_eq!(
+            spec.mirrors.iter().map(|m| m.priority).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(
+            spec.attested_digest.is_none(),
+            "no digest published means none invented"
+        );
+    }
+
+    #[test]
+    fn adopting_a_document_with_nothing_fetchable_is_an_error_not_a_stall() {
+        let src = r#"<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+          <file name="../evil"><size>1</size><url>https://a/x</url></file>
+          <file name="ok"><size>1</size><url>rsync://a/x</url></file>
+        </metalink>"#;
+        let doc = hya_net::metalink::parse(src).unwrap();
+        let mut spec = StartSpec {
+            final_path: "/tmp/dl/x".into(),
+            ..StartSpec::plain()
+        };
+        // One entry escapes the destination, the other has no transport: both
+        // are refused, and the job fails with a sentence instead of fetching an
+        // attacker-chosen path or nothing.
+        assert!(adopt_metalink(&doc, &mut spec, 1).is_err());
+    }
+
     #[test]
     fn a_url_that_names_no_file_says_so() {
         // A URL that names a file: the name means something, and the
@@ -1533,6 +2778,7 @@ mod tests {
                 limit: None,
                 adaptive: std::env::var_os("HYDRA_AB_ADAPTIVE").is_some(),
                 remote_time: false,
+                ..StartSpec::plain()
             })));
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
             loop {
@@ -1553,6 +2799,177 @@ mod tests {
             }
             let _ = std::fs::remove_file(&final_path);
         }
+    }
+
+    /// Live network test of the full MIRROR-LIST path: read a real document,
+    /// probe its mirrors, run the multi-source transfer, and verify the bytes
+    /// against the digest the document published.
+    ///
+    /// Opt-in via `HYDRA_GUI_METALINK_TEST=<path or url>`, because it needs the
+    /// network and a real mirror list. It is the only thing that exercises the
+    /// GUI's own `plan_sources` and `verify_attested` end to end — the unit
+    /// tests above stop at resolution, and a bug between resolution and the
+    /// transfer would be invisible to them.
+    #[test]
+    fn live_metalink() {
+        let Some(src) = std::env::var("HYDRA_GUI_METALINK_TEST")
+            .ok()
+            .filter(|s| !s.is_empty())
+        else {
+            return;
+        };
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let doc = rt
+            .block_on(probe_metalink(src, "hydra-gui-test".into()))
+            .expect("the document must resolve");
+        let f = doc.files.first().expect("at least one file").clone();
+        eprintln!(
+            "metalink {}: {:?}, {} mirror(s), {} bytes, digest {:?}",
+            doc.version,
+            f.name,
+            f.info.mirrors.len(),
+            f.info.size.unwrap_or(0),
+            f.info.digest
+        );
+        assert!(
+            f.info.mirrors.len() > 1,
+            "this test is about MULTI-source; the document offered {}",
+            f.info.mirrors.len()
+        );
+
+        ensure_started();
+        let mut rx = take_events().expect("events");
+        let dir = std::env::temp_dir();
+        let final_path = dir.join(format!("hydra-gui-metalink-{}", f.name));
+        let _ = std::fs::remove_file(&final_path);
+        send(Cmd::Start(Box::new(StartSpec {
+            id: 1,
+            url: f.primary.clone(),
+            conns: 8,
+            user_agent: "hydra-gui-test".into(),
+            temp_path: dir
+                .join("hydra-gui-metalink.part")
+                .to_string_lossy()
+                .into_owned(),
+            final_path: final_path.to_string_lossy().into_owned(),
+            mirrors: f.info.mirrors.clone(),
+            attested_size: f.info.size,
+            attested_digest: f.info.digest.clone(),
+            pieces: f.info.pieces.clone(),
+            ..StartSpec::plain()
+        })));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            assert!(std::time::Instant::now() < deadline, "timed out");
+            match rx.blocking_recv().expect("engine alive") {
+                Event::Finished {
+                    id: 1,
+                    elapsed,
+                    size,
+                } => {
+                    eprintln!(
+                        "{size} bytes in {elapsed:.2}s = {:.2} MB/s",
+                        size as f64 / elapsed / 1.048576e6
+                    );
+                    // The engine verifies against the document BEFORE the
+                    // rename, so a file that exists at the destination has
+                    // already passed its digest. Checking the size here catches
+                    // the one thing that check cannot: a rename that landed
+                    // somewhere else.
+                    let on_disk = std::fs::metadata(&final_path).expect("the file must exist");
+                    if let Some(want) = f.info.size {
+                        assert_eq!(on_disk.len(), want, "size must match the document");
+                    }
+                    break;
+                }
+                // `Failed` is the interesting outcome to report in full: a
+                // digest mismatch and an unreachable mirror read very
+                // differently, and a bare `panic!("failed")` would hide which.
+                Event::Failed {
+                    id: 1, error, done, ..
+                } => {
+                    panic!("failed after {done} bytes: {error}")
+                }
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_file(&final_path);
+    }
+
+    /// Live test of the case a user actually hits: a REDIRECTOR URL pasted into
+    /// Add URL, which reveals itself as a mirror list only through its
+    /// `Content-Type`.
+    ///
+    /// Nothing the dialog can read tells it what
+    /// `https://mirrors.fedoraproject.org/metalink?repo=...` is, so the engine
+    /// has to notice on the probe it was going to make anyway. Getting this
+    /// wrong is not a crash: it saves a few kilobytes of XML under the name of
+    /// the object the user asked for, and reports success.
+    ///
+    /// Opt-in via `HYDRA_GUI_METALINK_URL_TEST=<url>`.
+    #[test]
+    fn live_metalink_redirector_url() {
+        let Some(url) = std::env::var("HYDRA_GUI_METALINK_URL_TEST")
+            .ok()
+            .filter(|s| !s.is_empty())
+        else {
+            return;
+        };
+        ensure_started();
+        let mut rx = take_events().expect("events");
+        let dir = std::env::temp_dir().join(format!("hydra-gui-mlurl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Deliberately the name the URL implies, which is what the dialog would
+        // have derived: the document must overwrite it.
+        let guessed = dir.join("metalink");
+        send(Cmd::Start(Box::new(StartSpec {
+            id: 1,
+            url,
+            conns: 4,
+            user_agent: "hydra-gui-test".into(),
+            temp_path: dir.join("metalink.part").to_string_lossy().into_owned(),
+            final_path: guessed.to_string_lossy().into_owned(),
+            ..StartSpec::plain()
+        })));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let mut named: Option<String> = None;
+        loop {
+            assert!(std::time::Instant::now() < deadline, "timed out");
+            match rx.blocking_recv().expect("engine alive") {
+                Event::Probed {
+                    id: 1,
+                    file_name,
+                    size,
+                    ..
+                } => {
+                    eprintln!("probed: {file_name:?} {size:?}");
+                    if let Some(n) = file_name {
+                        named = Some(n);
+                    }
+                }
+                Event::Finished { id: 1, size, .. } => {
+                    let name = named.expect("the document must have named the file");
+                    assert_ne!(
+                        name, "metalink",
+                        "the row must be renamed from the redirector's own name"
+                    );
+                    let landed = dir.join(&name);
+                    assert!(
+                        landed.exists(),
+                        "the object must land under the document's name, not the URL's"
+                    );
+                    assert!(!guessed.exists(), "the XML must not be saved as the object");
+                    eprintln!("{size} bytes as {name}");
+                    break;
+                }
+                Event::Failed { id: 1, error, .. } => panic!("failed: {error}"),
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Live network test of the full engine path (probe -> scheduler ->
@@ -1589,6 +3006,7 @@ mod tests {
             // On, so the harness exercises the stamping path too: it is part
             // of what "the file lands correctly on disk" means now.
             remote_time: true,
+            ..StartSpec::plain()
         })));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         let mut probed_size = None;

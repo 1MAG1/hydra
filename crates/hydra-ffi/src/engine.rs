@@ -152,6 +152,30 @@ pub(crate) struct JobCfg {
     pub max_bytes_per_second: u64,
     pub resume: bool,
     pub adaptive: bool,
+    /// Publisher ranking and per-mirror ceilings, index-aligned with `urls`.
+    ///
+    /// Empty for a job created from a plain URL list, which is exactly what an
+    /// unranked set of interchangeable mirrors is — so nothing changes for a
+    /// caller that never touches a Metalink.
+    pub source_plans: Vec<hya_core::SourcePlan>,
+    /// Object size stated by a Metalink document rather than by a mirror.
+    ///
+    /// This is what makes multi-source assembly possible across a real mirror
+    /// list. Without it, agreement has to be established pairwise on a strong
+    /// validator, and independent mirror operators cannot share an `ETag` — so
+    /// the gate keeps exactly one source out of nineteen. A size published by
+    /// whoever built the object, from a host that is usually not any of the
+    /// mirrors, is both stronger evidence and satisfiable.
+    pub attested_size: Option<u64>,
+    /// Per-chunk digests published by the document, when its `<pieces>` tile the
+    /// stated size.
+    ///
+    /// Verified after the transfer, with a failing chunk refetched from a
+    /// different mirror. That is the difference between "the download is
+    /// corrupt, start again" and "chunk 412 is corrupt, refetch 4 MiB".
+    pub pieces: Option<hya_net::manifest::Manifest>,
+    /// Where the size, digest and pieces came from, for the log.
+    pub attested_by: Option<String>,
 }
 
 // ------------------------------------------------------------------- the job

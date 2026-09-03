@@ -1833,3 +1833,600 @@ pub unsafe extern "C" fn hydra_engine_set_log_callback(
         E::HYDRA_OK
     })
 }
+
+// ================================================================== metalink
+
+/// Magic number for verifying Metalink handle validity.
+const ML_MAGIC: u64 = 0x4879_6472_614D_4C4B;
+
+struct MetalinkBox {
+    magic: u64,
+    doc: crate::metalink::Doc,
+}
+
+/// Borrow the document behind a handle.
+///
+/// # Safety
+///
+/// `p` must be a handle from one of the `hydra_metalink_*` constructors that has
+/// not been passed to [`hydra_metalink_free`].
+unsafe fn ml<'a>(p: *mut hydra_metalink_t) -> Result<&'a MetalinkBox, hydra_error_code_t> {
+    if p.is_null() {
+        return Err(err::set(E::HYDRA_ERR_INVALID_ARGUMENT, "document is NULL"));
+    }
+    // SAFETY: the caller's contract is that `p` came from a constructor here,
+    // each of which hands out exactly `Box::into_raw` of a `MetalinkBox`. The
+    // magic check below rejects the common violations of that contract.
+    let b = unsafe { &*(p as *mut MetalinkBox) };
+    if b.magic != ML_MAGIC {
+        return Err(err::set(
+            E::HYDRA_ERR_INVALID_ARGUMENT,
+            "metalink handle is not valid (already freed, or not from hydra)",
+        ));
+    }
+    Ok(b)
+}
+
+fn ml_out(doc: crate::metalink::Doc, out: *mut *mut hydra_metalink_t) -> hydra_error_code_t {
+    let b = Box::new(MetalinkBox {
+        magic: ML_MAGIC,
+        doc,
+    });
+    // SAFETY: `out` was checked non-null by every caller before this point.
+    unsafe { std::ptr::write(out, Box::into_raw(b) as *mut hydra_metalink_t) };
+    E::HYDRA_OK
+}
+
+/// Parse a Metalink document held in memory.
+///
+/// `xml` is the document text, NUL-terminated UTF-8. Both dialects are read:
+/// Metalink 3.0 (`.metalink`, what mirrormanager and most distribution
+/// redirectors emit) and Metalink 4 / RFC 5854 (`.meta4`). The two spell mirror
+/// preference on scales that run in OPPOSITE directions; the reader normalises
+/// them, so every priority this ABI reports has 1 as best.
+///
+/// On success `*out_document` owns a document that must be released with
+/// [`hydra_metalink_free`].
+///
+/// Thread-safe. Non-blocking. Allocates internally.
+///
+/// # Safety
+///
+/// `xml` must be a valid NUL-terminated string and `out_document` must be
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn hydra_metalink_parse(
+    xml: *const c_char,
+    out_document: *mut *mut hydra_metalink_t,
+) -> hydra_error_code_t {
+    shield(|| {
+        if out_document.is_null() {
+            return err::set(E::HYDRA_ERR_INVALID_ARGUMENT, "out_document is NULL");
+        }
+        // SAFETY: caller's contract.
+        let text = match unsafe { mem::cstr_req(xml) } {
+            Ok(s) => s,
+            Err(()) => {
+                return err::set(
+                    E::HYDRA_ERR_INVALID_ARGUMENT,
+                    "xml is NULL or not valid UTF-8",
+                )
+            }
+        };
+        match crate::metalink::parse(text, "<memory>") {
+            Ok(doc) => ml_out(doc, out_document),
+            Err(d) => fail(d),
+        }
+    })
+}
+
+/// Read a Metalink document from a local file.
+///
+/// Thread-safe. Blocking (one file read). Allocates internally.
+///
+/// # Safety
+///
+/// `path` must be a valid NUL-terminated string and `out_document` must be
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn hydra_metalink_open(
+    path: *const c_char,
+    out_document: *mut *mut hydra_metalink_t,
+) -> hydra_error_code_t {
+    shield(|| {
+        if out_document.is_null() {
+            return err::set(E::HYDRA_ERR_INVALID_ARGUMENT, "out_document is NULL");
+        }
+        // SAFETY: caller's contract.
+        let p = match unsafe { mem::cstr_req(path) } {
+            Ok(s) => s,
+            Err(()) => {
+                return err::set(
+                    E::HYDRA_ERR_INVALID_ARGUMENT,
+                    "path is NULL or not valid UTF-8",
+                )
+            }
+        };
+        match crate::metalink::open(p) {
+            Ok(doc) => ml_out(doc, out_document),
+            Err(d) => fail(d),
+        }
+    })
+}
+
+/// Fetch a Metalink document over HTTP and read it.
+///
+/// Runs on the engine's own runtime and **blocks the calling thread** until the
+/// document arrives or the fetch fails — a mirror list is kilobytes, and an
+/// application that wants it off the UI thread has its own thread pool for that.
+/// Redirects are followed, because mirror redirectors use them constantly.
+///
+/// The body is capped at 4 MiB: it is fetched before anything about it is known,
+/// and an unbounded read of a body chosen by whoever answers is a
+/// memory-exhaustion primitive no amount of care in the parser can fix.
+///
+/// Thread-safe. Blocking. Allocates internally.
+///
+/// # Safety
+///
+/// `engine` must be valid, `url` must be a valid NUL-terminated string, and
+/// `out_document` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn hydra_metalink_fetch(
+    engine: *mut hydra_engine_t,
+    url: *const c_char,
+    out_document: *mut *mut hydra_metalink_t,
+) -> hydra_error_code_t {
+    shield(|| {
+        // SAFETY: caller's contract.
+        let eng = match unsafe { live(engine) } {
+            Ok(e) => e,
+            Err(e) => return e,
+        };
+        if out_document.is_null() {
+            return err::set(E::HYDRA_ERR_INVALID_ARGUMENT, "out_document is NULL");
+        }
+        // SAFETY: caller's contract.
+        let u = match unsafe { mem::cstr_req(url) } {
+            Ok(s) => s.to_string(),
+            Err(()) => {
+                return err::set(
+                    E::HYDRA_ERR_INVALID_ARGUMENT,
+                    "url is NULL or not valid UTF-8",
+                )
+            }
+        };
+        let conn = match eng.connector(None) {
+            Ok(c) => c,
+            Err(d) => return fail(d),
+        };
+        let agent = eng.cfg.user_agent.clone();
+        let rt = eng.rt.clone();
+        let res = std::thread::scope(|s| {
+            s.spawn(|| rt.block_on(crate::metalink::fetch(&conn, &u, &[], &agent, 10)))
+                .join()
+        });
+        match res {
+            Ok(Ok(doc)) => ml_out(doc, out_document),
+            Ok(Err(d)) => fail(d),
+            Err(_) => err::set(E::HYDRA_ERR_INTERNAL, "metalink fetch task panicked"),
+        }
+    })
+}
+
+/// Release a parsed document.
+///
+/// Thread-safe. Non-blocking.
+///
+/// # Safety
+///
+/// `document` must be NULL or a handle this library produced and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn hydra_metalink_free(document: *mut hydra_metalink_t) {
+    shield_unit(|| {
+        if document.is_null() {
+            return;
+        }
+        // SAFETY: caller's contract. The magic is cleared first so a repeat free
+        // is rejected by `ml` rather than freeing a second time.
+        unsafe {
+            let b = &mut *(document as *mut MetalinkBox);
+            if b.magic != ML_MAGIC {
+                return;
+            }
+            b.magic = 0;
+            drop(Box::from_raw(document as *mut MetalinkBox));
+        }
+    })
+}
+
+/// Which dialect a document was written in.
+///
+/// Returns `HYDRA_METALINK_UNKNOWN` for an invalid handle, which is also what a
+/// document with no recognisable namespace reports — the distinction is not one
+/// a caller can act on differently.
+///
+/// Thread-safe. Non-blocking.
+///
+/// # Safety
+///
+/// `document` must be a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn hydra_metalink_version(
+    document: *mut hydra_metalink_t,
+) -> hydra_metalink_version_t {
+    shield_value(hydra_metalink_version_t::HYDRA_METALINK_UNKNOWN, || {
+        // SAFETY: caller's contract.
+        match unsafe { ml(document) } {
+            Ok(b) => crate::metalink::version_of(&b.doc),
+            Err(_) => hydra_metalink_version_t::HYDRA_METALINK_UNKNOWN,
+        }
+    })
+}
+
+/// Every file entry a document describes.
+///
+/// This is what a host application shows a user before anything is fetched: the
+/// names, the sizes, whether a digest and a piece list are published, and how
+/// many of the listed mirrors this build can actually fetch from. A mirror list
+/// that silently loses two thirds of its entries to an unsupported scheme is
+/// worth seeing before a multi-gigabyte download rather than after.
+///
+/// Release with [`hydra_metalink_file_array_free`].
+///
+/// Thread-safe. Non-blocking. Allocates internally.
+///
+/// # Safety
+///
+/// `document` must be a valid handle and `out` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn hydra_metalink_files(
+    document: *mut hydra_metalink_t,
+    out: *mut hydra_metalink_file_array_t,
+) -> hydra_error_code_t {
+    shield(|| {
+        // SAFETY: caller's contract.
+        let b = match unsafe { ml(document) } {
+            Ok(b) => b,
+            Err(e) => return e,
+        };
+        if out.is_null() {
+            return err::set(E::HYDRA_ERR_INVALID_ARGUMENT, "out is NULL");
+        }
+        let items: Vec<hydra_metalink_file_t> = b
+            .doc
+            .inner
+            .files
+            .iter()
+            .map(|f| {
+                let safe = f.safe_name();
+                let pieces = f.pieces.as_ref();
+                hydra_metalink_file_t {
+                    // Absent, not empty, when the name is refused: the field's
+                    // contract says so, and an empty string invites the caller
+                    // to save the file under it.
+                    name: safe
+                        .as_deref()
+                        .map(mem::string_out)
+                        .unwrap_or_else(|_| hydra_string_t::null()),
+                    digest: f
+                        .best_hash()
+                        .map(|h| mem::string_out(&h.spec()))
+                        .unwrap_or_else(hydra_string_t::null),
+                    version: f
+                        .version
+                        .as_deref()
+                        .map(mem::string_out)
+                        .unwrap_or_else(hydra_string_t::null),
+                    size: f.size.unwrap_or(0),
+                    piece_length: pieces.map(|p| p.length).unwrap_or(0),
+                    piece_count: pieces.map(|p| p.hashes.len()).unwrap_or(0),
+                    mirror_count: f.urls.len(),
+                    fetchable_count: f.fetchable_urls().len(),
+                    max_connections: f.default_max_connections.unwrap_or(0).min(64) as u32,
+                    pieces_tile: u8::from(
+                        pieces.is_some_and(|p| f.size.is_some_and(|s| p.covers(s))),
+                    ),
+                    signed: u8::from(f.signature.is_some()),
+                    name_usable: u8::from(safe.is_ok()),
+                    reserved: [0; 5],
+                }
+            })
+            .collect();
+        // SAFETY: `out` was checked non-null above.
+        unsafe { std::ptr::write(out, mem::metalink_files_out(items)) };
+        E::HYDRA_OK
+    })
+}
+
+/// Release a file array and the strings inside it.
+///
+/// Thread-safe. Non-blocking.
+///
+/// # Safety
+///
+/// `a` must be NULL or an array this library produced and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn hydra_metalink_file_array_free(a: *mut hydra_metalink_file_array_t) {
+    shield_unit(|| {
+        if a.is_null() {
+            return;
+        }
+        // SAFETY: caller's contract; zeroing makes a repeat free harmless.
+        unsafe {
+            let taken = std::ptr::replace(
+                a,
+                hydra_metalink_file_array_t {
+                    items: std::ptr::null_mut(),
+                    len: 0,
+                },
+            );
+            mem::metalink_files_drop(taken);
+        }
+    })
+}
+
+/// The mirrors of one file entry, in the order hydra would use them.
+///
+/// Best first, with `priority` renumbered densely from 1 whichever dialect the
+/// document used — so a caller never has to know that Metalink 3.0's scale runs
+/// the other way. Only mirrors this build has a transport for are returned;
+/// `hydra_metalink_file_t.mirror_count` against `fetchable_count` is how many
+/// were dropped.
+///
+/// Release with [`hydra_metalink_url_array_free`].
+///
+/// Thread-safe. Non-blocking. Allocates internally.
+///
+/// # Safety
+///
+/// `document` must be a valid handle and `out` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn hydra_metalink_mirrors(
+    document: *mut hydra_metalink_t,
+    file_index: usize,
+    out: *mut hydra_metalink_url_array_t,
+) -> hydra_error_code_t {
+    shield(|| {
+        // SAFETY: caller's contract.
+        let b = match unsafe { ml(document) } {
+            Ok(b) => b,
+            Err(e) => return e,
+        };
+        if out.is_null() {
+            return err::set(E::HYDRA_ERR_INVALID_ARGUMENT, "out is NULL");
+        }
+        let Some(f) = b.doc.inner.files.get(file_index) else {
+            return err::set(
+                E::HYDRA_ERR_NOT_FOUND,
+                "file_index is past the end of the document",
+            );
+        };
+        let items: Vec<hydra_metalink_url_t> = crate::metalink::ranked(f)
+            .into_iter()
+            .map(
+                |(url, plan, location, protocol, _stated)| hydra_metalink_url_t {
+                    url: mem::string_out(&url),
+                    location: location
+                        .as_deref()
+                        .map(mem::string_out)
+                        .unwrap_or_else(hydra_string_t::null),
+                    protocol: mem::string_out(&protocol),
+                    priority: plan.priority,
+                    max_connections: plan.max_connections.unwrap_or(0).min(64) as u32,
+                    fetchable: 1,
+                    reserved: [0; 7],
+                },
+            )
+            .collect();
+        // SAFETY: `out` was checked non-null above.
+        unsafe { std::ptr::write(out, mem::metalink_urls_out(items)) };
+        E::HYDRA_OK
+    })
+}
+
+/// Release a mirror array and the strings inside it.
+///
+/// Thread-safe. Non-blocking.
+///
+/// # Safety
+///
+/// `a` must be NULL or an array this library produced and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn hydra_metalink_url_array_free(a: *mut hydra_metalink_url_array_t) {
+    shield_unit(|| {
+        if a.is_null() {
+            return;
+        }
+        // SAFETY: caller's contract; zeroing makes a repeat free harmless.
+        unsafe {
+            let taken = std::ptr::replace(
+                a,
+                hydra_metalink_url_array_t {
+                    items: std::ptr::null_mut(),
+                    len: 0,
+                },
+            );
+            mem::metalink_urls_drop(taken);
+        }
+    })
+}
+
+/// Create a job for one entry of a Metalink document.
+///
+/// `config` is the ordinary job configuration and supplies everything about how
+/// the transfer should behave — output path, headers, proxy, rate cap, retries,
+/// priority. Its `urls` and `url_count` are IGNORED and may be NULL/0: the
+/// document supplies the sources. Its `checksum` is honoured when set and
+/// otherwise filled in from the document's strongest published digest, so a
+/// caller with a digest from a signed announcement keeps it and a caller with
+/// none still gets verification.
+///
+/// What the document adds beyond the URLs is the point of this call:
+///
+/// * the **size**, which admits every agreeing mirror to a multi-source transfer
+///   without the `ETag` match independent mirror operators cannot produce;
+/// * the **ranking**, which decides the first split and the reserve order;
+/// * the **reserve bench** — mirrors past the connection budget, substituted in
+///   place when a source dies, so nineteen mirrors are worth more than four;
+/// * **`<pieces>`**, verified after the transfer with a failing chunk refetched
+///   from a different mirror instead of the whole object being downloaded again.
+///
+/// A `<signature>` in the document is recorded and NOT verified. Verify it
+/// yourself before trusting the digests it covers.
+///
+/// Thread-safe. Non-blocking. Allocates internally.
+///
+/// # Safety
+///
+/// `engine` and `document` must be valid, `config` must have been initialised by
+/// [`hydra_job_config_init`], and `out_job_id` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn hydra_job_create_from_metalink(
+    engine: *mut hydra_engine_t,
+    document: *mut hydra_metalink_t,
+    file_index: usize,
+    config: *const hydra_job_config_t,
+    out_job_id: *mut hydra_job_id_t,
+) -> hydra_error_code_t {
+    shield(|| {
+        // SAFETY: caller's contract.
+        let eng = match unsafe { live(engine) } {
+            Ok(e) => e,
+            Err(e) => return e,
+        };
+        // SAFETY: caller's contract.
+        let b = match unsafe { ml(document) } {
+            Ok(b) => b,
+            Err(e) => return e,
+        };
+        if out_job_id.is_null() {
+            return err::set(E::HYDRA_ERR_INVALID_ARGUMENT, "out_job_id is NULL");
+        }
+        let chosen = match crate::metalink::choose(&b.doc, file_index) {
+            Ok(c) => c,
+            Err(d) => return fail(d),
+        };
+        // The document's URLs stand in for the caller's while the configuration
+        // is validated, so every check `hydra_job_create` makes — output path,
+        // headers, proxy, credentials — is made here too, on the same code.
+        let holders: Vec<std::ffi::CString> = match chosen
+            .urls
+            .iter()
+            .map(|u| std::ffi::CString::new(u.as_str()))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(v) => v,
+            Err(_) => {
+                return err::set(
+                    E::HYDRA_ERR_INVALID_URL,
+                    "the document names a URL containing a NUL byte",
+                )
+            }
+        };
+        let ptrs: Vec<*const c_char> = holders.iter().map(|c| c.as_ptr()).collect();
+        // SAFETY: caller's contract that `config` is an initialised job config.
+        let mut patched = unsafe { std::ptr::read(config) };
+        patched.urls = ptrs.as_ptr();
+        patched.url_count = ptrs.len();
+        // SAFETY: `patched` is a local copy whose url array outlives the call.
+        let (mut cfg, output, creds) = match unsafe { convert::job_cfg(&patched, &eng.cfg) } {
+            Ok(v) => v,
+            Err(d) => return fail(d),
+        };
+        cfg.source_plans = chosen.plans;
+        cfg.attested_size = chosen.size;
+        cfg.pieces = chosen.pieces;
+        cfg.attested_by = Some(b.doc.origin.clone());
+        // The document's digest, when the caller did not bring their own. A
+        // digest the caller typed came from somewhere they chose and outranks
+        // one that arrived over the same session as the mirror list.
+        if cfg.checksum.is_none() {
+            cfg.checksum = chosen
+                .digest
+                .as_deref()
+                .and_then(crate::metalink::checksum_of);
+        }
+        // SAFETY: caller's contract.
+        let auto_start = unsafe { (*config).auto_start } != 0;
+        let job = eng.insert_job(cfg, output, creds);
+        // SAFETY: `out_job_id` was checked non-null above.
+        unsafe { std::ptr::write(out_job_id, job.id) };
+        eng.emit(&job, hydra_event_type_t::HYDRA_EVENT_JOB_CREATED);
+        crate::log::log_at!(
+            eng,
+            hydra_log_level_t::HYDRA_LOG_INFO,
+            "job {} created from {} for {:?}: {} mirror(s), {} bytes attested, {} piece(s)",
+            job.id,
+            b.doc.origin,
+            chosen.name,
+            job.cfg.urls.len(),
+            job.cfg.attested_size.unwrap_or(0),
+            job.cfg
+                .pieces
+                .as_ref()
+                .map(|m| m.chunks.digests.len())
+                .unwrap_or(0)
+        );
+        if auto_start {
+            if let Err(d) = driver::spawn(eng, &job) {
+                return fail(d);
+            }
+        }
+        E::HYDRA_OK
+    })
+}
+
+/// Find a file entry by name.
+///
+/// Matches either the document's full relative name or just the base name,
+/// because an application passes on what a user picked from a listing and a
+/// listing generally shows the base name.
+///
+/// Returns `HYDRA_ERR_NOT_FOUND` when no entry matches, leaving `*out_index`
+/// untouched.
+///
+/// Thread-safe. Non-blocking.
+///
+/// # Safety
+///
+/// `document` must be a valid handle, `name` must be a valid NUL-terminated
+/// string, and `out_index` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn hydra_metalink_find_file(
+    document: *mut hydra_metalink_t,
+    name: *const c_char,
+    out_index: *mut usize,
+) -> hydra_error_code_t {
+    shield(|| {
+        // SAFETY: caller's contract.
+        let b = match unsafe { ml(document) } {
+            Ok(b) => b,
+            Err(e) => return e,
+        };
+        if out_index.is_null() {
+            return err::set(E::HYDRA_ERR_INVALID_ARGUMENT, "out_index is NULL");
+        }
+        // SAFETY: caller's contract.
+        let want = match unsafe { mem::cstr_req(name) } {
+            Ok(s) => s,
+            Err(()) => {
+                return err::set(
+                    E::HYDRA_ERR_INVALID_ARGUMENT,
+                    "name is NULL or not valid UTF-8",
+                )
+            }
+        };
+        match crate::metalink::index_of(&b.doc, want) {
+            Some(i) => {
+                // SAFETY: `out_index` was checked non-null above.
+                unsafe { std::ptr::write(out_index, i) };
+                E::HYDRA_OK
+            }
+            None => err::set(
+                E::HYDRA_ERR_NOT_FOUND,
+                "the document describes no file with that name",
+            ),
+        }
+    })
+}

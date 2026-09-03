@@ -49,6 +49,7 @@ pub mod ftp;
 pub mod ftp_origin;
 pub mod http_scheme;
 pub mod manifest;
+pub mod metalink;
 pub mod origin;
 pub mod parity;
 pub mod polite;
@@ -57,6 +58,7 @@ pub mod scheme;
 pub mod socks;
 pub mod stream_digest;
 pub mod tls;
+pub mod xml;
 
 /// The identity sent when the user supplies no `--user-agent`.
 ///
@@ -333,8 +335,11 @@ pub use redirect::{html_redirect, html_redirect_target};
 pub use sink::SparseSink;
 pub use transfer::{
     run_transfer, run_transfer_cancellable, run_transfer_into, run_transfer_observed,
-    run_transfer_paced, run_transfer_tick,
+    run_transfer_paced, run_transfer_tick, run_transfer_with_reserves, Bench, OnSubstitute,
+    Reserve,
 };
+
+pub use metalink::{MetaUrl, Metalink, MetalinkFile};
 
 pub use socks::{Proxy, ProxyKind};
 pub use tls::{connect_family, IpFamily, MaybeTls, TlsCapableConnector};

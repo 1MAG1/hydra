@@ -1,6 +1,6 @@
 [package]
 name = "hya-net"
-version = "0.3.4"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -17,6 +17,10 @@ webpki-roots = { workspace = true }
 rustls-pki-types = { workspace = true }
 memchr = { workspace = true }
 sha2 = { workspace = true }
+# Metalink 3.0 <pieces> are overwhelmingly SHA-1 (the format took the choice from
+# BitTorrent). Verifying them needs the algorithm; `manifest::ChunkAlgo` documents
+# why it is admitted for detection and barred from driving a parity repair.
+sha1 = { workspace = true }
 blake3 = { workspace = true }
 reed-solomon-simd = { workspace = true }
 serde = { workspace = true }

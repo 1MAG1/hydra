@@ -34,9 +34,18 @@ use std::path::PathBuf;
 /// the wire.
 /// Validate a `--checksum` spec at parse time.
 ///
-/// Accepts `sha256:<64 hex>` or a bare 64-hex digest, which is what the
-/// comparison downstream understands: it strips a `sha256:` prefix and compares
-/// the rest against the computed sha256.
+/// Accepts `md5:`, `sha1:`, `sha256:` and `sha512:`, or a bare hex digest whose
+/// algorithm is inferred from its width. Normalised to `algo:hex`, which is what
+/// the comparison downstream understands and is the same spelling a Metalink
+/// digest arrives in.
+///
+/// # Why md5 and sha1 are accepted
+///
+/// Not because they are sound against an adversary — they are not. Because they
+/// are frequently all a project publishes, especially in the Metalink 3.0
+/// documents distribution mirrors still emit, and refusing them does not make
+/// anyone safer: it replaces an integrity check that catches a truncating proxy,
+/// a stale mirror and a corrupted transfer with no check at all.
 ///
 /// Validating HERE rather than at comparison time is the point. An unparsable
 /// value used to survive as far as the digest check, fail it, and be reported as
@@ -47,30 +56,64 @@ use std::path::PathBuf;
 /// parse time; this brings `--checksum` in line with them.
 fn parse_checksum(s: &str) -> Result<String, String> {
     let t = s.trim();
-    let (algo, hex) = match t.split_once(':') {
+    let (named, hex) = match t.split_once(':') {
         Some((a, h)) => (Some(a.trim().to_ascii_lowercase()), h.trim()),
         None => (None, t),
     };
-    if let Some(a) = &algo {
-        if a != "sha256" {
-            return Err(format!(
-                "--checksum {s:?}: {a:?} is not a supported algorithm; this build compares \
-                 sha256 only, written as 'sha256:<64 hex digits>' or as the bare digest"
-            ));
-        }
-    }
-    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        let what = if hex.len() != 64 {
-            format!("{} hex digits, expected 64", hex.len())
-        } else {
-            "a non-hexadecimal character".into()
-        };
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!(
-            "--checksum {s:?} is not a sha256 digest ({what}); write \
-             'sha256:<64 hex digits>' or the bare digest"
+            "--checksum {s:?} contains a non-hexadecimal character; write \
+             '<algorithm>:<hex digits>' or a bare hex digest"
         ));
     }
-    Ok(t.to_ascii_lowercase())
+    // Widths, not names, are what a digest can be checked against. A bare value
+    // is identified by its length, which is unambiguous across the four
+    // algorithms this compares — and is how most published digests are written.
+    let by_width = |n: usize| match n {
+        32 => Some("md5"),
+        40 => Some("sha1"),
+        64 => Some("sha256"),
+        128 => Some("sha512"),
+        _ => None,
+    };
+    let algo = match &named {
+        // A `sha-256:` spelling reaches this from a document; normalise it the
+        // same way the digest module does.
+        Some(a) => match a.replace('-', "").as_str() {
+            "md5" => "md5",
+            "sha1" => "sha1",
+            "sha256" => "sha256",
+            "sha512" => "sha512",
+            _ => {
+                return Err(format!(
+                    "--checksum {s:?}: {a:?} is not an algorithm this build compares; \
+                     use md5, sha1, sha256 or sha512"
+                ))
+            }
+        },
+        None => by_width(hex.len()).ok_or_else(|| {
+            format!(
+                "--checksum {s:?} is {} hex digits, which is not the width of any digest \
+                 this build compares (md5 32, sha1 40, sha256 64, sha512 128); write \
+                 '<algorithm>:<hex digits>' if it is something else",
+                hex.len()
+            )
+        })?,
+    };
+    let want = match algo {
+        "md5" => 32,
+        "sha1" => 40,
+        "sha256" => 64,
+        _ => 128,
+    };
+    if hex.len() != want {
+        return Err(format!(
+            "--checksum {s:?} has {} hex digits; a {algo} digest has {want}",
+            hex.len()
+        ));
+    }
+    // Normalised to `algo:hex` so the comparison downstream never has to guess.
+    Ok(format!("{algo}:{}", hex.to_ascii_lowercase()))
 }
 
 fn parse_header(s: &str) -> Result<String, String> {
@@ -115,6 +158,24 @@ fn parse_header(s: &str) -> Result<String, String> {
 }
 
 impl Cli {
+    /// The `--metalink-*` flags, as the selection the resolver takes.
+    pub fn metalink_selection(&self) -> crate::metalink::Selection {
+        crate::metalink::Selection {
+            file: self.metalink_file.clone(),
+            locations: self
+                .metalink_location
+                .iter()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .filter(|l| !l.is_empty())
+                .collect(),
+            language: self.metalink_language.clone(),
+            os: self.metalink_os.clone(),
+            version: self.metalink_version.clone(),
+            preferred_protocol: self.metalink_preferred_protocol.clone(),
+            unique_protocol: self.metalink_unique_protocol,
+        }
+    }
+
     /// Parse, separating `-H NAME` queries from `-H NAME: VALUE` sends.
     ///
     /// The two spellings mean opposite things and clap cannot tell them apart,
@@ -701,6 +762,76 @@ pub struct Cli {
     #[arg(long = "sort-by-type", short = 'y')]
     pub sort_by_type: bool,
 
+    /// Read sources from a Metalink document (`--metalink FILE|URL`).
+    ///
+    /// A Metalink supplies the three things a bare URL cannot: every mirror that
+    /// holds the object, its exact size, and what it must hash to. Those turn on
+    /// multi-source assembly without a validator handshake, a reserve mirror for
+    /// every source that fails, and — where the document publishes `<pieces>` —
+    /// per-chunk verification with targeted refetch instead of starting over.
+    ///
+    /// Both dialects are read: Metalink 3.0 (`.metalink`, what mirrormanager and
+    /// most distribution redirectors emit) and Metalink 4 / RFC 5854 (`.meta4`).
+    #[arg(long = "metalink", value_name = "FILE|URL")]
+    pub metalink: Option<String>,
+
+    /// Fetch only this entry from the document.
+    ///
+    /// A document may describe many files. Matches either the full relative name
+    /// or just the base name, because a user types what they see in a listing.
+    #[arg(long = "metalink-file", value_name = "NAME")]
+    pub metalink_file: Option<String>,
+
+    /// Preferred mirror locations, best first (`--metalink-location de,nl,fr`).
+    ///
+    /// ISO 3166-1 alpha-2 codes. These outrank the publisher's own ordering: the
+    /// user knows where they are and the publisher does not. Mirrors elsewhere
+    /// are demoted, never dropped — they are still reserves.
+    #[arg(
+        long = "metalink-location",
+        value_name = "LOC[,LOC...]",
+        value_delimiter = ','
+    )]
+    pub metalink_location: Vec<String>,
+
+    /// Fetch only entries for this language.
+    ///
+    /// An entry that states no language still matches: a document that omits the
+    /// field is not claiming to be for a different one.
+    #[arg(long = "metalink-language", value_name = "LANG")]
+    pub metalink_language: Option<String>,
+
+    /// Fetch only entries for this operating system.
+    #[arg(long = "metalink-os", value_name = "OS")]
+    pub metalink_os: Option<String>,
+
+    /// Fetch only entries with this version.
+    #[arg(long = "metalink-version", value_name = "VERSION")]
+    pub metalink_version: Option<String>,
+
+    /// Prefer mirrors on this protocol: http, https, ftp, or none.
+    #[arg(long = "metalink-preferred-protocol", value_name = "PROTO")]
+    pub metalink_preferred_protocol: Option<String>,
+
+    /// Use only one protocol for a file, dropping mirrors on the others.
+    ///
+    /// Off by default, which is the opposite of aria2. Mixing protocols costs
+    /// nothing here — a range request is a range request — and every mirror
+    /// dropped is one fewer reserve for the failure this feature exists to
+    /// survive. The flag is available for a network where one protocol is
+    /// blocked or metered differently.
+    #[arg(long = "metalink-enable-unique-protocol")]
+    pub metalink_unique_protocol: bool,
+
+    /// Save a URL that serves a Metalink document instead of following it.
+    ///
+    /// A URL answering with `application/metalink4+xml` is a mirror list, and by
+    /// default hydra reads it rather than saving 6 KB of XML under the name of
+    /// the object the user asked for. Pass this to get the document itself —
+    /// which is what someone debugging a redirector wants.
+    #[arg(long = "no-follow-metalink")]
+    pub no_follow_metalink: bool,
+
     /// Queue file for interactive mode. Defaults to a per-user state directory.
     #[arg(long = "queue-file", value_name = "FILE")]
     pub queue_file: Option<PathBuf>,
@@ -843,6 +974,24 @@ pub enum Command {
         /// what this subcommand is for; on, it is the honest fallback.
         #[arg(long = "download-if-needed")]
         download_if_needed: bool,
+    },
+
+    /// Read a Metalink document and report what it offers, without fetching.
+    ///
+    /// The mirror list, the sizes, the digests, and — importantly — what hydra
+    /// would DO with them: which mirrors it can fetch from, which it would seat,
+    /// which it would hold in reserve, and whether the piece list can drive
+    /// per-chunk verification. A mirror list that silently loses two thirds of
+    /// its entries to an unsupported scheme is worth being able to see before
+    /// starting a multi-gigabyte download rather than after.
+    Metalink {
+        /// The document: a local `.meta4`/`.metalink` file, or a URL.
+        #[arg(value_name = "FILE|URL")]
+        source: String,
+
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
     },
 
     /// List the file formats this build recognises, with descriptions.
@@ -1076,24 +1225,59 @@ mod tests {
     fn a_malformed_checksum_spec_is_refused_at_parse_time() {
         const GOOD: &str = "1e61c37477a1626458e36f7b1d82aa5c9b094fa4802892072e49de9c60c4c926";
 
-        // Accepted: bare digest, prefixed digest, and mixed case normalised down.
-        assert_eq!(parse_checksum(GOOD).unwrap(), GOOD);
+        // Everything normalises to `algo:hex`, so the comparison downstream
+        // never has to guess which algorithm it is holding.
+        assert_eq!(parse_checksum(GOOD).unwrap(), format!("sha256:{GOOD}"));
         assert_eq!(
             parse_checksum(&format!("sha256:{GOOD}")).unwrap(),
             format!("sha256:{GOOD}")
         );
-        assert_eq!(parse_checksum(&GOOD.to_uppercase()).unwrap(), GOOD);
+        assert_eq!(
+            parse_checksum(&GOOD.to_uppercase()).unwrap(),
+            format!("sha256:{GOOD}")
+        );
+
+        // A bare digest is identified by its WIDTH, which is unambiguous across
+        // the four algorithms compared here and is how published digests are
+        // usually written.
+        for (algo, width) in [("md5", 32), ("sha1", 40), ("sha256", 64), ("sha512", 128)] {
+            let hex = "a".repeat(width);
+            assert_eq!(parse_checksum(&hex).unwrap(), format!("{algo}:{hex}"));
+            assert_eq!(
+                parse_checksum(&format!("{algo}:{hex}")).unwrap(),
+                format!("{algo}:{hex}")
+            );
+        }
+        // The `sha-256` spelling a Metalink uses is the same algorithm.
+        let hex = "b".repeat(64);
+        assert_eq!(
+            parse_checksum(&format!("sha-256:{hex}")).unwrap(),
+            format!("sha256:{hex}")
+        );
 
         // Refused, each naming what is actually wrong.
         let e = parse_checksum("notarealformat").unwrap_err();
         assert!(
-            e.contains("not a sha256 digest") && e.contains("14 hex digits"),
-            "a short non-hex token must be reported as a bad digest: {e}"
+            e.contains("non-hexadecimal"),
+            "a non-hex token must be reported as non-hex: {e}"
         );
+        let e = parse_checksum(&format!("crc32:{GOOD}")).unwrap_err();
+        assert!(
+            e.contains("not an algorithm this build compares"),
+            "an unsupported algorithm must say so: {e}"
+        );
+        // A named algorithm whose digest is the wrong width is a typo, not a
+        // different algorithm — say which width was expected.
         let e = parse_checksum(&format!("md5:{GOOD}")).unwrap_err();
         assert!(
-            e.contains("not a supported algorithm"),
-            "an unsupported algorithm must say so: {e}"
+            e.contains("a md5 digest has 32"),
+            "a width mismatch must name the expected width: {e}"
+        );
+        // Right characters, a width no algorithm uses.
+        let e = parse_checksum(&"a".repeat(50)).unwrap_err();
+        assert!(
+            e.contains("not the width of any digest"),
+            "an unrecognised width must say so rather than guess: {e}"
         );
         // Right length, one character out of alphabet.
         let almost = format!("{}z", &GOOD[..63]);

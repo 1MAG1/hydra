@@ -213,7 +213,91 @@ pub fn view(app: &App) -> El<'_> {
     ]
     .spacing(8);
 
-    let left = column![address, auth, creds, stream, error]
+    // A mirror list is not a file either, and what it changes is worth seeing
+    // before OK: how many files are about to be added, how many mirrors each
+    // has, and whether it can be verified per chunk. A list that silently loses
+    // two thirds of its entries to a scheme this build cannot fetch is worth
+    // knowing about before a multi-gigabyte download rather than after.
+    let metalink: El<'_> = if st.metalink_probing {
+        text(tr("Reading the mirror list..."))
+            .size(theme::FONT_SIZE)
+            .color(theme::dim_text(&iced::Theme::Light))
+            .into()
+    } else if let Some(m) = &st.metalink {
+        let mut rows = column![].spacing(6);
+        rows = rows.push(
+            row![
+                text(tr("Metalink"))
+                    .size(theme::FONT_SIZE)
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .width(70.0),
+                text(format!(
+                    "{}  —  {} {}",
+                    m.version,
+                    m.files.len(),
+                    if m.files.len() == 1 {
+                        tr("file")
+                    } else {
+                        tr("files")
+                    }
+                ))
+                .size(theme::FONT_SIZE),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        );
+        // A summary, not a listing: a document with forty files would push the
+        // OK button off the window. `metalink_panel_height` reserves space for
+        // exactly this many rows plus the "+N" line, and the two must agree.
+        for f in m.files.iter().take(crate::app::METALINK_PANEL_ROWS) {
+            let usable = f.info.mirrors.len();
+            let mut parts = vec![match f.info.size {
+                Some(n) => crate::fmt::size2(n),
+                None => tr("size not stated"),
+            }];
+            parts.push(format!("{usable}/{} {}", f.mirrors_listed, tr("mirrors")));
+            if f.piece_count > 0 {
+                parts.push(format!("{} {}", f.piece_count, tr("verified chunks")));
+            } else if f.info.digest.is_some() {
+                parts.push(tr("whole-file checksum"));
+            } else {
+                parts.push(tr("no checksum published"));
+            }
+            if f.info.signed {
+                parts.push(tr("signed (not verified)"));
+            }
+            rows = rows.push(
+                row![
+                    iced::widget::space::horizontal().width(70.0),
+                    text(f.name.clone()).size(theme::FONT_SIZE),
+                    text(parts.join("  ·  "))
+                        .size(theme::FONT_SIZE - 1.0)
+                        .color(theme::dim_text(&iced::Theme::Light)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        if m.files.len() > crate::app::METALINK_PANEL_ROWS {
+            rows = rows.push(
+                row![
+                    iced::widget::space::horizontal().width(70.0),
+                    text(format!(
+                        "+{}",
+                        m.files.len() - crate::app::METALINK_PANEL_ROWS
+                    ))
+                    .size(theme::FONT_SIZE - 1.0)
+                    .color(theme::dim_text(&iced::Theme::Light)),
+                ]
+                .spacing(8),
+            );
+        }
+        rows.into()
+    } else {
+        iced::widget::space::horizontal().height(0.0).into()
+    };
+
+    let left = column![address, auth, creds, stream, metalink, error]
         .spacing(10)
         .width(Length::Fill);
 

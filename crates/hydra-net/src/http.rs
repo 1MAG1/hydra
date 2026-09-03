@@ -110,6 +110,38 @@ impl Probe {
         matches!(self.status, 301 | 302 | 303 | 307 | 308) && self.location.is_some()
     }
 
+    /// Mirrors this response advertised via `Link: <...>; rel=duplicate`
+    /// (Metalink over HTTP, RFC 6249), best-first.
+    ///
+    /// Derived from [`Self::raw_head`] on demand rather than stored, because it
+    /// is needed once per transfer and the header block is already kept verbatim
+    /// for exactly this class of question.
+    ///
+    /// A server that sends these is telling the client what it needs in order to
+    /// survive that server dying mid-transfer, and it costs no extra request to
+    /// listen: the probe already happened. See [`crate::metalink`].
+    pub fn mirrors(&self) -> Vec<crate::metalink::MetaUrl> {
+        crate::metalink::mirrors_from_head(&self.raw_head)
+    }
+
+    /// URL of a Metalink document describing this object, when the response
+    /// pointed at one with `Link: <...>; rel=describedby; type=...metalink...`.
+    pub fn metalink_url(&self) -> Option<String> {
+        crate::metalink::describedby_metalink(&self.raw_head)
+    }
+
+    /// This response IS a Metalink document rather than the object asked for.
+    ///
+    /// Checked on `Content-Type` alone, never on the body: the body is not in
+    /// hand at probe time, and a downloader that decides what a URL serves by
+    /// guessing at bytes it has not read is how a real download gets mistaken
+    /// for a mirror list.
+    pub fn serves_metalink(&self) -> bool {
+        self.content_type
+            .as_deref()
+            .is_some_and(crate::metalink::is_metalink_media_type)
+    }
+
     /// This response could be a redirector PAGE — a forward expressed in HTML
     /// instead of in a `Location` header (see [`crate::redirect`]).
     ///

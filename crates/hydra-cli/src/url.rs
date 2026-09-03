@@ -65,6 +65,27 @@ impl std::fmt::Debug for Url {
     }
 }
 
+impl std::fmt::Display for Url {
+    /// The absolute URL, WITHOUT userinfo.
+    ///
+    /// Credentials are excluded for the same reason `Debug` excludes them: this
+    /// is what gets printed, logged, and written into a resume sidecar, and a
+    /// password in any of those outlives the command that typed it. The default
+    /// port is elided so the round trip through `parse` is stable.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let default = match self.scheme.as_str() {
+            "https" => 443,
+            "ftp" => 21,
+            _ => 80,
+        };
+        write!(f, "{}://{}", self.scheme, self.host)?;
+        if self.port != default {
+            write!(f, ":{}", self.port)?;
+        }
+        write!(f, "{}", self.path)
+    }
+}
+
 impl Url {
     pub fn parse(s: &str) -> Option<Self> {
         let (scheme, rest) = s.split_once("://")?;

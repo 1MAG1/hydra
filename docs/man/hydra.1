@@ -29,6 +29,10 @@ hydra, hya \- multi-source file retriever with reassignable byte ranges
 .RI [ options ]
 .I FILE
 .br
+.B hydra metalink
+.RI [ options ]
+.I FILE|URL
+.br
 .B hydra formats
 .RI [ options ]
 .br
@@ -420,14 +424,152 @@ is a usage error (exit 2).
 The same list governs auto-detection, quietly: with any of those flags in
 play a manifest URL is fetched as the ordinary file it also is.
 .
+.SH METALINK
+A Metalink document supplies what a bare URL cannot: every mirror that holds the
+object, its exact size, and what it must hash to.
+Both dialects are read \(em Metalink 3.0
+.RB ( .metalink ,
+what mirrormanager and most distribution redirectors emit) and Metalink 4 /
+RFC\ 5854
+.RB ( .meta4 ).
+.PP
+Detection is automatic, so
+.B \-\-metalink
+is an override and not a requirement.
+An argument is treated as a document if its name says so
+.RB ( .meta4 ", " .metalink ),
+if it is a local path whose
+.I content
+says so, or \(em for a remote URL \(em if the server answers with
+.B application/metalink4+xml
+or
+.BR application/metalink+xml .
+The last case costs nothing: it is read off the probe the transfer had to make
+anyway, which is what makes
+.B https://mirrors.example/metalink?repo=x
+work despite having no usable extension.
+.PP
+Three properties follow from a document that a list of URLs cannot provide.
+.IP \(bu 2
+.B Mirrors that can be assembled together.
+Splicing ranges across hosts is otherwise gated on every source agreeing about a
+strong validator, and independent mirror operators cannot share an
+.BR ETag ;
+that gate keeps exactly one source out of a nineteen-mirror list.
+A document states the size and a content digest from
+.I outside
+the mirrors, so agreement is established against the document instead.
+.IP \(bu 2
+.B A reserve bench.
+Politeness authorises a handful of connections and the rest of the list is held
+back.
+A mirror that fails or falls silent has its connections re-pointed at a reserve
+.IR "in place" ,
+so the socket count stays what politeness allowed and no range is stranded.
+.IP \(bu 2
+.B Localised repair.
+Where the document publishes
+.BR <pieces> ,
+each chunk is verified as the file lands and a bad one costs a single chunk
+refetched from a
+.I different
+mirror rather than a whole re-download.
+.PP
+Mirrors on schemes this build cannot fetch
+.RB ( rsync:// " and friends)"
+are reported and skipped rather than attempted;
+.B <metaurl>
+indirections such as BitTorrent are recorded and not followed; a
+.B <signature>
+is reported as present and explicitly
+.I not
+verified; and a
+.B <file name>
+that would escape the output directory is refused, in the Windows spellings as
+well as the POSIX ones.
+.PP
+Servers implementing Metalink over HTTP (RFC\ 6249) need no document:
+.B Link: <...>; rel=duplicate
+headers on an ordinary download become reserves.
+.TP
+.BI \-\-metalink " FILE|URL"
+Read sources from this document.
+Only needed when neither the name nor the content nor the media type reveals it.
+.TP
+.BI \-\-metalink\-file " NAME"
+Fetch only this entry.
+Matches the full relative name or the base name.
+Without it, every entry the document describes is fetched, one after another \(em
+sequentially, because a mirror list is a list of volunteer machines and opening
+several files' worth of connections against the same hosts is not this client's
+decision to make.
+.TP
+.BI \-\-metalink\-location " LOC[,LOC...]"
+Preferred mirror locations, best first, as ISO\ 3166\-1 alpha\-2 codes.
+These outrank the publisher's own ordering: the user knows where they are and the
+publisher does not.
+Mirrors elsewhere are demoted, never dropped \(em they are still reserves.
+.TP
+.BI \-\-metalink\-language " LANG"
+.TQ
+.BI \-\-metalink\-os " OS"
+.TQ
+.BI \-\-metalink\-version " VERSION"
+Fetch only entries matching these.
+An entry that states nothing about itself still matches: a document that omits
+the field is not claiming to be for a different one.
+.TP
+.BI \-\-metalink\-preferred\-protocol " PROTO"
+Prefer mirrors on
+.BR http ", " https ", " ftp ", or " none .
+By default \(em with no preference stated \(em http(s) mirrors are used first
+and ftp mirrors wait behind them, whatever the publisher's ranking says: the
+engine can splice ranges, repair chunks and substitute reserves over HTTP,
+while an FTP source is a single sequential stream, so an ftp mirror ranked
+first would turn all of that off. A document whose mirrors are all ftp is
+fetched over ftp as before. Pass
+.B ftp
+to prefer it, or
+.B none
+to suppress protocol preference entirely (the publisher's ranking then decides
+across transports).
+.TP
+.B \-\-metalink\-enable\-unique\-protocol
+Use only one protocol for a file, dropping mirrors on the others.
+Off by default, unlike
+.BR aria2c (1):
+mixing protocols costs nothing here, and every mirror dropped is one fewer
+reserve for the failure this feature exists to survive.
+.TP
+.B \-\-no\-follow\-metalink
+Save a URL that serves a document instead of reading it.
+For debugging a redirector.
+.PP
+.B "hydra metalink " FILE|URL
+reports what a document offers and what hydra would do with it \(em which mirrors
+are fetchable, which would be seated, which held in reserve, and whether the
+piece list can drive per-chunk verification \(em without fetching anything.
+.B \-\-json
+emits the same as a document.
+.
 .SH INTEGRITY
 .TP
-.BI \-\-checksum " HASH"
+.BI \-\-checksum " HASH\"
 Verify the finished file, e.g.\&
 .BR "\-\-checksum sha256:abc..." .
 Accepts
-.B sha256:
-followed by 64 hex digits, or the bare digest.
+.BR sha256: ", " sha512: ", " sha1: " or " md5:
+followed by the right number of hex digits, or a bare digest whose algorithm is
+inferred from its length.
+.B sha1
+and
+.B md5
+are integrity checks, not authentication: against a transmission fault, a
+truncating proxy, or a mirror serving a stale build \(em which is what a published
+digest is for \(em they work; against an adversary who chose the bytes they do
+not.
+They are accepted because that is frequently all a project publishes, and
+verifying nothing is worse.
 A mismatch is reported and exits 1.
 An unparsable value is a
 .I usage
