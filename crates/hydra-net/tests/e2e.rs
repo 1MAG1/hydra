@@ -390,9 +390,13 @@ async fn the_observer_sees_the_final_byte_count() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cap_applied_mid_transfer_shapes_the_rest() {
     use hya_net::polite::{Pace, RateLimiter};
-    const SIZE: u64 = 512 * 1024;
-    const CAP: u64 = 128 * 1024; // bytes/sec
-                                 // Flip the cap on a quarter of the way in, so most of the object is left.
+    // Large enough that the flip lands several scheduler ticks in: the observer
+    // runs once per tick, not once per arrival, so on a tiny object the cap would
+    // be switched on with almost nothing left to shape and the test would prove
+    // nothing either way.
+    const SIZE: u64 = 8 * 1024 * 1024;
+    const CAP: u64 = 2 * 1024 * 1024; // bytes/sec
+                                      // Flip the cap on a quarter of the way in, so most of the object is left.
     const FLIP_AT: u64 = SIZE / 4;
 
     let net = Arc::new(OriginSet::new());
@@ -406,16 +410,22 @@ async fn a_cap_applied_mid_transfer_shapes_the_rest() {
     let pace = Pace::shared(limiter.clone());
     assert!(!pace.is_limited(), "the transfer starts with no cap");
 
-    let mut flipped: Option<(std::time::Instant, u64)> = None;
+    // Where and when the cap actually went on. The observer fires at tick
+    // granularity, so `done` at the flip is past `FLIP_AT` by up to a tick's
+    // worth of bytes; the assertion below charges the cap only for what was
+    // genuinely still to come.
+    let flipped: Arc<std::sync::Mutex<Option<(std::time::Instant, u64)>>> =
+        Arc::new(std::sync::Mutex::new(None));
     let lim = limiter.clone();
+    let flip = flipped.clone();
     let mut observe = move |_: &Scheduler, done: u64| {
-        if flipped.is_none() && done >= FLIP_AT {
+        let mut f = flip.lock().unwrap();
+        if f.is_none() && done >= FLIP_AT {
             lim.set_rate(CAP);
-            flipped = Some((std::time::Instant::now(), done));
+            *f = Some((std::time::Instant::now(), done));
         }
     };
 
-    let t0 = std::time::Instant::now();
     hya_net::run_transfer_paced(
         net.clone(),
         vec![tgt(port)],
@@ -429,20 +439,25 @@ async fn a_cap_applied_mid_transfer_shapes_the_rest() {
     )
     .await
     .expect("a transfer capped mid-flight must still complete");
-    let elapsed = t0.elapsed().as_secs_f64();
 
     verify(&outs, SIZE).expect("shaping must not corrupt: the file must be byte-exact");
     // Everything after the flip is subject to the cap. Charge only the bytes that
     // could still have been outstanding then — the ones already on disk are free,
     // and in-flight reads already paid for are close enough to ignore.
-    let shaped = SIZE - FLIP_AT;
+    let (flip_at, flip_done) = flipped
+        .lock()
+        .unwrap()
+        .expect("the cap must have been switched on during the transfer");
+    let shaped = SIZE - flip_done;
     let floor = shaped as f64 / CAP as f64;
+    let elapsed = flip_at.elapsed().as_secs_f64();
     assert!(
         elapsed >= floor * 0.7,
         "{shaped} bytes remained under a {CAP} B/s cap, which needs about          {floor:.2}s, but the whole transfer took {elapsed:.2}s: the cap was          switched on and ignored"
     );
     eprintln!(
-        "live cap: {SIZE} B in {elapsed:.2}s, cap applied at {FLIP_AT} B (floor {floor:.2}s)"
+        "live cap: {shaped} B shaped in {elapsed:.2}s after the cap went on at {flip_done} B \
+         (floor {floor:.2}s)"
     );
     let _ = std::fs::remove_file(&out);
 }
