@@ -225,6 +225,15 @@ impl Admission {
     pub fn best_goodput(&self) -> f64 {
         self.samples.iter().cloned().fold(0.0, f64::max)
     }
+
+    /// Every measurement taken, as `(connections, bytes per second)` in the
+    /// order it was taken. For reporting what the search saw, not for deciding.
+    pub fn samples(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        self.levels
+            .iter()
+            .copied()
+            .zip(self.samples.iter().copied())
+    }
 }
 
 /// Online estimate of the per-request setup cost `delta`.

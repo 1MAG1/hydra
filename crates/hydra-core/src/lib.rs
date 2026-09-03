@@ -38,7 +38,8 @@ pub use format::{
 };
 pub use intervals::{IntervalSet, Range};
 pub use plan::{allocate, reserves, SourcePlan};
-pub use ramp::{ConcurrencyRamp, Ramp};
+pub use ramp::{ConcurrencyRamp, Ramp, Verdict};
 pub use sched::{
-    greedy_concurrency, Action, Capability, Scheduler, Source, Stats, NO_PRIORITY, STEAL_QUANTUM,
+    greedy_concurrency, Action, Capability, LimitReason, Scheduler, Source, Stats, NO_PRIORITY,
+    STEAL_QUANTUM,
 };

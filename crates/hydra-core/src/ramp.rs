@@ -55,6 +55,28 @@ pub enum Ramp {
     Settled(usize),
 }
 
+/// What a finished search measured and what it chose.
+///
+/// Exists so a front end can SAY what happened. A search that settles below the
+/// budget leaves most of the connection rows idle, and a row that only reads
+/// "waiting" looks like a dropped connection rather than a decision — which is
+/// how a transfer behaving correctly came to be reported as a bug. The numbers
+/// here are the evidence the decision was made on, in the units a user can check
+/// against a single-connection download of the same object.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Verdict {
+    /// The concurrency the search settled on.
+    pub chosen: usize,
+    /// Aggregate rate measured at `chosen`, bytes per second. Zero when the
+    /// settled level was never measured directly (a refusal clamped it there).
+    pub chosen_rate: f64,
+    /// The highest concurrency the search measured. Equal to `chosen` when the
+    /// search ran to its ceiling and every step paid.
+    pub tried: usize,
+    /// Aggregate rate measured at `tried`, bytes per second.
+    pub tried_rate: f64,
+}
+
 /// Drives concurrency upward on a live transfer while it pays to do so.
 #[derive(Clone, Debug)]
 pub struct ConcurrencyRamp {
@@ -269,6 +291,29 @@ impl ConcurrencyRamp {
         self.settled
     }
 
+    /// The measurements behind a settled search, or `None` while it is running.
+    pub fn verdict(&self) -> Option<Verdict> {
+        let chosen = self.settled?;
+        let mut chosen_rate = 0.0f64;
+        let mut tried = chosen;
+        let mut tried_rate = 0.0f64;
+        for (level, rate) in self.adm.samples() {
+            if level == chosen {
+                chosen_rate = rate;
+            }
+            if level >= tried {
+                tried = level;
+                tried_rate = rate;
+            }
+        }
+        Some(Verdict {
+            chosen,
+            chosen_rate,
+            tried,
+            tried_rate,
+        })
+    }
+
     /// Current concurrency.
     pub fn level(&self) -> usize {
         self.level
@@ -441,6 +486,83 @@ impl ConcurrencyRamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A settled search must be able to say what it measured: the level it chose
+    /// with its rate, and the highest level it tried with its rate. That is what
+    /// a front end shows in place of "waiting (connection limit)".
+    #[test]
+    fn verdict_reports_the_chosen_and_the_tried_level_with_their_rates() {
+        let mut r = ConcurrencyRamp::new(0.15, 8);
+        assert_eq!(r.verdict(), None, "no verdict while the search is running");
+        // A long `delta` makes each window many steps wide, so the synthetic rate
+        // is measured to within a few percent rather than quantised by the step.
+        let (mut now, delta, step) = (0.0, 0.5, 0.05);
+        r.start(now, delta);
+        // One connection delivers 1000 B/s; two deliver 900 B/s: saturated at one.
+        let mut settled = None;
+        for _ in 0..2000 {
+            let rate = if r.level() >= 2 { 900.0 } else { 1000.0 };
+            now += step;
+            r.observe((rate * step) as u64, now);
+            if let Ramp::Settled(n) = r.poll(now, delta) {
+                settled = Some(n);
+                break;
+            }
+        }
+        assert_eq!(settled, Some(1));
+        let v = r.verdict().expect("a settled search has a verdict");
+        assert_eq!(v.chosen, 1);
+        assert_eq!(v.tried, 2);
+        assert!(
+            (v.chosen_rate - 1000.0).abs() < 100.0,
+            "chosen rate {} should be the single-connection reading",
+            v.chosen_rate
+        );
+        assert!(
+            (v.tried_rate - 900.0).abs() < 100.0,
+            "tried rate {} should be the two-connection reading",
+            v.tried_rate
+        );
+        assert!(
+            v.chosen_rate > v.tried_rate,
+            "the verdict must show the chosen level as the faster one"
+        );
+    }
+
+    /// A search that stopped at its ceiling with every step paying has REJECTED
+    /// nothing, and its verdict must say so: `tried == chosen`. The transport
+    /// keys on `tried > chosen` to decide whether a settled count is a decision
+    /// worth defending against refusal recovery or merely a ceiling the search
+    /// wanted to climb past, so this distinction is load-bearing.
+    #[test]
+    fn a_search_that_hit_its_ceiling_reports_tried_equal_to_chosen() {
+        let mut r = ConcurrencyRamp::new(0.15, 4);
+        let (mut now, delta, step) = (0.0, 0.5, 0.05);
+        r.start(now, delta);
+        let mut settled = None;
+        for _ in 0..4000 {
+            // Perfect scaling: every level pays, so the search runs to the ceiling.
+            let rate = 1000.0 * r.level() as f64;
+            now += step;
+            r.observe((rate * step) as u64, now);
+            if let Ramp::Settled(n) = r.poll(now, delta) {
+                settled = Some(n);
+                break;
+            }
+        }
+        assert_eq!(
+            settled,
+            Some(4),
+            "every step paid, so the ceiling is the answer"
+        );
+        let v = r.verdict().expect("settled");
+        assert_eq!(
+            (v.chosen, v.tried),
+            (4, 4),
+            "nothing was measured and turned down"
+        );
+        assert!(v.chosen_rate > 0.0 && v.tried_rate > 0.0);
+    }
 
     /// Drive the ramp with a synthetic path whose aggregate rate saturates at
     /// `sat` connections, and report where it settles.
