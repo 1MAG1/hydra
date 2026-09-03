@@ -29,6 +29,23 @@ pub const DEFAULT_TOTAL: usize = 16;
 /// is typically misconfigured, and each hop costs a full `delta` round-trip.
 pub const MAX_REDIRECTS: u32 = 8;
 
+/// How far the rate limiter's cursor may lag the clock: the burst a transfer
+/// may send without waiting, as time at the current rate.
+///
+/// Sized to what it must actually absorb, which is one timer tick of oversleep
+/// plus scheduling jitter, and no more. It is also the allowance a transfer gets
+/// at its very start, when the cursor is unset, so every millisecond here is
+/// milliseconds of bytes delivered above the cap: at 50 ms a 512 MiB object
+/// under a 200 MiB/s cap finished 2% early, which is the cap being exceeded
+/// rather than a rounding artefact. At 10 ms the same run is within 0.5%.
+/// See [`RateLimiter::reserve`].
+const BURST_WINDOW: Duration = Duration::from_millis(10);
+
+/// Debts shorter than this are carried to the next reservation rather than
+/// slept, because a sleep this short cannot be timed by a 1 ms timer. See
+/// [`Pace::wait`].
+const MIN_PAUSE: Duration = Duration::from_millis(2);
+
 /// Politeness configuration.
 #[derive(Clone, Copy, Debug)]
 pub struct Politeness {
@@ -300,9 +317,20 @@ impl RateLimiter {
         let dur = Duration::from_secs_f64(n as f64 / r as f64);
         let now = Instant::now();
         let mut g = self.cursor.lock().unwrap();
+        // The cursor may lag the clock by up to `BURST_WINDOW`, and time a
+        // caller spent asleep past its debt is credited back instead of lost.
+        //
+        // Clamping the cursor to `now` looked harmless and was not: tokio's
+        // timers tick at 1 ms, so a 0.3 ms debt sleeps a whole tick, and with
+        // the overshoot forgotten every 64 KiB read cost at least 1 ms whatever
+        // the cap said. Measured: `--limit-rate 200M` delivered 78 MiB/s and
+        // `400M` delivered 89 MiB/s, against curl at the cap. `BURST_WINDOW`
+        // bounds what a credit can buy, so this shapes the rate rather than
+        // opening a loophole in it.
+        let floor = now.checked_sub(BURST_WINDOW).unwrap_or(now);
         let base = match *g {
-            Some(t) if t > now => t,
-            _ => now,
+            Some(t) if t > floor => t,
+            _ => floor,
         };
         *g = Some(base + dur);
         base.saturating_duration_since(now)
@@ -430,7 +458,12 @@ impl Pace {
         for l in self.limiters() {
             owed = owed.max(l.reserve(n));
         }
-        if !owed.is_zero() {
+        // A debt shorter than a timer tick is carried, not slept: the bytes are
+        // already charged to the cursor, so the next reservation owes more, and
+        // the sleep happens once the debt is long enough to be timed accurately.
+        // Sleeping every sub-millisecond debt is what pinned a single connection
+        // to one read per tick — see `RateLimiter::reserve`.
+        if owed >= MIN_PAUSE {
             tokio::time::sleep(owed).await;
         }
     }
@@ -553,6 +586,35 @@ mod tests {
         assert!(
             w >= Duration::from_millis(400) && w <= Duration::from_millis(600),
             "500 KB at 1 MB/s should wait ~0.5 s, waited {w:?}"
+        );
+    }
+
+    /// A high cap must be reachable: at 200 MiB/s a 64 KiB read owes 0.3 ms,
+    /// and sleeping that on a 1 ms timer — overshoot uncredited — capped a
+    /// transfer at 78 MiB/s. 64 MiB in 64 KiB reads is 1024 waits: at one tick
+    /// each that is over a second; at the cap it is 0.32 s.
+    #[tokio::test]
+    async fn sub_tick_debts_are_carried_so_a_high_cap_is_reachable() {
+        let rate = 200u64 * 1024 * 1024;
+        let pace = Pace::shared(Arc::new(RateLimiter::new(rate)));
+        let total = 64u64 * 1024 * 1024;
+        let read = 64u64 * 1024;
+        let t0 = Instant::now();
+        let mut sent = 0;
+        while sent < total {
+            pace.wait(read).await;
+            sent += read;
+        }
+        let elapsed = t0.elapsed().as_secs_f64();
+        let ideal = total as f64 / rate as f64;
+        assert!(
+            elapsed < ideal * 2.0,
+            "{elapsed:.3}s for {ideal:.3}s of bytes: sub-tick debts are being slept one tick each"
+        );
+        // Still a cap: the `BURST_WINDOW` credit is the only slack allowed.
+        assert!(
+            elapsed > ideal * 0.7,
+            "{elapsed:.3}s for {ideal:.3}s of bytes: the cap is not being applied"
         );
     }
 
