@@ -34,6 +34,8 @@ pub enum WinKind {
     Permissions,
     Shortcuts,
     Update,
+    /// The cancellable countdown shown before a "when done" power action.
+    Power,
 }
 
 // ---------------------------------------------------------------- selections
@@ -669,6 +671,14 @@ pub enum Message {
     /// glides each item's displayed progress toward the real fraction.
     AnimTick,
     NativeMenu(String),
+    /// One second of the "when done" power-action countdown. Subscribed only
+    /// while that countdown is on screen, and at a fixed 1 s whatever power
+    /// save does to the main tick — the dialog shows the number.
+    PowerTick,
+    /// Run the pending power action without waiting the countdown out.
+    PowerNow,
+    /// Call the pending power action off. The machine stays as it is.
+    PowerCancel,
     /// The OS switched between light and dark appearance (or the startup
     /// query answered). Only View > Theme > System Default acts on it.
     SystemTheme(iced::theme::Mode),
@@ -1052,7 +1062,28 @@ pub struct App {
     /// over the application rather than the monitor.
     pub main_pos: Option<Point>,
     pub main_size: iced::Size,
+    /// A "when done" power action waiting out its countdown, if any. Set by
+    /// [`App::arm_power_action`] and cleared when the countdown fires or is
+    /// cancelled; its presence is what puts the 1 s [`Message::PowerTick`]
+    /// on the subscription list.
+    pub power: Option<PowerPrompt>,
 }
+
+/// The pending "when done" power action behind [`WinKind::Power`].
+#[derive(Clone, Copy, Debug)]
+pub struct PowerPrompt {
+    pub action: PowerAction,
+    /// Seconds left. Counts down to zero, then the action runs.
+    pub secs: u8,
+    /// Quit Hydra when the countdown ends even if the action leaves the
+    /// session up — a queue's "Exit Hydra when done", which is set
+    /// independently of the power action and outlives cancelling it.
+    pub exit_after: bool,
+}
+
+/// How long the cancel window lasts. Long enough to catch the dialog on the
+/// way past, short enough not to sit in front of a finished queue.
+pub const POWER_COUNTDOWN_SECS: u8 = 10;
 
 impl App {
     pub fn item(&self, id: DlId) -> Option<&DownloadItem> {
@@ -1431,6 +1462,7 @@ impl App {
             WinKind::Confirm => (500.0, 200.0),
             WinKind::Permissions => (640.0, 580.0),
             WinKind::Update => (560.0, 520.0),
+            WinKind::Power => (500.0, 240.0),
         };
         let s = self.ui_scale();
         (w * s, h * s)
@@ -2167,18 +2199,16 @@ impl App {
             );
         }
         let task = self.close_window(WinKind::Progress(id));
-        // Shutting down makes the complete dialog moot — flush state first,
-        // since the OS call may end the process almost immediately.
+        // A pending power action makes the complete dialog moot: the
+        // countdown takes the screen instead, and whatever the user does
+        // with it decides whether Hydra is still here afterwards.
         if let Some(action) = self
             .item(id)
             .filter(|d| d.shutdown_after)
             .map(|d| d.shutdown_action)
         {
-            self.save_state();
-            self.save_config();
-            self.flush_saves();
-            run_power_action(action);
-            return Task::batch([task, iced::exit()]);
+            let armed = self.arm_power_action(action, false);
+            return Task::batch([task, armed]);
         }
         if self.cfg.settings.show_complete_dialog {
             // The dialog reads the row it describes, so a row asked to
@@ -2190,6 +2220,78 @@ impl App {
             self.remove_item(id);
         }
         task
+    }
+
+    // -------------------------------------------------------- power actions
+
+    /// Arm a "when done" power action behind its cancellable countdown.
+    ///
+    /// Nothing happens to the machine here: the dialog goes up, ticks down
+    /// from [`POWER_COUNTDOWN_SECS`], and only then calls the OS. State is
+    /// flushed up front all the same — the countdown ends in a call that can
+    /// stop the process where it stands.
+    ///
+    /// `exit_after` quits Hydra once the countdown resolves even if the
+    /// action itself leaves the session running (a queue's "Exit Hydra when
+    /// done"); cancelling the power action does not cancel that.
+    ///
+    /// A second call while one countdown is already up is ignored: two
+    /// downloads finishing together ask for one dialog, not two.
+    fn arm_power_action(&mut self, action: PowerAction, exit_after: bool) -> Task<Message> {
+        self.save_state();
+        self.save_config();
+        self.flush_saves();
+        if let Some(p) = &mut self.power {
+            // The stricter of the two wins: a queue that also wanted the app
+            // gone must not lose that because a download got there first.
+            p.exit_after |= exit_after;
+            return Task::none();
+        }
+        crate::log::info(&format!(
+            "power action {action:?} armed, {POWER_COUNTDOWN_SECS}s to cancel"
+        ));
+        self.power = Some(PowerPrompt {
+            action,
+            secs: POWER_COUNTDOWN_SECS,
+            exit_after,
+        });
+        self.open_window(WinKind::Power)
+    }
+
+    /// The countdown ran out (or "now" was pressed): do it.
+    fn fire_power_action(&mut self) -> Task<Message> {
+        let Some(p) = self.power.take() else {
+            return Task::none();
+        };
+        let close = self.close_window(WinKind::Power);
+        self.save_state();
+        self.save_config();
+        self.flush_saves();
+        run_power_action(p.action);
+        // Shutdown and log off end the process anyway; sleeping only
+        // suspends the machine, so Hydra stays up and is still here on wake
+        // unless the queue also asked it to exit.
+        if p.action.ends_session() || p.exit_after {
+            Task::batch([close, iced::exit()])
+        } else {
+            close
+        }
+    }
+
+    /// Call the pending power action off — the Cancel button, or the OS
+    /// close button on the countdown window. "Exit Hydra when done" is a
+    /// separate instruction and still stands.
+    fn cancel_power_action(&mut self) -> Task<Message> {
+        let Some(p) = self.power.take() else {
+            return Task::none();
+        };
+        crate::log::info(&format!("power action {:?} cancelled", p.action));
+        let close = self.close_window(WinKind::Power);
+        if p.exit_after {
+            Task::batch([close, iced::exit()])
+        } else {
+            close
+        }
     }
 
     // --------------------------------------------------------------- queues
@@ -2341,8 +2443,12 @@ impl App {
             self.save_state();
             self.save_config();
             self.flush_saves();
+            // With a power action pending, the countdown owns the exit too:
+            // "Exit Hydra when done" still happens, but only once the user
+            // has had their ten seconds to call the machine's fate off.
             if let Some(action) = power_action {
-                run_power_action(action);
+                let armed = self.arm_power_action(action, exit_app);
+                return Task::batch([Task::batch(tasks), armed]);
             }
             return Task::batch([Task::batch(tasks), iced::exit()]);
         }
@@ -2849,6 +2955,10 @@ impl App {
                         self.complete_dismissed(dl);
                         Task::none()
                     }
+                    // OS close button on the countdown is Cancel. The window
+                    // is already gone, so this only settles the state (and
+                    // any pending "Exit Hydra when done").
+                    Some(WinKind::Power) => self.cancel_power_action(),
                     Some(WinKind::Update) => {
                         // OS close button is Cancel: stop an in-flight
                         // download and forget the offer (unless the finisher
@@ -4167,6 +4277,19 @@ impl App {
                 }
                 Task::none()
             }
+            Message::PowerTick => {
+                let Some(p) = &mut self.power else {
+                    return Task::none();
+                };
+                p.secs = p.secs.saturating_sub(1);
+                if p.secs == 0 {
+                    self.fire_power_action()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::PowerNow => self.fire_power_action(),
+            Message::PowerCancel => self.cancel_power_action(),
             Message::ProgShutdownAfter(id, b) => {
                 if let Some(d) = self.item_mut(id) {
                     d.shutdown_after = b;
@@ -4983,6 +5106,14 @@ impl App {
                         self.pending_add = None;
                     }
                     Some(WinKind::Complete(dl)) => self.complete_dismissed(dl),
+                    // The countdown is normally dismissed by its own Cancel
+                    // button; reaching it through the generic close path
+                    // must call the action off just the same. `WindowClosed`
+                    // cannot: the entry is gone from `windows` by then.
+                    Some(WinKind::Power) => {
+                        let cancelled = self.cancel_power_action();
+                        return Task::batch([cancelled, window::close(id)]);
+                    }
                     _ => {}
                 }
                 window::close(id)
@@ -5638,13 +5769,15 @@ fn sort_keyed<'a, K: Ord>(v: &mut [&'a DownloadItem], asc: bool, key: impl Fn(&D
     }
 }
 
-/// Shuts down or logs off the machine for a "when done" action. Errors (no
-/// permission, an unsupported desktop session) only get a log line — by the
-/// time this runs, the queue or download it was guarding is already done.
+/// Shuts down, logs off or sleeps the machine for a "when done" action.
+/// Errors (no permission, an unsupported desktop session) only get a log
+/// line — by the time this runs, the queue or download it was guarding is
+/// already done.
 fn run_power_action(action: PowerAction) {
     let result = match action {
         PowerAction::Shutdown => system_shutdown::shutdown(),
         PowerAction::LogOff => system_shutdown::logout(),
+        PowerAction::Sleep => system_shutdown::sleep(),
     };
     if let Err(e) = result {
         crate::log::warn(&format!("power action {action:?} failed: {e}"));

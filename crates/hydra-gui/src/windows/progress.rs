@@ -185,7 +185,7 @@ fn completion_tab<'a>(app: &'a App, d: &'a DownloadItem) -> El<'a> {
         .size(theme::FONT_SIZE)
         .color(theme::dim_text(&iced::Theme::Light)),
         checkbox(d.shutdown_after)
-            .label(tr("Shut down / log off computer when done"))
+            .label(tr("Shut down / log off / sleep computer when done"))
             .on_toggle(move |b| Message::ProgShutdownAfter(d.id, b))
             .size(15.0)
             .text_size(theme::FONT_SIZE)
@@ -207,6 +207,14 @@ fn completion_tab<'a>(app: &'a App, d: &'a DownloadItem) -> El<'a> {
                 radio(
                     tr("Log off"),
                     PowerAction::LogOff,
+                    Some(d.shutdown_action),
+                    move |v| Message::ProgShutdownAction(d.id, v),
+                )
+                .size(15.0)
+                .text_size(theme::FONT_SIZE),
+                radio(
+                    tr("Sleep"),
+                    PowerAction::Sleep,
                     Some(d.shutdown_action),
                     move |v| Message::ProgShutdownAction(d.id, v),
                 )

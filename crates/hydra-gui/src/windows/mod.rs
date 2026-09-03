@@ -10,6 +10,7 @@ pub mod file_info;
 pub mod main_win;
 pub mod options;
 pub mod permissions;
+pub mod power;
 pub mod progress;
 pub mod scheduler;
 pub mod shortcuts;

@@ -98,9 +98,10 @@ pub struct DownloadItem {
     pub conns: Vec<ConnRow>,
     #[serde(skip)]
     pub status_line: String,
-    /// Shut down or log off the computer once this download (and any virus
-    /// scan) finishes — the per-download analogue of a queue's
-    /// [`Schedule::shutdown_when_done`].
+    /// Shut down, log off or sleep the computer once this download (and any
+    /// virus scan) finishes — the per-download analogue of a queue's
+    /// [`Schedule::shutdown_when_done`]. The action itself only runs after
+    /// the cancellable countdown in `WinKind::Power`.
     #[serde(default)]
     pub shutdown_after: bool,
     #[serde(default)]
@@ -408,6 +409,17 @@ pub enum PowerAction {
     #[default]
     Shutdown,
     LogOff,
+    Sleep,
+}
+
+impl PowerAction {
+    /// Whether the action takes the login session with it. Shutting down and
+    /// logging off end the process either way, so Hydra exits with them;
+    /// sleeping only suspends the machine, and Hydra keeps running and is
+    /// still there when it wakes.
+    pub fn ends_session(self) -> bool {
+        matches!(self, PowerAction::Shutdown | PowerAction::LogOff)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -640,9 +652,10 @@ pub struct Schedule {
     pub open_file_enabled: bool,
     pub open_file: String,
     pub exit_when_done: bool,
-    /// Shut down or log off the computer once every file in the queue has
-    /// downloaded — checked in the same "when done" pass as
-    /// `exit_when_done`.
+    /// Shut down, log off or sleep the computer once every file in the queue
+    /// has downloaded — checked in the same "when done" pass as
+    /// `exit_when_done`. The action itself only runs after the cancellable
+    /// countdown in `WinKind::Power`.
     #[serde(default)]
     pub shutdown_when_done: bool,
     #[serde(default)]
@@ -1055,5 +1068,40 @@ mod tests {
         assert_eq!(category_dir(&c, Some("Gone"), false), None);
         assert_eq!(category_dir(&c, Some("Gone"), true), Some("/dl".into()));
         assert_eq!(category_dir(&[], Some("Video"), false), None);
+    }
+
+    #[test]
+    fn only_sleeping_leaves_the_session_up() {
+        // Shutdown and log off take the process with them, so Hydra exits
+        // alongside them; sleep suspends the machine and Hydra is still
+        // there on wake.
+        assert!(PowerAction::Shutdown.ends_session());
+        assert!(PowerAction::LogOff.ends_session());
+        assert!(!PowerAction::Sleep.ends_session());
+    }
+
+    #[test]
+    fn a_config_written_before_sleep_existed_still_loads() {
+        // The stored variant name is the wire format: adding Sleep must not
+        // move Shutdown or LogOff.
+        let sc: Schedule = toml::from_str(
+            "periodic = false\nstart_on_startup = false\nstart_enabled = false\n\
+             start_at = \"23:00\"\nonce = false\ndays = [true, true, true, true, true, true, true]\n\
+             stop_enabled = false\nstop_at = \"07:30\"\nretries_enabled = false\nretries = 10\n\
+             open_file_enabled = false\nopen_file = \"\"\nexit_when_done = false\n\
+             shutdown_when_done = true\nshutdown_action = \"LogOff\"\n",
+        )
+        .unwrap();
+        assert_eq!(sc.shutdown_action, PowerAction::LogOff);
+        // A schedule saved before the field existed at all defaults to
+        // shutting down, as it always did.
+        let bare: Schedule = toml::from_str("shutdown_when_done = true\n").unwrap();
+        assert_eq!(bare.shutdown_action, PowerAction::Shutdown);
+        assert!(toml::to_string(&Schedule {
+            shutdown_action: PowerAction::Sleep,
+            ..Schedule::default()
+        })
+        .unwrap()
+        .contains("shutdown_action = \"Sleep\""));
     }
 }
