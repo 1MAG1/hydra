@@ -481,6 +481,10 @@ pub struct Settings {
     pub show_completion_tab: bool,
     pub show_hide_buttons: bool,
     pub show_complete_dialog: bool,
+    /// Take a download off the list once it has finished — after the
+    /// complete dialog is closed, when that dialog is enabled. Only the row
+    /// goes; the downloaded file stays where it was saved.
+    pub remove_completed: bool,
     pub user_agent: String,
     pub virus_scanner: String,
     pub virus_args: String,
@@ -564,6 +568,7 @@ impl Default for Settings {
             show_completion_tab: true,
             show_hide_buttons: true,
             show_complete_dialog: true,
+            remove_completed: false,
             user_agent: format!("hydra-gui/{}", env!("CARGO_PKG_VERSION")),
             virus_scanner: String::new(),
             virus_args: String::new(),

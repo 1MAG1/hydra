@@ -756,6 +756,10 @@ pub enum Message {
     ProgLimitRemember(DlId, bool),
     ProgShutdownAfter(DlId, bool),
     ProgShutdownAction(DlId, PowerAction),
+    /// Options-on-completion tab mirror of Options > Downloads >
+    /// "Remove completed downloads from the list": the setting is global,
+    /// so toggling it here writes straight to the config.
+    ProgRemoveCompleted(bool),
     /// Skip the virus scan running over the finished file.
     ProgScanSkip(DlId),
     /// Infected (or unscannable): keep the file, close the dialog.
@@ -869,6 +873,7 @@ pub enum OptField {
     CompletionTab(bool),
     HideButtons(bool),
     CompleteDialog(bool),
+    RemoveCompleted(bool),
     UserAgent(String),
     VirusScanner(String),
     VirusArgs(String),
@@ -1935,6 +1940,17 @@ impl App {
         self.remove_item_opts(id, false);
     }
 
+    /// The "Download complete" dialog for `dl` is going away — by its Close
+    /// button, by Open, or by the window's own close button. When Options >
+    /// Downloads asks for it, this is the moment the finished row leaves the
+    /// list: it outlived the transfer only so the dialog had something to
+    /// describe.
+    fn complete_dismissed(&mut self, dl: DlId) {
+        if self.cfg.settings.remove_completed {
+            self.remove_item(dl);
+        }
+    }
+
     fn remove_item_opts(&mut self, id: DlId, remove_file: bool) {
         if let Some(d) = self.item(id) {
             if d.state != DlState::Complete {
@@ -2165,7 +2181,13 @@ impl App {
             return Task::batch([task, iced::exit()]);
         }
         if self.cfg.settings.show_complete_dialog {
+            // The dialog reads the row it describes, so a row asked to
+            // disappear on completion is dropped only once that dialog is
+            // closed (in `WindowClosed`), not here.
             return Task::batch([task, self.open_window(WinKind::Complete(id))]);
+        }
+        if self.cfg.settings.remove_completed {
+            self.remove_item(id);
         }
         task
     }
@@ -2822,6 +2844,10 @@ impl App {
                         } else {
                             Task::none()
                         }
+                    }
+                    Some(WinKind::Complete(dl)) => {
+                        self.complete_dismissed(dl);
+                        Task::none()
                     }
                     Some(WinKind::Update) => {
                         // OS close button is Cancel: stop an in-flight
@@ -4155,13 +4181,20 @@ impl App {
                 self.save_state();
                 Task::none()
             }
+            Message::ProgRemoveCompleted(b) => {
+                self.cfg.settings.remove_completed = b;
+                self.save_config();
+                Task::none()
+            }
 
             // ----------------------------------------------------- complete
             Message::OpenFile(id) => {
                 if let Some(d) = self.item(id) {
                     let _ = open::that_detached(d.full_path());
                 }
-                self.close_window(WinKind::Complete(id))
+                let task = self.close_window(WinKind::Complete(id));
+                self.complete_dismissed(id);
+                task
             }
             Message::OpenFolder(id) => {
                 if let Some(d) = self.item(id) {
@@ -4944,9 +4977,13 @@ impl App {
                 }
             }
             Message::CloseThis(id) => {
-                if self.windows.remove(&id) == Some(WinKind::Confirm) {
-                    self.confirm = None;
-                    self.pending_add = None;
+                match self.windows.remove(&id) {
+                    Some(WinKind::Confirm) => {
+                        self.confirm = None;
+                        self.pending_add = None;
+                    }
+                    Some(WinKind::Complete(dl)) => self.complete_dismissed(dl),
+                    _ => {}
                 }
                 window::close(id)
             }
@@ -5427,6 +5464,7 @@ impl App {
             OptField::CompletionTab(b) => s.show_completion_tab = b,
             OptField::HideButtons(b) => s.show_hide_buttons = b,
             OptField::CompleteDialog(b) => s.show_complete_dialog = b,
+            OptField::RemoveCompleted(b) => s.remove_completed = b,
             OptField::UserAgent(v) => s.user_agent = v,
             OptField::VirusScanner(v) => s.virus_scanner = v,
             OptField::VirusArgs(v) => s.virus_args = v,

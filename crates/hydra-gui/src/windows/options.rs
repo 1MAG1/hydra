@@ -379,6 +379,14 @@ fn downloads(app: &App) -> El<'_> {
                 .style(theme::check),
             tr("Pops the completion dialog with Open / Open folder when a download finishes."),
         ),
+        hinted(
+            checkbox(s.remove_completed).label(tr("Remove completed downloads from the list"))
+                .on_toggle(|b| o(OptField::RemoveCompleted(b)))
+                .size(15.0)
+                .text_size(theme::FONT_SIZE)
+                .style(theme::check),
+            tr("A finished download drops off the list on its own — once the complete dialog is closed, when that dialog is shown. The downloaded file is kept."),
+        ),
         section(tr("Virus checking")),
         text(tr("Virus scanner program")).size(theme::FONT_SIZE),
         row![
