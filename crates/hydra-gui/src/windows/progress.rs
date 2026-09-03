@@ -173,6 +173,12 @@ fn completion_tab<'a>(app: &'a App, d: &'a DownloadItem) -> El<'a> {
             .size(15.0)
             .text_size(theme::FONT_SIZE)
             .style(theme::check),
+        checkbox(app.cfg.settings.remove_completed)
+            .label(tr("Remove completed downloads from the list"))
+            .on_toggle(Message::ProgRemoveCompleted)
+            .size(15.0)
+            .text_size(theme::FONT_SIZE)
+            .style(theme::check),
         text(tr(
             "These settings are unavailable when \"Show download complete dialog\" is turned on"
         ))
