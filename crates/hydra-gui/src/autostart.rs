@@ -206,10 +206,7 @@ pub fn apply(enabled: bool, minimized: bool) {
         let _ = std::fs::create_dir_all(dir);
     }
     match std::fs::write(&path, content) {
-        Ok(()) => crate::log::info(&format!(
-            "login item written: {} -> {exe}",
-            path.display()
-        )),
+        Ok(()) => crate::log::info(&format!("login item written: {} -> {exe}", path.display())),
         Err(e) => crate::log::warn(&format!("login item write failed: {e}")),
     }
 }
@@ -218,14 +215,24 @@ pub fn apply(enabled: bool, minimized: bool) {
 /// still exists. Used by the permissions guide.
 #[cfg(target_os = "macos")]
 pub fn is_registered() -> bool {
-    let Some(path) = entry_path() else { return false };
-    let Ok(plist) = std::fs::read_to_string(&path) else { return false };
+    let Some(path) = entry_path() else {
+        return false;
+    };
+    let Ok(plist) = std::fs::read_to_string(&path) else {
+        return false;
+    };
     // First <string> inside ProgramArguments is the executable.
-    let Some(start) = plist.find("<array>") else { return false };
+    let Some(start) = plist.find("<array>") else {
+        return false;
+    };
     let rest = &plist[start..];
-    let Some(s) = rest.find("<string>") else { return false };
+    let Some(s) = rest.find("<string>") else {
+        return false;
+    };
     let rest = &rest[s + "<string>".len()..];
-    let Some(e) = rest.find("</string>") else { return false };
+    let Some(e) = rest.find("</string>") else {
+        return false;
+    };
     std::path::Path::new(&rest[..e]).is_file()
 }
 
@@ -236,7 +243,9 @@ mod tests {
 
     #[test]
     fn installed_paths_pass_through() {
-        let p = PathBuf::from("/Applications/Hydra Download Manager.app/Contents/MacOS/Hydra Download Manager");
+        let p = PathBuf::from(
+            "/Applications/Hydra Download Manager.app/Contents/MacOS/Hydra Download Manager",
+        );
         assert_eq!(stable_bundle_exe(p.clone()), Some(p));
     }
 
