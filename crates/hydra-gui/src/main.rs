@@ -152,6 +152,7 @@ fn boot() -> (App, Task<Message>) {
         perm_status: windows::permissions::PermStatus::default(),
         main_pos: None,
         main_size: iced::Size::new(0.0, 0.0),
+        power: None,
         system_dark: theme::system_is_dark(),
     };
 
@@ -254,6 +255,7 @@ fn view(app: &App, id: window::Id) -> app::El<'_> {
         Some(WinKind::Confirm) => windows::confirm::view(app),
         Some(WinKind::Permissions) => windows::permissions::view(app),
         Some(WinKind::Update) => windows::update::view(app),
+        Some(WinKind::Power) => windows::power::view(app),
         None => iced::widget::container(iced::widget::text(""))
             .width(iced::Length::Fill)
             .height(iced::Length::Fill)
@@ -279,6 +281,7 @@ fn title(app: &App, id: window::Id) -> String {
         Some(WinKind::Confirm) => tr("Hydra"),
         Some(WinKind::Permissions) => tr("Permissions"),
         Some(WinKind::Update) => tr("Update Hydra"),
+        Some(WinKind::Power) => tr("Hydra"),
         None => "Hydra".into(),
     }
 }
@@ -355,6 +358,11 @@ fn subscription(app: &App) -> Subscription<Message> {
             _ => None,
         }),
     ];
+    // The power-action countdown shows a number of seconds, so it ticks at
+    // one second even in power save — where the main tick is three apart.
+    if app.power.is_some() {
+        subs.push(iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::PowerTick));
+    }
     // A drag in flight samples the pointer on a fixed cadence instead of on
     // every motion event. Each message repaints the window — on a Retina
     // display macOS colour-converts that whole surface per present — so a

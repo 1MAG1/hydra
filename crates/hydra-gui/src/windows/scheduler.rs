@@ -215,7 +215,7 @@ fn schedule_tab<'a>(q: &'a QueueDef) -> El<'a> {
             .text_size(theme::FONT_SIZE)
             .style(theme::check),
         checkbox(sc.shutdown_when_done)
-            .label(tr("Shut down / log off computer when done"))
+            .label(tr("Shut down / log off / sleep computer when done"))
             .on_toggle(|b| s(SchField::ShutdownDone(b)))
             .size(15.0)
             .text_size(theme::FONT_SIZE)
@@ -237,6 +237,14 @@ fn schedule_tab<'a>(q: &'a QueueDef) -> El<'a> {
                 radio(
                     tr("Log off"),
                     PowerAction::LogOff,
+                    Some(sc.shutdown_action),
+                    |v| s(SchField::ShutdownAction(v)),
+                )
+                .size(15.0)
+                .text_size(theme::FONT_SIZE),
+                radio(
+                    tr("Sleep"),
+                    PowerAction::Sleep,
                     Some(sc.shutdown_action),
                     |v| s(SchField::ShutdownAction(v)),
                 )
