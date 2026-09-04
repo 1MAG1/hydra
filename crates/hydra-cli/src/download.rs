@@ -7,7 +7,7 @@
 
 use crate::progress::{ConnView, Counters, Progress};
 use crate::url::{proxy_from_env, Sidecar, Url};
-use hya_core::{detect_format, Admission, Admit, Category, DeltaEstimator, Scheduler, Source};
+use hya_core::{detect_format, Category, Scheduler, Source};
 use hya_net::polite::{Politeness, RateLimiter};
 use hya_net::{fetch_range_retry, probe_resilient, SparseSink, Target, TlsCapableConnector};
 use sha2::{Digest, Sha256};
@@ -156,6 +156,9 @@ pub struct Job {
     pub force: bool,
     /// Discard the bytes instead of saving them.
     pub no_save: bool,
+    /// Report the object's SHA-256; see `Cli::print_checksum`. Off by default:
+    /// hashing is a pass over every byte and nothing needs it unless asked.
+    pub print_checksum: bool,
     /// Write a per-chunk digest manifest for what arrived.
     pub emit_manifest: Option<PathBuf>,
     /// Verify each chunk against this manifest as it arrives.
@@ -932,6 +935,7 @@ pub fn default_job() -> Job {
         insecure: false,
         force: false,
         no_save: false,
+        print_checksum: false,
         emit_manifest: None,
         chunk_digests: None,
         chunk_size: None,
@@ -1133,6 +1137,25 @@ where
                 continue;
             }
         }
+        // An error status is an ANSWER, not a description of the object.
+        //
+        // `probe_resilient` deliberately returns the status rather than failing,
+        // so that a `404` learned from HEAD is reported instead of "the ranged GET
+        // was unsatisfiable" — the better error. That leaves the test to the
+        // caller, and this caller did not make it: a `400 Bad Request` with a
+        // 24-byte JSON body became a 24-byte object, the transfer was planned,
+        // those 24 bytes were split across eight connections, and only the range
+        // requests failed a second later with an internal message. The FFI driver
+        // and the stream inspector already check here; this is the one path that
+        // did not.
+        if pr.status >= 400 {
+            // No host in the message: both callers name it themselves, and a
+            // message that repeats it prints the host twice on one line.
+            return Err(format!(
+                "server answered {}",
+                hya_net::describe_status(pr.status)
+            ));
+        }
         return Ok(Resolved {
             probe: pr,
             target,
@@ -1216,6 +1239,18 @@ struct Probed {
     renamed: Option<String>,
     /// Mirrors still being probed when the transfer was allowed to start.
     late: Option<LateMirrors>,
+    /// Wall clock to the first successful probe, as the per-request setup cost.
+    ///
+    /// This is the only measurement of the path's latency taken before the
+    /// transfer, and everything timed in units of `delta` depends on it: the
+    /// ramp's measurement windows, the stall timeout, the repair deadband. It
+    /// used to be discarded and a 50 ms prior used instead, which is roughly
+    /// right for a nearby origin and half the truth on a transatlantic one —
+    /// measured on a 100 ms path, the ramp judged each newly admitted connection
+    /// over a 0.15 s window, caught it mid-slow-start, concluded it was slower
+    /// than the level below, and settled at one connection on a link that
+    /// scaled to eight.
+    first_rtt: f64,
 }
 
 async fn probe_all(
@@ -1379,6 +1414,12 @@ async fn probe_all(
     done.sort_by_key(|(i, ..)| *i);
 
     let mut first: Option<hya_net::Probe> = None;
+    // The first probe failure, worded for a user and naming its host. Kept
+    // because a lone source's failure IS the transfer's error: summarising a
+    // one-item list as "every probe failed" throws away the only thing the
+    // user can act on, which for an object that answers `400` is the status
+    // the server already gave.
+    let mut lone_failure: Option<String> = None;
     let mut keep = Vec::new();
     // Targets after redirect resolution, paired with the index they came from.
     let mut resolved_targets: Vec<(usize, Target)> = Vec::new();
@@ -1465,7 +1506,12 @@ async fn probe_all(
                     }
                 }
             }
-            Err(e) => p.event(0, &format!("probe failed for {}: {e}", u.host)),
+            Err(e) => {
+                p.event(0, &format!("probe failed for {}: {e}", u.host));
+                if lone_failure.is_none() {
+                    lone_failure = Some(format!("{e} for {}", u.host));
+                }
+            }
         }
     }
     // Only now — with `first` in hand — can the stragglers be given their
@@ -1521,120 +1567,22 @@ async fn probe_all(
             resolved: resolved_targets,
             renamed,
             late,
+            // A probe is a connect plus a request, so this overstates one
+            // round trip and understates nothing. Clamped the way the GUI
+            // clamps the same measurement.
+            first_rtt: first_ok
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.05)
+                .clamp(0.05, 45.0),
         }),
-        _ => Err("no usable source: every probe failed".into()),
+        // One URL, one answer. With a mirror list the per-source lines above
+        // have already said what each one did, and the summary is the honest
+        // description of the set; with a single source there is no set.
+        _ => Err(match lone_failure {
+            Some(e) if pairs.len() == 1 => e,
+            _ => "no usable source: every probe failed".into(),
+        }),
     }
-}
-
-/// Fixed-work concurrency probe based on measured marginal goodput.
-///
-/// Total bytes are held constant across levels to measure true scaling.
-/// Learns the optimal connection count and per-request setup cost.
-///
-/// The probe has to move bytes to measure anything — marginal goodput is not
-/// observable without observing it. Writing those bytes to a temp file and deleting
-/// them makes the measurement pure waste: on a 128 MB object over a slow path it cost
-/// ~9 s and 1.5 MB before the transfer had started, which is what "sometimes takes a
-/// long time to start" was. Writing them at their true offsets in the real sink turns
-/// the probe into the first part of the transfer: the ranges it filled are returned so
-/// the scheduler can mark them done and never re-fetch them.
-///
-/// This is only sound because the probe reads *aligned, exact* ranges and the transport
-/// validates `Content-Range` before writing. A probe that could not prove where its
-/// bytes belonged would have to keep discarding them.
-async fn learn_concurrency(
-    conn: &Arc<TlsCapableConnector>,
-    t: &Target,
-    size: u64,
-    max: usize,
-    tries: u32,
-    timeout_s: f64,
-    sink: &Arc<SparseSink>,
-    p: &mut Progress,
-) -> (usize, f64, Vec<(u64, u64)>) {
-    // How much to move at each probe level.
-    //
-    // A fixed slab is wrong in both directions, and the small-object direction was
-    // costing real time: at 768 KiB per level on a 3 MB object over a 0.3 MB/s
-    // link, three levels spent ~7.8 s measuring a transfer that takes ~5 s. The
-    // measurement has to be small enough that being wrong about it is cheaper than
-    // finding out — so it is capped at a fraction of the object as well.
-    //
-    // The floor keeps the sample large enough to time: below ~256 KiB the
-    // measurement is mostly setup noise, which would make the search's decisions
-    // arbitrary rather than merely imprecise.
-    const SLAB: u64 = 768 * 1024;
-    const MIN_SLAB: u64 = 256 * 1024;
-    // At most an eighth of the object per level, so a full search cannot consume
-    // more of the transfer than it can plausibly save.
-    let total = SLAB.min(size / 8).max(MIN_SLAB);
-    if size <= total * 2 {
-        // Too small to probe: the measurement would cover most of the object, and on a
-        // small object the answer is one connection anyway.
-        return (1, 0.05, Vec::new());
-    }
-    let c = conn.clone();
-    let mut adm = Admission::new(0.15, max);
-    let mut de = DeltaEstimator::new(0.05);
-    let mut level = 1usize;
-    // Probe from the FRONT of the object, contiguously, so the bytes it keeps are the
-    // bytes a sequential reader wants first and the progress bar advances from zero.
-    let mut base = 0u64;
-    let mut filled: Vec<(u64, u64)> = Vec::new();
-    loop {
-        let slice = total / level as u64;
-        if base + total >= size {
-            break;
-        }
-        let t0 = Instant::now();
-        let mut hs = Vec::new();
-        for k in 0..level {
-            let lo = base + k as u64 * slice;
-            let (cc, sk, tt) = (c.clone(), sink.clone(), t.clone());
-            hs.push(tokio::spawn(async move {
-                let s = Instant::now();
-                let r = fetch_range_retry(cc, tt, lo, lo + slice, sk, tries, timeout_s).await;
-                (r.is_ok(), s.elapsed().as_secs_f64())
-            }));
-        }
-        let (mut got, mut per) = (0u64, Vec::new());
-        for (k, h) in hs.into_iter().enumerate() {
-            if let Ok((ok, el)) = h.await {
-                if ok {
-                    got += slice;
-                    per.push(el);
-                    let lo = base + k as u64 * slice;
-                    filled.push((lo, lo + slice));
-                }
-            }
-        }
-        let el = t0.elapsed().as_secs_f64().max(1e-3);
-        if got == 0 {
-            break;
-        }
-        // Probe bytes are real progress now, so report them as such.
-        p.add_probe_bytes(got);
-        let rate = got as f64 / el;
-        // delta = wall time minus the time the bytes themselves should have
-        // taken, which isolates setup from streaming.
-        for x in &per {
-            de.observe((x - slice as f64 / rate.max(1.0)).max(1e-3));
-        }
-        base += total;
-        p.event(
-            1,
-            &format!(
-                "probe level {level}: {:.2} MB/s, delta ~{:.3}s",
-                rate / 1.048576e6,
-                de.get()
-            ),
-        );
-        match adm.observe(rate) {
-            Admit::Stop => break,
-            Admit::Add => level += 1,
-        }
-    }
-    (adm.settled().unwrap_or(1).max(1), de.get(), filled)
 }
 
 /// Set a file's modification time from a Unix timestamp.
@@ -2060,6 +2008,7 @@ pub async fn run(job: Job) -> Outcome {
         resolved,
         renamed,
         late: late_mirrors,
+        first_rtt,
     } = match probe_all(
         &conn,
         &pairs,
@@ -2520,8 +2469,19 @@ pub async fn run(job: Job) -> Outcome {
 
     // ---- the discarding sink, created once -------------------------------
     // Created before the concurrency probe so probe bytes are recorded by the digest sink.
+    // A digest is wanted unless the user declined it — and `--checksum` or a
+    // document's digest is a request for one however they answered, since a
+    // verification that cannot run is worse than one that costs a pass.
+    let want_digest_value = job.print_checksum
+        || job.checksum.is_some()
+        || job.attested.as_ref().is_some_and(|a| a.digest.is_some());
     let discard_sink = discarding.then(|| {
-        Arc::new(SparseSink::discarding().with_digest(hya_net::stream_digest::DEFAULT_REORDER_CAP))
+        let sk = SparseSink::discarding();
+        Arc::new(if want_digest_value {
+            sk.with_digest(hya_net::stream_digest::DEFAULT_REORDER_CAP)
+        } else {
+            sk
+        })
     });
 
     // ---- concurrency ----------------------------------------------------
@@ -2534,7 +2494,7 @@ pub async fn run(job: Job) -> Outcome {
     //
     // `--adaptive` remains available to ask for measurement WITH a ceiling; the
     // probe is still what runs when no number is given at all.
-    let (n_conns, delta, probe_filled) = match job.conns {
+    let (n_conns, delta, probe_filled): (usize, f64, Vec<(u64, u64)>) = match job.conns {
         // An explicit `-x N` is honoured as given — but `--adaptive` asks for the
         // measurement to run anyway, with N as a CEILING rather than a target.
         //
@@ -2553,12 +2513,12 @@ pub async fn run(job: Job) -> Outcome {
         // probing (18.2 s vs 8.3 s median, paired over 9 interleaved reps,
         // p = 0.004), because the samples are paid for before the transfer starts
         // and every byte they move is re-fetched work.
-        Some(n) => (job.polite.allow(n), 0.05, Vec::new()),
+        Some(n) => (job.polite.allow(n), first_rtt, Vec::new()),
         // `--no-probe` with no `-x` at all: the user has asked not to measure and
         // named no number, so take one connection rather than probing anyway.
         // Guessing a multi-connection default here is what produced transfers
         // slower than a single stream on a saturated link.
-        None if !job.probe => (job.polite.allow(1), 0.05, Vec::new()),
+        None if !job.probe => (job.polite.allow(1), first_rtt, Vec::new()),
         // A MIRROR LIST answers the question the probe was going to ask.
         //
         // `learn_concurrency` measures marginal goodput against ONE host and
@@ -2584,50 +2544,34 @@ pub async fn run(job: Job) -> Outcome {
                      would not describe them"
                 ),
             );
-            (n, 0.05, Vec::new())
+            (n, first_rtt, Vec::new())
         }
-        _ => {
-            // The probe writes into the same file the transfer will use, so it must
-            // exist first. `run_transfer_observed` opens it again by path; both open
-            // the same sparse file and write disjoint offsets.
-            //
-            // Under `--no-save` there is no file at all, so the probe discards as well.
-            let outs = out_path.to_string_lossy().to_string();
-            let probe_sink = match &discard_sink {
-                // The same sink the transfer will use, so the probe's bytes are
-                // counted by the digest exactly once.
-                Some(sk) => Ok(sk.clone()),
-                None => SparseSink::create(&outs, size).map(Arc::new),
-            };
-            match probe_sink {
-                Ok(sk) => {
-                    p.phase("measuring useful connection count");
-                    // The search's ceiling: whatever `-x` asked for when it was
-                    // given (so `--adaptive -x 8` means "up to 8, and measure how
-                    // many of those are useful"), otherwise the politeness limit.
-                    // Taking the min of both is what keeps `--adaptive` from
-                    // exceeding a limit the user set for a reason.
-                    let ceiling = match job.conns {
-                        Some(n) => n.min(job.polite.per_host).max(1),
-                        None => job.polite.per_host,
-                    };
-                    let (n, d, filled) = learn_concurrency(
-                        &conn,
-                        &usable[0].1,
-                        size,
-                        ceiling,
-                        job.tries,
-                        job.timeout_s,
-                        &sk,
-                        &mut p,
-                    )
-                    .await;
-                    drop(sk);
-                    (job.polite.allow(n), d, filled)
-                }
-                Err(e) => return failed(&job, size, format!("cannot create {outs}: {e}")),
-            }
-        }
+        // No `-x` and no mirror list: open what politeness allows.
+        //
+        // This used to measure first, and the measurement was the slowest answer in
+        // every comparison. It sampled 768 KiB per level and timed the whole fetch,
+        // so on any path where setup costs more than the sample takes to stream it
+        // reported the path's latency as its bandwidth: on a 100 ms link serving
+        // 104 MB/s it measured 0.93 MB/s at one connection and 1.05 MB/s at two,
+        // called that a 14% gain, and settled on one connection. Measured on that
+        // link, the default reached 90 MB/s where four connections reach 224 and
+        // eight reach 287 — the probe spent 1.5 s to arrive at the worst
+        // configuration available, and `curl` beat it without measuring anything.
+        //
+        // Sampling harder is not the fix. To make streaming dominate setup on that
+        // path the sample would have to span tens of megabytes per level, which is
+        // a large fraction of the object fetched at a concurrency the search has
+        // not yet justified. The in-band ramp behind `--adaptive` exists precisely
+        // because measurement belongs on the real transfer, where the bytes count
+        // and the window can be as long as it needs to be.
+        //
+        // So the default is the politeness budget, and the transfer's own machinery
+        // handles the paths that will not serve it: an origin that answers `429`
+        // lowers the ceiling, one that accepts connections and starves them lowers
+        // it too, and the scheduler moves ranges off any connection that lags. What
+        // is left is the case this default is right for — a path with more capacity
+        // than one stream can take — and there it is worth 2 to 3x.
+        None => (job.polite.allow(job.polite.per_host), first_rtt, Vec::new()),
     };
     // Split the connections across sources under BOTH ceilings: per-host, and the
     // aggregate `--max-total-connections`. The earlier arithmetic divided the
@@ -2947,6 +2891,24 @@ pub async fn run(job: Job) -> Outcome {
     // Digest, head bytes and any unavailability reason gathered from the stream,
     // for the `--no-save` path that has no file to read them back from.
     let mut stream_result: Option<(Option<String>, Vec<u8>, Option<String>)> = None;
+    // The SHA-256 of a saved file, hashed as the bytes landed rather than by
+    // reading the finished file back.
+    //
+    // Measured on a loopback origin, 512 MiB: the transfer itself took 0.07 s,
+    // the post-download hash 0.19-0.26 s, and the whole-file re-read the rest of
+    // a 0.37 s run — hydra spent three times longer hashing than downloading,
+    // and curl spends nothing. On a wide-area transfer the re-read is a cold read
+    // of a multi-gigabyte object from disk after the bar has already reached
+    // 100%. Hashing in-band overlaps with waiting for the network, so on any
+    // network-bound transfer the digest becomes free.
+    //
+    // Only a single-connection, from-zero transfer can be hashed this way: the
+    // stream digest hashes the contiguous prefix, and a parallel transfer opens
+    // with one span per connection, so the second span starts at `size/n` and
+    // the reorder buffer would need most of the object (see `stream_digest`).
+    // Anything else, and anything the in-band hash could not finish, falls back
+    // to hashing the file — the same value, at the old cost.
+    let mut file_stream_sha256: Option<String> = None;
     let res = {
         // Clear the phase line before the first frame: they share a terminal row.
         p.end_phase();
@@ -2977,9 +2939,61 @@ pub async fn run(job: Job) -> Outcome {
         let ckpt_size = size;
         let ckpt_validator = validator.clone();
         let ckpt_url = job.urls[0].clone();
+        // The last concurrency decision reported, so each is printed once.
+        let mut last_reason = hya_core::LimitReason::None;
         let mut render = |sc: &Scheduler, done: u64| {
             for line in swaps_r.lock().unwrap().drain(..) {
                 p.event(0, &line);
+            }
+            // The transport's concurrency decisions, as they are made. Without
+            // this the only account of the adaptive search was `HYDRA_RAMP_TRACE`,
+            // and a run that settled at one connection looked like seven dropped
+            // ones.
+            let reason = sc.limit_reason();
+            if reason != last_reason {
+                last_reason = reason;
+                use hya_core::LimitReason as R;
+                let human_rate = |r: f64| format!("{}/s", crate::progress::human(r as u64));
+                match reason {
+                    R::Measured {
+                        chosen,
+                        chosen_rate,
+                        tried,
+                        tried_rate,
+                        // A rate of zero was never measured; see the GUI's
+                        // `describe_limit` for the same guard.
+                    } if tried != chosen && tried_rate > 0.0 && chosen_rate > 0.0 => p.event(
+                        1,
+                        &format!(
+                            "adaptive: measured {tried} connections at {} against {chosen} \
+                             at {}; using {chosen}",
+                            human_rate(tried_rate),
+                            human_rate(chosen_rate)
+                        ),
+                    ),
+                    R::Measured { chosen, .. } if chosen < sc.n_conns() => p.event(
+                        1,
+                        &format!(
+                            "adaptive: {chosen} of {} connections pay for themselves",
+                            sc.n_conns()
+                        ),
+                    ),
+                    R::Refused { serving } if serving < sc.n_conns() => p.event(
+                        1,
+                        &format!(
+                            "origin refuses more than {serving} connection(s) at once; \
+                             using {serving}"
+                        ),
+                    ),
+                    R::Starved { serving } if serving < sc.n_conns() => p.event(
+                        1,
+                        &format!(
+                            "origin serves {serving} connection(s) at once and starves the \
+                             rest; using {serving}"
+                        ),
+                    ),
+                    _ => {}
+                }
             }
             // Carry the scheduler's own count out to the completeness check. A
             // monotonic max rather than a plain store: the observer is called on
@@ -3127,13 +3141,24 @@ pub async fn run(job: Job) -> Outcome {
         // and the ordinary sparse file differ only in where the bytes land, and
         // splitting the call in two meant the reserve bench had to be threaded
         // through twice — so the sink is chosen here and the call is made once.
+        // Hash in-band only where the stream digest can finish (one connection,
+        // starting from zero, the whole object) — see `file_stream_sha256`.
+        let hash_in_band = want_digest_value
+            && !discarding
+            && resumed_from == 0
+            && job.range.is_none()
+            && per.iter().sum::<usize>() == 1;
         let sk = match &sink {
             Some(sk) => sk.clone(),
             None => match SparseSink::create(&outs, size) {
+                Ok(sk) if hash_in_band => {
+                    Arc::new(sk.with_digest(hya_net::stream_digest::DEFAULT_REORDER_CAP))
+                }
                 Ok(sk) => Arc::new(sk),
                 Err(e) => return failed(&job, size, format!("cannot create {outs}: {e}")),
             },
         };
+        let file_sink = sink.is_none().then(|| sk.clone());
         let r = hya_net::run_transfer_with_reserves(
             c,
             tgts,
@@ -3151,6 +3176,11 @@ pub async fn run(job: Job) -> Outcome {
         .await;
         if let Some(discarding_sink) = &sink {
             stream_result = discarding_sink.take_digest(size);
+        }
+        if let Some(fs) = &file_sink {
+            // `None` when no digest was attached or it could not finish; either
+            // way the file is hashed afterwards, so nothing is lost but time.
+            file_stream_sha256 = fs.take_digest(size).and_then(|(d, _, _)| d);
         }
         r
     };
@@ -3340,7 +3370,15 @@ pub async fn run(job: Job) -> Outcome {
         }
         d
     } else {
-        sha256_file(&out_path)
+        // Chunk verification may have refetched and rewritten spans after the
+        // transfer, so a digest taken during it no longer describes the file.
+        file_stream_sha256
+            .take()
+            .filter(|_| chunk_report.is_none())
+            // The whole-file pass is the expensive one: on a CPU without the SHA
+            // extensions it is several seconds per gigabyte, and `--no-checksum`
+            // exists to decline exactly that.
+            .or_else(|| want_digest_value.then(|| sha256_file(&out_path)).flatten())
     };
     // What must the bytes hash to?
     //
@@ -3755,6 +3793,195 @@ pub fn conn_views(sched: &Scheduler, hosts: &[String]) -> Vec<ConnView> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Answers every request with `400 Bad Request` and a 24-byte JSON body —
+    /// the shape of a CDN's "no such file" answer, with a `Content-Length` that
+    /// a probe reading only the size would take for the object's.
+    async fn spawn_400_origin() -> u16 {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = l.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = l.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut head = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let body = br#"{"error":"bad request!"}"#;
+                    let _ = s
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                    let _ = s.write_all(body).await;
+                });
+            }
+        });
+        port
+    }
+
+    /// A ranged origin for whole-job tests: HEAD states the length, a ranged
+    /// GET answers `206`, and a plain GET answers `200`. Keeps the connection
+    /// open across requests, since the client pools them.
+    async fn spawn_ranged_origin(body: std::sync::Arc<Vec<u8>>) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = l.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = l.accept().await else {
+                    return;
+                };
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        // One request head, then answer, then the next.
+                        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                            match s.read(&mut buf).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => head.extend_from_slice(&buf[..n]),
+                            }
+                        }
+                        let end = head.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                        let text = String::from_utf8_lossy(&head[..end]).to_string();
+                        head.drain(..end);
+                        let method = text.split_whitespace().next().unwrap_or("").to_string();
+                        let range = text
+                            .lines()
+                            .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                            .and_then(|l| l.split_once('=').map(|(_, v)| v.trim().to_string()));
+                        let total = body.len();
+                        let (status, lo, hi) = match range.as_deref() {
+                            Some(r) => {
+                                let (a, b) = r.split_once('-').unwrap_or(("0", ""));
+                                let lo: usize = a.parse().unwrap_or(0);
+                                let hi: usize = b.parse().unwrap_or(total - 1);
+                                ("206 Partial Content", lo, hi.min(total - 1))
+                            }
+                            None => ("200 OK", 0, total - 1),
+                        };
+                        let len = hi - lo + 1;
+                        let mut h = format!(
+                            "HTTP/1.1 {status}\r\nContent-Length: {len}\r\nAccept-Ranges: bytes\r\n\
+                             ETag: \"ranged\"\r\nContent-Type: application/octet-stream\r\n"
+                        );
+                        if range.is_some() {
+                            h.push_str(&format!("Content-Range: bytes {lo}-{hi}/{total}\r\n"));
+                        }
+                        h.push_str("\r\n");
+                        if s.write_all(h.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        if method != "HEAD" && s.write_all(&body[lo..=hi]).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// The reported SHA-256 must be the file's SHA-256, however it was computed.
+    ///
+    /// A single-connection transfer hashes the bytes as they land instead of
+    /// reading the finished file back (`file_stream_sha256`); anything else
+    /// hashes the file. Both must agree with each other and with the object, or
+    /// the optimisation has produced the failure this project fears most: a
+    /// stable, plausible, wrong digest.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_reported_sha256_is_the_files_sha256_on_every_hashing_path() {
+        let body: Vec<u8> = (0..3_000_017u64).map(|i| (i % 251) as u8).collect();
+        let want = hya_net::digest::to_lower_hex(&Sha256::digest(&body));
+        let port = spawn_ranged_origin(std::sync::Arc::new(body)).await;
+        let dir = std::env::temp_dir().join(format!("hydra_digest_{}", scratch_name()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // `None` is the default path, where the concurrency probe chooses the
+        // count and may pre-fill bytes the sink never sees. It is covered here
+        // because it is what a plain `hydra URL` runs, and because a pre-filled
+        // prefix is exactly the case where the in-band hash must decline and let
+        // the file be hashed instead.
+        for conns in [Some(1usize), Some(2), None] {
+            let label = conns.map_or("default".to_string(), |n| format!("-x {n}"));
+            let out = dir.join(format!("obj{}.bin", conns.unwrap_or(0)));
+            let mut job = default_job();
+            job.urls = vec![format!("http://127.0.0.1:{port}/obj.bin")];
+            job.output = Some(out.clone());
+            job.conns = conns;
+            // The digest is opt-in now, and this test is about its correctness.
+            job.print_checksum = true;
+            let o = run(job).await;
+            assert!(o.ok, "transfer at {label} failed: {:?}", o.note);
+            assert_eq!(
+                o.sha256.as_deref(),
+                Some(want.as_str()),
+                "{label}: reported digest is not the object's"
+            );
+            assert_eq!(
+                sha256_file(&out).as_deref(),
+                Some(want.as_str()),
+                "{label}: file on disk is not the object"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An error status from the probe is an answer about the URL, not a
+    /// description of a 24-byte object.
+    ///
+    /// `probe_resilient` returns the status rather than failing, on purpose, so
+    /// that a `404` learned from HEAD is the error reported. The test is the
+    /// caller's to make, and this caller did not make it: the error body's
+    /// `Content-Length` became the file size, a transfer was planned, 24 bytes
+    /// were split across eight connections, and only the range requests failed a
+    /// second later — with "unexpected status 400 for a range request", which
+    /// names the symptom and not the answer the server had already given.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_error_status_from_the_probe_is_reported_not_downloaded() {
+        let port = spawn_400_origin().await;
+        let u =
+            crate::url::Url::parse(&format!("http://127.0.0.1:{port}/VSCode.zip0")).expect("url");
+        let t = u.to_target(None).expect("target");
+        let c = hya_net::TlsCapableConnector::new().expect("connector");
+        let mut log = Vec::new();
+        let r = probe_resolving(&c, &u, &t, &mut log, 8).await;
+        let err = match r {
+            Ok(res) => panic!(
+                "a 400 resolved to a {}-byte object instead of an error",
+                res.probe.size
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("400 Bad Request"),
+            "the error must name the status the server gave: {err:?}"
+        );
+        // The host belongs to the caller, which prints it either side of this
+        // message; carrying it here too put it on the line twice.
+        assert!(
+            !err.contains("127.0.0.1"),
+            "the probe error must not repeat the host: {err:?}"
+        );
+    }
 
     /// Regression test for a sentinel-encoding bug: "the last 512 bytes" was
     /// encoded as `u64::MAX - 512` and recognised by a `> u64::MAX / 2` test,

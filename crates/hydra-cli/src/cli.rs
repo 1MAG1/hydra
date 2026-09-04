@@ -555,6 +555,18 @@ pub struct Cli {
     #[arg(long = "no-save", visible_alias = "discard")]
     pub no_save: bool,
 
+    /// Report the SHA-256 of the finished object.
+    ///
+    /// Off by default, because it is not free: hashing costs a pass over every byte,
+    /// and on a CPU without the SHA extensions that is several seconds per gigabyte
+    /// spent on a figure nobody asked for. `curl` and `wget` never offer it and never
+    /// pay for it. Ask for it when you want it.
+    ///
+    /// Verification does not need this flag and never did: `--checksum` and a digest
+    /// published by a Metalink are always checked, because those were asked for.
+    #[arg(long = "print-checksum", visible_alias = "show-checksum")]
+    pub print_checksum: bool,
+
     /// Emit the result as JSON on stdout, and nothing else.
     ///
     /// Implies quiet: a machine-readable result must be the ONLY thing on stdout or it
@@ -568,8 +580,17 @@ pub struct Cli {
     #[arg(long = "no-progress")]
     pub no_progress: bool,
 
-    /// Take -x on faith instead of measuring the useful concurrency.
-    #[arg(long = "no-probe")]
+    /// Use a single connection when no `-x` is given.
+    ///
+    /// The default opens the politeness budget. This asks for one stream instead,
+    /// which is the right choice on a link a single connection already saturates,
+    /// and on an origin that would rather not be asked for more.
+    ///
+    /// Named for the upfront measurement it used to disable. That probe is gone —
+    /// it timed a sample too short to measure bandwidth and answered "one" on every
+    /// high-latency path — so the flag now names its effect rather than a step that
+    /// no longer exists. `--adaptive` is what measures now, on the real transfer.
+    #[arg(long = "no-probe", visible_alias = "single")]
     pub no_probe: bool,
 
     /// Measure the useful connection count even when -x is given, treating -x as
@@ -1176,7 +1197,11 @@ mod tests {
         let b = Cli::try_parse_from(["hydra", "-s", "3", "http://x/f"]).unwrap();
         assert_eq!(b.requested_conns(), Some(3));
         let c = Cli::try_parse_from(["hydra", "http://x/f"]).unwrap();
-        assert_eq!(c.requested_conns(), None, "absent means measure it");
+        assert_eq!(
+            c.requested_conns(),
+            None,
+            "absent means the politeness budget"
+        );
     }
 
     /// The three concurrency modes must be distinguishable from the parsed args.
