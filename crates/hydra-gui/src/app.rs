@@ -2853,6 +2853,28 @@ impl App {
                     d.queue = None;
                     d.status_line = i18n::tr("Complete");
                 }
+                // What was typed into the dialog is not obsolete just because
+                // the bytes beat the person to the button: apply it, and move
+                // the finished file to where they said. See
+                // `adopt_dialog_edits`.
+                if self.file_info.is_new
+                    && self.file_info.dl == id
+                    && self.win_of(WinKind::FileInfo(id)).is_some()
+                {
+                    let fi = self.file_info.clone();
+                    if let Some(d) = self.item_mut(id) {
+                        match adopt_dialog_edits(d, &fi) {
+                            Ok(Some(to)) => crate::log::info(&format!(
+                                "#{id} finished under the provisional name; moved to {}",
+                                to.display()
+                            )),
+                            Ok(None) => {}
+                            Err(e) => crate::log::warn(&format!(
+                                "#{id} could not move the finished file to the name typed in File Info: {e}"
+                            )),
+                        }
+                    }
+                }
                 self.save_state();
                 // The ask-box for THIS download is obsolete once the
                 // background transfer lands: close it, the complete dialog
@@ -6153,6 +6175,50 @@ fn may_adopt_name(d: &DownloadItem) -> bool {
     !d.name_locked && d.downloaded == 0 && d.held.is_empty()
 }
 
+/// Carry the edits typed into a still-open File Info dialog onto its item, and
+/// move the finished file to match.
+///
+/// A new download can be running behind the dialog ("download in background
+/// while choosing options"), and a small file lands before the person has
+/// finished typing. The completion used to close the dialog and drop
+/// everything in it: the name they had just written, the folder they had just
+/// picked. Measured on a 2.6 MB archive over a fast link — it finished in
+/// about a second, under the provisional `_1` name the duplicate prompt had
+/// given it, while a Persian suffix was still being typed into the name box.
+///
+/// Only fields the person actually touched are applied; the rest are what the
+/// probe filled in and already match the item. Returns the path the file was
+/// moved to, or `None` when nothing changed on disk.
+fn adopt_dialog_edits(
+    d: &mut DownloadItem,
+    fi: &FileInfoState,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    let old = d.full_path();
+    let name = fi.file_name.trim();
+    if fi.name_touched && !name.is_empty() {
+        d.file_name = name.to_string();
+        d.name_locked = true;
+    }
+    if fi.dir_touched && !fi.save_dir.trim().is_empty() {
+        d.save_dir = fi.save_dir.clone();
+    }
+    if fi.cat_touched {
+        d.category = Some(fi.category.clone());
+    }
+    if !fi.description.trim().is_empty() {
+        d.description = fi.description.clone();
+    }
+    let new = d.full_path();
+    if new == old || !old.is_file() {
+        return Ok(None);
+    }
+    if let Some(dir) = new.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::rename(&old, &new)?;
+    Ok(Some(new))
+}
+
 /// The file the duplicate dialog should warn about, if any.
 ///
 /// `named` says whether `name` is the name this download will really be
@@ -6568,6 +6634,49 @@ mod tests {
         assert_eq!(rows[1].save_to, "/dl/none.zip");
         assert!(rows[1].blocked && !rows[0].blocked);
         assert_eq!(rows[0].kind, "ZIP archive");
+    }
+
+    /// A background transfer that finishes while File Info is still open must
+    /// not discard what was typed there. The 2.6 MB case: landed under the
+    /// provisional `_1` name a second after the duplicate prompt, while the
+    /// real name was still being typed.
+    #[test]
+    fn edits_typed_before_a_fast_finish_are_applied_to_the_finished_file() {
+        let dir = std::env::temp_dir().join(format!("hydra_fi_edit_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_s = dir.to_string_lossy().into_owned();
+        let mut d = item(7, &dir_s, "archive_1.zip", None, DlState::Complete);
+        std::fs::write(d.full_path(), b"bytes").unwrap();
+        let fi = FileInfoState {
+            dl: 7,
+            file_name: "archive_1 کلم بروکلی.zip".into(),
+            name_touched: true,
+            save_dir: dir_s.clone(),
+            ..FileInfoState::default()
+        };
+        let moved = adopt_dialog_edits(&mut d, &fi).unwrap();
+        assert_eq!(d.file_name, "archive_1 کلم بروکلی.zip");
+        assert!(d.name_locked, "a name the person typed is theirs to keep");
+        let want = dir.join("archive_1 کلم بروکلی.zip");
+        assert_eq!(moved.as_deref(), Some(want.as_path()));
+        assert!(
+            want.is_file(),
+            "the finished file must follow the typed name"
+        );
+        assert!(!dir.join("archive_1.zip").exists());
+        // Untouched fields are left alone, and nothing moves.
+        let mut d2 = item(8, &dir_s, "keep.zip", None, DlState::Complete);
+        std::fs::write(d2.full_path(), b"bytes").unwrap();
+        let fi2 = FileInfoState {
+            dl: 8,
+            file_name: "ignored.zip".into(),
+            name_touched: false,
+            save_dir: dir_s.clone(),
+            ..FileInfoState::default()
+        };
+        assert_eq!(adopt_dialog_edits(&mut d2, &fi2).unwrap(), None);
+        assert_eq!(d2.file_name, "keep.zip");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn item(id: DlId, dir: &str, name: &str, queue: Option<&str>, state: DlState) -> DownloadItem {

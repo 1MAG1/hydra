@@ -82,7 +82,16 @@ pub fn view(app: &App) -> El<'_> {
         Some(ConfirmKind::Duplicate { existing, file }) => {
             let msg = match (existing, file) {
                 (Some(_), _) => tr("This address is already in the download list. What do you want to do?"),
-                (None, Some(_)) => tr("A file with this name already exists. What do you want to do?"),
+                // Name the file it found. The collision is checked in the
+                // CATEGORY folder, which is not always where the user last
+                // looked: a finished copy under `Compressed/` prompted this
+                // dialog for someone who had just deleted the one in the
+                // download folder, and "a file with this name" gave them no
+                // way to find it.
+                (None, Some(path)) => format!(
+                    "{}\n\n{path}",
+                    tr("A file with this name already exists. What do you want to do?")
+                ),
                 _ => String::new(),
             };
             (msg, false)
