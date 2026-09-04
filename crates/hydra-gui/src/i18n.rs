@@ -159,6 +159,34 @@ mod tests {
                     "locale '{tag}' is missing translation for key: '{key}'"
                 );
             }
+            // A translation may reorder `{placeholders}`; it may not invent or
+            // lose one. Without this a dropped `{tried_rate}` reaches the UI as
+            // literal braces, and nothing at build time would say so.
+            for (key, en_val) in &en_map {
+                let want = placeholders(en_val);
+                if want.is_empty() {
+                    continue;
+                }
+                let got = placeholders(&map[key]);
+                assert_eq!(
+                    want, got,
+                    "locale '{tag}' changed the placeholders in '{key}'"
+                );
+            }
         }
+    }
+
+    /// Every `{name}` token in a string, as a set.
+    fn placeholders(s: &str) -> std::collections::BTreeSet<&str> {
+        let mut out = std::collections::BTreeSet::new();
+        let mut rest = s;
+        while let Some(open) = rest.find('{') {
+            let Some(close) = rest[open..].find('}') else {
+                break;
+            };
+            out.insert(&rest[open..open + close + 1]);
+            rest = &rest[open + close + 1..];
+        }
+        out
     }
 }

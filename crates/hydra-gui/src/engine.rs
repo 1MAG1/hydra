@@ -274,6 +274,59 @@ pub fn set_power_save(on: bool) {
     POWER_SAVE.store(on, Ordering::Relaxed);
 }
 
+/// What a connection row says while the transport keeps it idle on purpose.
+///
+/// A row that reads "waiting" or "Disconnect." after the adaptive search has
+/// settled looks like a dropped connection and invites the fix that makes it
+/// worse: raising the connection count. The label has to say that a decision
+/// was made, and whose.
+fn dormant_label(reason: hya_core::LimitReason) -> String {
+    use hya_core::LimitReason as R;
+    match reason {
+        R::Measuring => crate::i18n::tr("Waiting (measuring)..."),
+        R::Measured { .. } => crate::i18n::tr("Not used (measured slower)"),
+        R::Refused { .. } | R::Starved { .. } => crate::i18n::tr("Not used (server limit)"),
+        R::None => crate::i18n::tr("Waiting (connection limit)..."),
+    }
+}
+
+/// One sentence for the status line and the log when the transport lowers the
+/// connection count, or `None` when there is nothing to announce.
+fn describe_limit(reason: hya_core::LimitReason, budget: usize) -> Option<String> {
+    use hya_core::LimitReason as R;
+    match reason {
+        R::Measured {
+            chosen,
+            chosen_rate,
+            tried,
+            tried_rate,
+            // A rate of zero means that level was never measured directly, which
+            // a refusal can leave behind. Reporting "against 1 at 0 B/s" states a
+            // measurement that was never taken.
+        } if tried != chosen && tried_rate > 0.0 && chosen_rate > 0.0 => Some(
+            crate::i18n::tr(
+                "Measured {tried} connections at {tried_rate} against {chosen} at \
+                 {chosen_rate}: using {n}",
+            )
+            .replace("{tried}", &tried.to_string())
+            .replace("{tried_rate}", &crate::fmt::rate(tried_rate))
+            .replace("{chosen}", &chosen.to_string())
+            .replace("{chosen_rate}", &crate::fmt::rate(chosen_rate))
+            .replace("{n}", &chosen.to_string()),
+        ),
+        R::Measured { chosen, .. } if chosen < budget => Some(
+            crate::i18n::tr("Measured: {n} of {budget} connections pay for themselves")
+                .replace("{n}", &chosen.to_string())
+                .replace("{budget}", &budget.to_string()),
+        ),
+        R::Refused { serving } | R::Starved { serving } if serving < budget => Some(
+            crate::i18n::tr("Server serves {n} connection(s) at once: using {n}")
+                .replace("{n}", &serving.to_string()),
+        ),
+        _ => None,
+    }
+}
+
 fn emit_interval_ms() -> u128 {
     if POWER_SAVE.load(Ordering::Relaxed) {
         500
@@ -1925,7 +1978,36 @@ async fn run_download(
     // through a ~1.5 s time constant reads as a steady counter.
     let mut sm_rate = 0.0f64;
     let mut rate_mark: Option<(u64, std::time::Instant)> = None;
+    // The last concurrency decision reported, so each is announced once.
+    let mut last_reason = hya_core::LimitReason::None;
+    // While set, the status line is showing a verdict and is owed its normal
+    // text back at this instant.
+    let mut verdict_until: Option<std::time::Instant> = None;
     let mut observe = move |s: &Scheduler, done: u64| {
+        // Say what the transport decided about concurrency, and why, the moment
+        // it decides. The ramp's own trace goes to stderr, which a release GUI
+        // built without a console cannot show; the session log under Help > Logs
+        // is where a user can actually find it.
+        let reason = s.limit_reason();
+        if reason != last_reason {
+            last_reason = reason;
+            if let Some(line) = describe_limit(reason, s.n_conns()) {
+                crate::log::info(&format!("#{id} {line}"));
+                let _ = tx_obs.send(Event::Status { id, line });
+                // Shown, then handed back. The status line's steady-state job is
+                // to say the transfer is running; a one-off verdict that never
+                // clears reads as a stuck transfer, and the decision itself stays
+                // on the connection rows and in the log.
+                verdict_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(8));
+            }
+        }
+        if verdict_until.is_some_and(|t| std::time::Instant::now() >= t) {
+            verdict_until = None;
+            let _ = tx_obs.send(Event::Status {
+                id,
+                line: crate::i18n::tr("Receiving data..."),
+            });
+        }
         for j in 0..s.n_conns() {
             let e = per_conn.entry(j).or_insert((0, 0, 0));
             if let Some((lo, pos, _hi)) = s.conn_range(j) {
@@ -1975,7 +2057,7 @@ async fn run_download(
                         // raising the connection count.
                         info: if s.conn_range(j).is_none() {
                             if s.active_limit() < s.n_conns() {
-                                crate::i18n::tr("Waiting (connection limit)...")
+                                dormant_label(s.limit_reason())
                             } else {
                                 crate::i18n::tr("Disconnect.")
                             }
@@ -2362,6 +2444,93 @@ fn finish_file(
 
 #[cfg(test)]
 mod tests {
+    use hya_core::LimitReason as R;
+
+    /// The whole point of the reason plumbing: an idle row must say WHY it is
+    /// idle. A search that settled reads as a decision, a server limit reads as
+    /// the server's, and only an unexplained cap falls back to the old wording.
+    #[test]
+    fn a_dormant_connection_row_names_the_decision_that_idled_it() {
+        assert_eq!(super::dormant_label(R::Measuring), "Waiting (measuring)...");
+        assert_eq!(
+            super::dormant_label(R::Measured {
+                chosen: 1,
+                chosen_rate: 1.0,
+                tried: 2,
+                tried_rate: 1.0,
+            }),
+            "Not used (measured slower)"
+        );
+        assert_eq!(
+            super::dormant_label(R::Refused { serving: 2 }),
+            "Not used (server limit)"
+        );
+        assert_eq!(
+            super::dormant_label(R::Starved { serving: 2 }),
+            "Not used (server limit)"
+        );
+        // Nothing has explained this one, so the old wording is still the honest
+        // description.
+        assert_eq!(
+            super::dormant_label(R::None),
+            "Waiting (connection limit)..."
+        );
+    }
+
+    /// The verdict sentence carries the numbers a user can check against a
+    /// single-stream download of the same object, with every placeholder filled.
+    #[test]
+    fn a_measured_verdict_reports_both_levels_and_both_rates() {
+        let line = super::describe_limit(
+            R::Measured {
+                chosen: 1,
+                chosen_rate: 446.0 * 1024.0,
+                tried: 2,
+                tried_rate: 415.0 * 1024.0,
+            },
+            8,
+        )
+        .expect("a search that rejected a level must say so");
+        for part in ["2", "1", "446", "415"] {
+            assert!(line.contains(part), "{line:?} is missing {part:?}");
+        }
+        assert!(
+            !line.contains('{'),
+            "an unfilled placeholder reached the user: {line:?}"
+        );
+    }
+
+    /// A rate of zero was never measured — a refusal can settle the search at a
+    /// level no window ever covered. Reporting "against 1 at 0 B/s" would state a
+    /// measurement that was never taken, so the simpler sentence is used instead.
+    #[test]
+    fn a_level_that_was_never_measured_is_not_quoted_as_a_rate() {
+        let line = super::describe_limit(
+            R::Measured {
+                chosen: 1,
+                chosen_rate: 0.0,
+                tried: 2,
+                tried_rate: 990.0,
+            },
+            8,
+        )
+        .expect("a settled search below the budget still explains itself");
+        assert!(
+            !line.contains("0 B") && !line.contains("against"),
+            "a rate that was never measured was quoted: {line:?}"
+        );
+        assert!(line.contains('1') && line.contains('8'), "{line:?}");
+    }
+
+    /// Nothing to announce when nothing is holding connections back, and a
+    /// server limit equal to the budget is not a limit.
+    #[test]
+    fn nothing_is_announced_when_no_decision_narrowed_the_transfer() {
+        assert_eq!(super::describe_limit(R::None, 8), None);
+        assert_eq!(super::describe_limit(R::Measuring, 8), None);
+        assert_eq!(super::describe_limit(R::Refused { serving: 8 }, 8), None);
+        assert!(super::describe_limit(R::Refused { serving: 2 }, 8).is_some());
+    }
     use super::*;
 
     fn scratch(name: &str, body: &str) -> String {
