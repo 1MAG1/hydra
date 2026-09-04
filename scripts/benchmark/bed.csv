@@ -1,0 +1,13 @@
+app,config,mb_per_s,cpu_seconds,max_rss_mib
+wget,1 conn,105.9,2.39,4.8
+curl,1 conn,104.5,3.21,10.9
+hydra,default,297.7,1.79,6.9
+hydra,adaptive,141.3,2.46,7.0
+hydra,-x 8,413.5,1.48,6.9
+hydra,-x 4,294.0,1.89,6.9
+hydra,-x 2,183.5,2.35,6.8
+hydra,-x 1,104.7,2.45,6.6
+aria2c,-x 8,297.8,2.52,25.3
+aria2c,-x 4,285.4,2.54,21.1
+aria2c,-x 2,179.9,3.15,19.2
+aria2c,-x 1,103.5,4.14,17.9

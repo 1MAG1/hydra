@@ -23,10 +23,27 @@
 //! size. A `None` digest with a stated reason is honest; a correct digest bought
 //! by quietly buffering a gigabyte is not.
 //!
-//! Ordinary transfers do not come close to the cap: the scheduler assigns each
-//! connection a contiguous span and preemption only moves the *end* of a range,
-//! so the frontier advances steadily and the buffer holds at most a few
-//! in-flight spans.
+//! # What this can and cannot digest
+//!
+//! Only an effectively SEQUENTIAL transfer completes a streaming digest, which
+//! in practice means one connection. That is not a tuning problem and raising
+//! the cap does not fix it: the scheduler opens a parallel transfer by splitting
+//! the object into one contiguous span per connection, so with `n` connections
+//! the second span starts at `size/n` and every byte of it is ahead of a
+//! frontier still sitting in the first span. The buffer would have to hold
+//! `(n-1)/n` of the whole object — 256 MiB of a 512 MiB object at just two
+//! connections, against a cap of 8 MiB.
+//!
+//! So `-x 1` digests inline, and anything above it abandons the digest on the
+//! first span boundary. Callers that need a digest for a parallel transfer must
+//! hash the finished file instead; `--no-save` has no file, which is why it
+//! reports the digest as unavailable rather than wrong.
+//!
+//! An earlier version of this comment claimed the opposite — that ordinary
+//! transfers stay well under the cap because preemption only moves the end of a
+//! range. Preemption does only move the end, but the INITIAL split is what
+//! defeats the frontier, and measured at `-x 2` through `-x 8` the digest was
+//! abandoned every time.
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;

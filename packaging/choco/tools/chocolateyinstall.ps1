@@ -6,6 +6,9 @@ $packageArgs = @{
   # NSIS installer (see scripts/windows/hydra-installer.nsi): the silent
   # switch is an uppercase /S. Inno Setup switches like /VERYSILENT are
   # ignored by NSIS, which leaves the wizard on screen and hangs the install.
+  # /S selects the installer's defaults: app, IPC host, CLI + PATH, browser
+  # extensions, Start-menu and desktop shortcuts. Skip the desktop shortcut
+  # with: choco install hydra-download-manager --install-arguments="'/NODESKTOP'"
   silentArgs        = '/S'
   validExitCodes    = @(0)
 

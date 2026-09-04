@@ -412,7 +412,11 @@ async fn resolve_one(
                 code: E::HYDRA_ERR_NETWORK as u32,
                 os_error: 0,
                 http_status: p.status as i32,
-                message: format!("server answered {} for {}", p.status, u.host),
+                message: format!(
+                    "server answered {} for {}",
+                    hya_net::describe_status(p.status),
+                    u.host
+                ),
             });
         }
         // Timed on the FINAL hop only. Folding a long redirect chain into the

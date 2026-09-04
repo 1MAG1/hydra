@@ -36,6 +36,10 @@
 //! pins that behaviour, and it is as load-bearing as the detection tests.
 
 /// How healthy a connection looks, on the evidence so far.
+/// `short / long` above which a rate is still climbing; see
+/// [`CollapseDetector::rising`].
+const RISING_RATIO: f64 = 1.15;
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub enum Health {
     /// Delivering at or near its established rate.
@@ -187,6 +191,23 @@ impl CollapseDetector {
 
     pub fn samples(&self) -> u32 {
         self.n
+    }
+
+    /// Is the rate still climbing?
+    ///
+    /// The short average follows a rising rate within a couple of samples and
+    /// the long one trails it, so while a connection is still in TCP slow start
+    /// the two disagree by a wide margin. That disagreement is the honest
+    /// answer to "is this connection slow?": not yet known. A repair that reads
+    /// a climbing rate as a settled one moves work off a connection that was a
+    /// second away from matching its peers — measured on a 100 ms path, one
+    /// flow at 16 MB/s against its twin at 49 had 256 MB taken from it, and
+    /// both were at 90 MB/s before the stolen bytes had been re-requested. The
+    /// margin is wide enough that steady-state jitter does not trip it and
+    /// narrow enough that a connection settled at half its peers' rate is
+    /// reported as settled, since its two averages agree.
+    pub fn rising(&self) -> bool {
+        self.n >= 2 && self.short > self.long * RISING_RATIO
     }
 
     /// Clear detection state after work has been moved away, so the next

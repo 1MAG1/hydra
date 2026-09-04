@@ -18,6 +18,38 @@ const MAX_REPAIRS_PER_TICK: usize = 4;
 
 /// EWMA weight on the newest goodput sample.
 const RATE_ALPHA: f64 = 0.3;
+/// Rate samples a connection must have produced before repair may move work
+/// on to it or off it.
+///
+/// Each sample is one `RATE_WINDOW` of arrivals, so this is the first
+/// `REPAIR_WARM_SAMPLES * RATE_WINDOW` seconds of delivery on a request — long
+/// enough that the estimate has left slow start behind, short enough that a
+/// connection genuinely slower than its peers is noticed within the first
+/// second. See `pick_victim_taker`.
+const REPAIR_WARM_SAMPLES: u32 = 3;
+/// How long a divergence between two BUSY connections must persist before it is
+/// acted on.
+///
+/// The rate estimate is a smoothed window, and smoothing lags: two connections
+/// on one fair path show apparent divergences of 15-20% for a window or two
+/// while their estimates catch up with each other, and the repair test cannot
+/// tell that from a connection that is genuinely slower. Traced on a uniform
+/// four-connection transfer with perfectly fair TCP (four plain `curl` ranges
+/// finish within 10 ms of each other): the good runs stole 9 and 17 MB slivers
+/// at t=0.8 s and t=1.8 s on exactly such a blip, and each sliver became an
+/// orphan that cost a fresh round trip in the tail; the bad runs cascaded into
+/// twenty shrinks, each one changing the ETAs that justified the next. Lag
+/// clears within a few windows. Slowness does not. Waiting this long separates
+/// them, and a repair that is worth making in second three is still worth
+/// making in second four.
+///
+/// Not applied to a victim the detector has graded as collapsing, nor to an
+/// idle taker: the first is measured evidence, the second is free capacity.
+const REPAIR_PERSIST: f64 = 3.0 * RATE_WINDOW;
+/// The same wait expressed in setup costs, whichever is longer. Six is a few
+/// round trips past the point where two flows that started together have
+/// left slow start; see the repair loop in `tick`.
+const REPAIR_PERSIST_DELTAS: f64 = 6.0;
 
 /// Minimum wall clock a rate sample must span, in seconds.
 ///
@@ -260,6 +292,39 @@ pub struct Stats {
     pub bytes_held: u64,
 }
 
+/// Why the active connection count sits below the budget.
+///
+/// The scheduler does not act on this. It is carried here because every front
+/// end observes a transfer through a callback that receives `&Scheduler` and
+/// nothing else, and a dormant connection row that cannot say WHY it is dormant
+/// reads as a dropped connection. That is how a transfer behaving correctly —
+/// the in-band search measured two connections as slower than one and settled at
+/// one, matching `curl` on the same object — came to be filed as a bug: the rows
+/// said "waiting (connection limit)" and nothing said a measurement had been
+/// taken or what it concluded.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum LimitReason {
+    /// Nothing has lowered the count; every connection may be admitted.
+    #[default]
+    None,
+    /// The in-band search is still measuring whether more connections pay.
+    Measuring,
+    /// The search finished: `tried` connections delivered `tried_rate` bytes/s
+    /// against `chosen` at `chosen_rate`, and the smaller count won. Rates are
+    /// zero when that level was never measured directly.
+    Measured {
+        chosen: usize,
+        chosen_rate: f64,
+        tried: usize,
+        tried_rate: f64,
+    },
+    /// The origin refused requests (`429`/`503`) beyond `serving` at once.
+    Refused { serving: usize },
+    /// The origin accepted connections beyond `serving` and then served them
+    /// nothing for a whole stall timeout while the others streamed.
+    Starved { serving: usize },
+}
+
 pub struct Scheduler {
     size: u64,
     unassigned: IntervalSet,
@@ -304,6 +369,14 @@ pub struct Scheduler {
     /// against 2 at `-x 2`, and the difference was almost entirely first-byte
     /// latency.
     conn_ceiling: usize,
+    /// Why `active_limit` is where it is, for the UI. See [`LimitReason`].
+    limit_reason: LimitReason,
+    /// `HYDRA_TRACE_REPAIR` was set at construction: print every repair decision.
+    trace_repair: bool,
+    /// The connection the divergence test has been naming as victim, and since
+    /// when. A repair between two busy connections waits for the same victim to
+    /// stay divergent for `REPAIR_PERSIST`; see the repair loop in `tick`.
+    repair_candidate: Option<(usize, f64)>,
     /// When false, victim selection ignores detector health and ranks purely by
     /// projected ETA (the pre-detector behaviour). Exists so the detector's
     /// contribution can be A/B measured rather than assumed.
@@ -335,6 +408,9 @@ impl Scheduler {
             // do not opt into the ramp.
             active_limit: usize::MAX,
             conn_ceiling: usize::MAX,
+            limit_reason: LimitReason::None,
+            trace_repair: std::env::var_os("HYDRA_TRACE_REPAIR").is_some(),
+            repair_candidate: None,
             started: false,
             stats: Stats::default(),
         }
@@ -372,6 +448,39 @@ impl Scheduler {
     /// The current concurrency cap.
     pub fn active_limit(&self) -> usize {
         self.active_limit
+    }
+
+    /// Record why the cap is where it is. The transport owns the reasons: it is
+    /// the one that sees refusals, starvation and the search's verdict.
+    pub fn set_limit_reason(&mut self, why: LimitReason) {
+        self.limit_reason = why;
+    }
+
+    /// Why `active_limit` sits below the budget, for a front end to explain a
+    /// dormant connection. Meaningful only while `active_limit() < n_conns()`.
+    pub fn limit_reason(&self) -> LimitReason {
+        self.limit_reason
+    }
+
+    /// Would this tick reclaim connection `j` for silence?
+    ///
+    /// The exact predicate `tick` applies, exposed so the transport can act on a
+    /// stall in the SAME tick that reclaims it rather than one round later. A
+    /// connection that was requested and has delivered nothing by the time this
+    /// fires — while others on the same origin stream — is an origin that admits
+    /// more connections than it serves. Lowering the concurrency cap after `tick`
+    /// has already re-requested the reclaimed range hands it straight back to a
+    /// connection the origin is going to starve again, and the transfer pays a
+    /// whole stall timeout to learn nothing.
+    pub fn conn_stalling(&self, j: usize, now: f64) -> bool {
+        self.conns
+            .get(j)
+            .map(|c| {
+                c.busy()
+                    && now >= c.setup_end
+                    && (now - c.last_progress.max(c.setup_end)) > self.stall_timeout
+            })
+            .unwrap_or(false)
     }
 
     /// Declare the largest concurrency this transfer can still reach.
@@ -955,12 +1064,7 @@ impl Scheduler {
         // and it is put back at the end for the next tick.
         let mut stalled = std::mem::take(&mut self.scratch_idx);
         stalled.clear();
-        stalled.extend((0..self.conns.len()).filter(|&j| {
-            let c = &self.conns[j];
-            c.busy()
-                && now >= c.setup_end
-                && (now - c.last_progress.max(c.setup_end)) > self.stall_timeout
-        }));
+        stalled.extend((0..self.conns.len()).filter(|&j| self.conn_stalling(j, now)));
         for j in stalled.drain(..) {
             self.reclaim(j);
             acts.push(Action::Cancel { conn: j });
@@ -1009,6 +1113,7 @@ impl Scheduler {
 
         // ---- divergence-triggered repair ---------------------------------
         let theta = self.theta(now);
+        let mut divergent = false;
         for _ in 0..MAX_REPAIRS_PER_TICK {
             let Some((vi, ti)) = self.pick_victim_taker(now) else {
                 break;
@@ -1022,6 +1127,33 @@ impl Scheduler {
                 Some(core::cmp::Ordering::Greater)
             ) {
                 break;
+            }
+            divergent = true;
+            // Between two busy connections the divergence must PERSIST; see
+            // `REPAIR_PERSIST`. A collapsing victim and an idle taker are exempt.
+            let collapsing = self.conns[vi].detector.health().is_suspect_or_worse();
+            if self.conns[ti].busy() && !collapsing {
+                // Persistence in units of the setup cost as well as of samples:
+                // a divergence that is really two flows at different points of
+                // slow start lasts a number of round trips, and a fixed window
+                // is one length on a LAN and another on a transatlantic path.
+                let delta = self
+                    .sources
+                    .iter()
+                    .map(|s| s.delta_est)
+                    .fold(0.0f64, f64::max);
+                let persist = REPAIR_PERSIST.max(REPAIR_PERSIST_DELTAS * delta);
+                match self.repair_candidate {
+                    Some((v, since)) if v == vi => {
+                        if now - since < persist {
+                            break;
+                        }
+                    }
+                    _ => {
+                        self.repair_candidate = Some((vi, now));
+                        break;
+                    }
+                }
             }
             if self.conns[ti].queued.is_some() {
                 break;
@@ -1045,6 +1177,19 @@ impl Scheduler {
             };
             if x <= STEAL_QUANTUM as f64 {
                 break;
+            }
+            if self.trace_repair {
+                eprintln!(
+                    "repair: t={now:.2} victim={vi} (eta {v_eta:.2}s rate {:.1}MB/s left {:.1}MB {:?} rising={}) \
+                     taker={ti} (eta {t_eta:.2}s rate {:.1}MB/s busy={}) theta={theta:.2} x={:.1}MB",
+                    rv / 1e6,
+                    left / 1e6,
+                    self.conns[vi].detector.health(),
+                    self.conns[vi].detector.rising(),
+                    rt / 1e6,
+                    self.conns[ti].busy(),
+                    x / 1e6
+                );
             }
 
             // ---- does this repair actually pay for itself? -------------------
@@ -1128,6 +1273,13 @@ impl Scheduler {
                 hi: new_hi,
             });
             self.stats.repairs += 1;
+            // The next repair earns its own persistence: a shrink changes every
+            // ETA that justified this one, and a cascade of repairs each riding
+            // on the previous one's disturbance is the storm this damps.
+            self.repair_candidate = None;
+        }
+        if !divergent {
+            self.repair_candidate = None;
         }
 
         // ---- work-conserving assignment (Lemma 2) -------------------------
@@ -1538,16 +1690,51 @@ impl Scheduler {
             } else {
                 crate::detect::Health::Healthy
             };
+            // Neither role may be filled by a connection that has not been
+            // MEASURED yet, and a rate is not a measurement until it has been
+            // sampled a few times.
+            //
+            // Traced on a uniform 4-connection transfer with a 100 ms round trip:
+            // 1109 repair decisions were evaluated, almost all in the first
+            // 0.6 s, and the ones that executed had a victim reporting 0.2 MB/s
+            // with a projected 1092 s to finish, against a taker whose first
+            // sample happened to be larger. Both numbers were slow-start
+            // artefacts a second away from 70 MB/s, the "gain" was hundreds of
+            // seconds that did not exist, and the repair moved half of a range
+            // that would have arrived on its own — costing a fresh request on
+            // each side. The imbalance that left behind is what the endgame
+            // repairs were then correcting. Four requests would have done;
+            // there were 13 to 19, and the transfer ran 22% behind `aria2c`.
+            //
+            // A guard on the VICTIM alone was tried first and made things worse
+            // (repairs 2-10 became 9-15), because the taker was just as unmeasured
+            // and the choice merely shifted. Both sides have to be warm. The one
+            // exception is a victim the detector has graded as collapsing: that
+            // grade is itself a measurement, and pre-empting a collapse before the
+            // stall timeout is what the detector is for.
+            let warm = c.detector.samples() >= REPAIR_WARM_SAMPLES;
+            // A rate that is still climbing is not a measurement of how slow the
+            // connection is, it is a measurement of how far into slow start it
+            // has got — see `CollapseDetector::rising`. Warm-up in samples cannot
+            // catch this, because slow start lasts a number of ROUND TRIPS and
+            // the sample window is fixed: on a 100 ms path the first repair fired
+            // at t=1.4 s on a 3:1 ratio that was 1:1 by t=2.0 s, and moved 256 MB.
+            let settled = warm && !c.detector.rising();
             // As victim a connection needs no room check: it already holds a
             // range, so it is not being newly admitted, wherever its index falls.
-            if c.busy() && victim.map(|(_, vh, ve)| (h, e) > (vh, ve)).unwrap_or(true) {
+            if c.busy()
+                && (settled || h.is_suspect_or_worse())
+                && victim.map(|(_, vh, ve)| (h, e) > (vh, ve)).unwrap_or(true)
+            {
                 victim = Some((j, h, e));
             }
             // A degraded connection must never be chosen as the TAKER: handing
             // work to a collapsing connection is the failure mode this whole
-            // mechanism exists to prevent.
+            // mechanism exists to prevent. A busy taker must be warm for the same
+            // reason as the victim; a dormant one has no rate at all and the
+            // profitability test below refuses it on its own.
             if !h.is_suspect_or_worse()
-                && (c.busy() || room)
+                && ((c.busy() && warm) || (!c.busy() && room))
                 && taker.map(|(_, te)| e < te).unwrap_or(true)
             {
                 taker = Some((j, e));
@@ -1725,6 +1912,88 @@ mod tests {
             }
         }
         assert!(s.is_complete());
+    }
+
+    /// Feed `conn` a window of arrivals at `rate` bytes/s ending at `now`.
+    fn deliver(s: &mut Scheduler, conn: usize, pos: &mut u64, rate: f64, now: f64, dt: f64) {
+        let n = (rate * dt) as u64;
+        s.on_bytes_at(conn, *pos, n, now, dt);
+        *pos += n;
+    }
+
+    /// A connection whose rate is still climbing is in slow start, not slow, and
+    /// repair must leave it alone.
+    ///
+    /// Traced on a 100 ms path: one flow at 16 MB/s against its twin at 49 had
+    /// 256 MB taken from it at t=1.4 s, and both were at 90 MB/s by t=2.0 s. The
+    /// cascade of repairs undoing that is what put `-x 2` at 7-8 s against
+    /// `aria2c`'s 5.9 s on a path where two plain ranges finish together.
+    #[test]
+    fn a_victim_still_in_slow_start_is_not_robbed() {
+        const SIZE: u64 = 1_000_000_000;
+        let mut s = Scheduler::new(SIZE, vec![src(9e7)], &[2]).with_stall_timeout(30.0);
+        let acts = s.tick(0.0);
+        let (lo0, lo1) = (acts_range(&acts, 0).0, acts_range(&acts, 1).0);
+        let (mut p0, mut p1) = (lo0, lo1);
+        let mut shrinks = 0;
+        let mut t = 0.0;
+        // Conn 0 is settled at 90 MB/s. Conn 1 doubles every 0.4 s from 8 MB/s:
+        // a textbook slow start that reaches its twin's rate at about t=2.
+        while t < 3.0 {
+            t += 0.1;
+            let r1 = (8e6 * 2f64.powf(t / 0.4)).min(9e7);
+            deliver(&mut s, 0, &mut p0, 9e7, t, 0.1);
+            deliver(&mut s, 1, &mut p1, r1, t, 0.1);
+            shrinks += s
+                .tick(t)
+                .iter()
+                .filter(|a| matches!(a, Action::Shrink { .. }))
+                .count();
+        }
+        assert_eq!(
+            shrinks, 0,
+            "a connection whose rate was still climbing was repaired against"
+        );
+        assert!(s.coverage_holds());
+    }
+
+    /// The other direction still works: a connection that has SETTLED at a
+    /// fraction of its peer's rate is a real laggard, and repair must move work
+    /// off it once its rate is established.
+    #[test]
+    fn a_settled_laggard_is_still_repaired() {
+        const SIZE: u64 = 1_000_000_000;
+        let mut s = Scheduler::new(SIZE, vec![src(9e7)], &[2]).with_stall_timeout(30.0);
+        let acts = s.tick(0.0);
+        let (lo0, lo1) = (acts_range(&acts, 0).0, acts_range(&acts, 1).0);
+        let (mut p0, mut p1) = (lo0, lo1);
+        let mut shrinks = 0;
+        let mut t = 0.0;
+        // Conn 1 is flat at 30 MB/s from its first sample: no climb to wait out.
+        while t < 4.0 && shrinks == 0 {
+            t += 0.1;
+            deliver(&mut s, 0, &mut p0, 9e7, t, 0.1);
+            deliver(&mut s, 1, &mut p1, 3e7, t, 0.1);
+            shrinks += s
+                .tick(t)
+                .iter()
+                .filter(|a| matches!(a, Action::Shrink { .. }))
+                .count();
+        }
+        assert!(
+            shrinks > 0,
+            "a connection settled at a third of its peer's rate was never repaired"
+        );
+        assert!(s.coverage_holds());
+    }
+
+    fn acts_range(acts: &[Action], conn: usize) -> (u64, u64) {
+        acts.iter()
+            .find_map(|a| match a {
+                Action::Request { conn: c, range } if *c == conn => Some((range.lo, range.hi)),
+                _ => None,
+            })
+            .expect("initial split requests every connection")
     }
 
     #[test]

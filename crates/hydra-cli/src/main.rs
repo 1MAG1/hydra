@@ -265,6 +265,37 @@ fn print_formats(as_json: bool, category: Option<&str>, what: Option<&str>) {
 /// copies, adding a mode flag to one and forgetting the other is what
 /// silently ignores a flag the user typed — the exact bug the refusal
 /// exists to prevent.
+/// What `--no-save` can and cannot report at the requested concurrency.
+///
+/// The digest under `--no-save` is computed from the stream, and the stream
+/// digest only finishes for a single-connection transfer: a parallel one opens
+/// with one span per connection, so everything past the first span would have
+/// to be buffered (see `hya_net::stream_digest`). The run still works and still
+/// classifies the object; it just cannot say what the bytes hash to. That is
+/// worth saying BEFORE the transfer rather than after it, and a `--checksum`
+/// the run can never check is a contradiction, not a warning.
+///
+/// `Ok(None)`: nothing to say. `Ok(Some(note))`: proceed, but tell the user.
+/// `Err(why)`: refuse.
+fn no_save_digest_notice(args: &cli::Cli) -> Result<Option<String>, String> {
+    if !args.no_save {
+        return Ok(None);
+    }
+    let n = args.requested_conns().unwrap_or(1);
+    if n <= 1 {
+        return Ok(None);
+    }
+    if args.checksum.is_some() {
+        return Err(format!(
+            "--checksum cannot be verified under --no-save at -x {n}: the digest is \
+             computed from the stream, which needs one connection"
+        ));
+    }
+    Ok(Some(format!(
+        "--no-save at -x {n} reports no digest: hashing the stream needs one connection"
+    )))
+}
+
 fn plain_download_conflict(args: &cli::Cli) -> Option<&'static str> {
     if args.spider {
         return Some("--spider");
@@ -340,15 +371,20 @@ fn parse_range(spec: &str) -> Option<download::RangeSpec> {
 /// handshakes and the digest can overlap the transfer, few enough that the pool is not
 /// fighting itself; capped by the machine so a single-core VM does not get four.
 ///
-/// The remaining CPU gap is still open and is being investigated at the
-/// transport/executor boundary. See `docs/PERFORMANCE.md` for the hypotheses already
-/// rejected, so they are not re-tried: pool width, the fixed-rate tick loop, per-arrival
-/// channel traffic, task spawn/abort per request, and DNS resolution.
+/// **Superseded: one worker.** The CPU gap that paragraph describes was found. The
+/// transfer loop woke on every arrival rather than every tick, and ran the whole
+/// scheduler pass per 16-64 KiB read; with that fixed, a single worker was measured
+/// against two on a 2-core host, interleaved, 1 GB at four connections: involuntary
+/// context switches 40-57 against 287-352 over HTTP and 260-434 against 896-1149 over
+/// TLS, CPU 1.8-2.1 s against 2.7-3.4 s, wall clock unchanged. A downloader is one
+/// I/O loop — that is how `curl`, `wget` and `aria2c` are built — and a second thread
+/// only gives the tasks somewhere to bounce to. `HYDRA_WORKERS=n` overrides it.
 fn main() -> std::process::ExitCode {
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get().min(4))
-        .unwrap_or(2)
-        .max(1);
+    let workers = std::env::var("HYDRA_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1);
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers)
         .enable_all()
@@ -752,6 +788,19 @@ async fn async_main() -> std::process::ExitCode {
         }
     }
 
+    match no_save_digest_notice(&args) {
+        Ok(None) => {}
+        Ok(Some(note)) => {
+            if !args.quiet {
+                eprintln!("hydra: {note}");
+            }
+        }
+        Err(why) => {
+            eprintln!("hydra: {why}");
+            return std::process::ExitCode::FAILURE;
+        }
+    }
+
     let job = download::Job {
         ticks: None,
         // `multi` implies at least two, so indexing is safe there; the other
@@ -807,6 +856,7 @@ async fn async_main() -> std::process::ExitCode {
         insecure: args.insecure,
         force: args.force,
         no_save: args.no_save,
+        print_checksum: args.print_checksum,
         emit_manifest: args.emit_manifest.clone(),
         chunk_digests: args.chunk_digests.clone(),
         chunk_size: args.chunk_size,
@@ -1210,6 +1260,16 @@ async fn checksum_report(
         // and no digest, so probing the hop instead of the object reported
         // `size: null` for anything served through a CDN redirect.
         match crate::download::probe_public(conn.as_ref(), &parsed, args).await {
+            // An error status describes the URL, not the object: a `400` with a
+            // 24-byte JSON body is not a 24-byte file with no digest.
+            Ok((pr, final_url)) if pr.status >= 400 => {
+                eprintln!(
+                    "hydra: server answered {} for {}",
+                    hya_net::describe_status(pr.status),
+                    final_url.host
+                );
+                all_ok = false;
+            }
             Ok((pr, _final_url)) => {
                 size = Some(pr.size).filter(|s| *s > 0);
                 validator = pr.validator.clone();
@@ -1267,6 +1327,8 @@ async fn checksum_report(
                 no_progress: true,
                 force: true,
                 no_save: true,
+                // This command exists to report the digest, so it asks for one.
+                print_checksum: true,
                 emit_manifest: None,
                 chunk_digests: None,
                 chunk_size: None,
@@ -1972,6 +2034,40 @@ async fn report_header_values(urls: &[String], args: &cli::Cli) -> std::process:
 
 #[cfg(test)]
 mod tests {
+    /// `--no-save` can only hash a single-connection stream. Asking for more
+    /// connections is allowed but announced; asking for a verification that can
+    /// never run is refused.
+    #[test]
+    fn no_save_says_up_front_when_the_digest_cannot_be_computed() {
+        use clap::Parser as _;
+        let plain = crate::cli::Cli::try_parse_from(["hydra", "--no-save", "http://x/f"]).unwrap();
+        assert_eq!(super::no_save_digest_notice(&plain), Ok(None));
+        let one = crate::cli::Cli::try_parse_from(["hydra", "--no-save", "-x", "1", "http://x/f"])
+            .unwrap();
+        assert_eq!(super::no_save_digest_notice(&one), Ok(None));
+        let wide = crate::cli::Cli::try_parse_from(["hydra", "--no-save", "-x", "4", "http://x/f"])
+            .unwrap();
+        let note = super::no_save_digest_notice(&wide)
+            .unwrap()
+            .expect("more than one connection must be announced");
+        assert!(
+            note.contains("-x 4") && note.contains("no digest"),
+            "{note}"
+        );
+        let contradiction = crate::cli::Cli::try_parse_from([
+            "hydra",
+            "--no-save",
+            "-x",
+            "4",
+            "--checksum",
+            &format!("sha256:{}", "0".repeat(64)),
+            "http://x/f",
+        ])
+        .unwrap();
+        let why = super::no_save_digest_notice(&contradiction).unwrap_err();
+        assert!(why.contains("--checksum") && why.contains("-x 4"), "{why}");
+    }
+
     use super::*;
     use clap::Parser as _;
 

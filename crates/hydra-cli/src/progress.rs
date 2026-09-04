@@ -551,16 +551,6 @@ impl Progress {
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
 
-    /// Bytes the concurrency probe fetched into the real output.
-    ///
-    /// Counted as progress because they ARE progress: the probe writes at true offsets
-    /// and the scheduler marks those ranges held, so these bytes are never fetched
-    /// twice.
-    pub fn add_probe_bytes(&mut self, n: u64) {
-        self.probe_bytes += n;
-        self.draw_phase();
-    }
-
     pub fn event(&mut self, level: u8, msg: &str) {
         if self.silent || self.verbose < level {
             return;

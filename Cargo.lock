@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "hya-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -2114,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "hya-net"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "blake3",
  "criterion",

@@ -104,6 +104,52 @@ pub struct Probe {
     pub raw_request: String,
 }
 
+/// The standard reason phrase for an HTTP status, or the bare number.
+///
+/// For error messages: "server answered 400 Bad Request" tells a user what went
+/// wrong; "server answered 400" tells them to look it up.
+pub fn describe_status(status: u16) -> String {
+    let phrase = match status {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        402 => "Payment Required",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        406 => "Not Acceptable",
+        407 => "Proxy Authentication Required",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        411 => "Length Required",
+        412 => "Precondition Failed",
+        413 => "Content Too Large",
+        414 => "URI Too Long",
+        415 => "Unsupported Media Type",
+        416 => "Range Not Satisfiable",
+        417 => "Expectation Failed",
+        421 => "Misdirected Request",
+        423 => "Locked",
+        425 => "Too Early",
+        426 => "Upgrade Required",
+        428 => "Precondition Required",
+        429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
+        451 => "Unavailable For Legal Reasons",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        505 => "HTTP Version Not Supported",
+        507 => "Insufficient Storage",
+        508 => "Loop Detected",
+        511 => "Network Authentication Required",
+        _ => return status.to_string(),
+    };
+    format!("{status} {phrase}")
+}
+
 impl Probe {
     /// This probe described a redirect rather than the object.
     pub fn is_redirect(&self) -> bool {

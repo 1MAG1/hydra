@@ -592,6 +592,7 @@ pub async fn run_transfer_with_reserves<C: Connector>(
     // measurement. `HYDRA_POOL_STATS=1` prints it after the transfer.
     let report_pool = std::env::var_os("HYDRA_POOL_STATS").is_some();
     let trace_errors = std::env::var_os("HYDRA_TRACE_ERRORS").is_some();
+    let trace_repair = std::env::var_os("HYDRA_TRACE_REPAIR").is_some();
 
     // ---- no-progress watchdog --------------------------------------------
     //
@@ -668,6 +669,20 @@ pub async fn run_transfer_with_reserves<C: Connector>(
         None
     };
     let mut ramp_last_held: u64 = sched.bytes_held();
+    // The concurrency a FINISHED search rejected a higher level in favour of.
+    //
+    // Set only when the search measured a larger count and turned it down, never
+    // when it merely ran into a ceiling it wanted to climb past. The refusal-free
+    // probe below reads it as an upper bound: that probe recovers from a REFUSAL,
+    // and an origin lifting its limit says nothing about whether the extra
+    // connections pay. Without it, one refusal anywhere in a transfer let the
+    // recovery walk the count back up to the budget and silently discard the
+    // measurement — including on the origins this search exists to handle, where
+    // one connection beat eight.
+    let mut settled_limit: Option<usize> = None;
+    if ramp.is_some() {
+        sched.set_limit_reason(hya_core::LimitReason::Measuring);
+    }
 
     loop {
         // 0. external stop. Checked before arrivals are drained so a cancel
@@ -829,6 +844,22 @@ pub async fn run_transfer_with_reserves<C: Connector>(
                         // dropped, and the ceiling was left wherever the first,
                         // least-informed round put it.
                         cap_settled_until = now + secs;
+                        // The floor's evidence describes the cap that was just
+                        // abandoned. Keeping it means a count the origin has
+                        // stopped granting goes on holding the floor up, and the
+                        // ceiling cannot reach the count actually being served:
+                        // measured on `ash-speed.hetzner.com` at `-x 8`, an origin
+                        // that refuses nearly all concurrency, the ceiling reached
+                        // 2 in a few seconds and then sat there being refused until
+                        // t=30.7s of a transfer that takes 12, because a peak of 2
+                        // from the opening burst outlived it. Re-basing on what is
+                        // delivering right now keeps the guard against
+                        // over-reduction — a connection between ranges is still
+                        // counted through `streaming` — while letting the next
+                        // round judge the new cap on the new cap's evidence.
+                        served_peak_cur = streaming;
+                        served_peak_prev = 0;
+                        served_peak_rotate_at = now + probe_interval;
                         if trace_errors {
                             eprintln!(
                                 "[trace] t={now:.2} throttled: {streaming} delivering, \
@@ -846,6 +877,11 @@ pub async fn run_transfer_with_reserves<C: Connector>(
                     // time — a round trip each, and against an origin that refuses,
                     // a fresh handshake each.
                     sched.set_conn_ceiling(throttle_cap);
+                    if throttle_cap < sched.n_conns() {
+                        sched.set_limit_reason(hya_core::LimitReason::Refused {
+                            serving: throttle_cap,
+                        });
+                    }
                     // The search must not ask for what the origin has just refused.
                     // Without this the ramp keeps doubling toward a budget it can
                     // never reach, and its warm-up gate waits out its whole deadline
@@ -921,9 +957,39 @@ pub async fn run_transfer_with_reserves<C: Connector>(
                 // Under a ramp the limit is the ramp's to set; this only lifts the
                 // clamp it is measured against.
                 if ramp.is_none() {
-                    sched.set_active_limit(throttle_cap);
+                    let want = settled_limit.map_or(throttle_cap, |s| s.min(throttle_cap));
+                    sched.set_active_limit(want);
                 }
                 sched.set_conn_ceiling(throttle_cap);
+                // The explanation follows the number whether or not a search is
+                // running: a cap earned back to the budget is no cap at all, one
+                // still below it now serves one more than it did, and a row the
+                // SEARCH is holding back must not stay labelled a server limit.
+                {
+                    use hya_core::LimitReason as R;
+                    sched.set_limit_reason(if ramp.is_some() {
+                        R::Measuring
+                    } else if throttle_cap >= sched.n_conns() {
+                        // The origin's limit is gone. A measured decision outlives
+                        // it: those connections were turned down on evidence, not
+                        // refused, so the rows must not revert to reading like an
+                        // unexplained cap.
+                        match sched.limit_reason() {
+                            m @ R::Measured { .. } if settled_limit.is_some() => m,
+                            _ => R::None,
+                        }
+                    } else {
+                        match sched.limit_reason() {
+                            R::Refused { .. } => R::Refused {
+                                serving: throttle_cap,
+                            },
+                            R::Starved { .. } => R::Starved {
+                                serving: throttle_cap,
+                            },
+                            other => other,
+                        }
+                    });
+                }
                 next_probe_at = now + probe_interval * probe_backoff;
                 probe_held_mark = sched.bytes_held();
                 if trace_errors {
@@ -971,9 +1037,36 @@ pub async fn run_transfer_with_reserves<C: Connector>(
             r.note_delivering(live);
             match r.poll(now_tick, sched.worst_delta().max(1e-3)) {
                 hya_core::Ramp::Raise(n) => sched.set_active_limit(n.min(throttle_cap)),
-                hya_core::Ramp::Settled(n) => {
-                    let n = n.min(throttle_cap);
+                hya_core::Ramp::Settled(settled) => {
+                    let n = settled.min(throttle_cap);
                     sched.set_active_limit(n);
+                    // Say what was decided and why, in numbers the user can check
+                    // against a single-stream download of the same object. A row
+                    // that only reads "waiting" after this looks like a dropped
+                    // connection; "measured slower" is a decision.
+                    if n >= sched.n_conns() {
+                        sched.set_limit_reason(hya_core::LimitReason::None);
+                    } else if settled <= throttle_cap {
+                        if let Some(v) = r.verdict() {
+                            // A search that rejected a level it MEASURED has made a
+                            // decision worth keeping. One that merely stopped at a
+                            // ceiling it wanted to climb past has not, and pinning
+                            // the transfer to it would turn a momentary refusal into
+                            // a permanent cap.
+                            if v.tried > v.chosen {
+                                settled_limit = Some(n);
+                            }
+                            sched.set_limit_reason(hya_core::LimitReason::Measured {
+                                chosen: n,
+                                chosen_rate: v.chosen_rate,
+                                tried: v.tried,
+                                tried_rate: v.tried_rate,
+                            });
+                        }
+                    }
+                    // Otherwise a refusal or starvation clamped the search, and
+                    // that reason — already recorded — is the one that explains
+                    // the count.
                     // The search is over, so nothing is waiting to be admitted and
                     // the reserve assignment was keeping for later admissions is
                     // now just work the settled connections have to re-request a
@@ -1079,8 +1172,112 @@ pub async fn run_transfer_with_reserves<C: Connector>(
             }
         }
 
-        // 2. let the scheduler decide, and act on what it returns
+        // 1e. lower the ceiling for connections the origin admits and then STARVES.
+        //
+        // `throttle_cap` was driven only by a `429`/`503`. An origin that accepts
+        // the TCP connection, answers the request, and then serves nothing on it
+        // produces no error at all, so the cap never moved and the transfer
+        // retried the same losing configuration for its whole life. Measured on
+        // `saimei.ftp.acc.umu.se` at `-x 8`: two connections delivered, six sat
+        // at 0 B/s for the whole stall timeout, all six were reclaimed at once,
+        // re-requested, starved again, and the cycle repeated — a fresh handshake
+        // and a lost congestion window each round, 2.2x slower than ONE
+        // connection. The adaptive search handled the same origin correctly,
+        // because it measures; only the fixed count had nothing to learn from.
+        //
+        // The evidence is the same shape as a refusal and is read the same way:
+        // a connection that was requested and has delivered nothing by the time
+        // the scheduler is about to reclaim it for silence, while another on the
+        // same origin has been streaming the whole time, is a request the origin
+        // has effectively refused. Connections that are delivering are proof of a
+        // count this origin serves, and the cap steps down toward it. The
+        // refusal-free probe above earns the connection back if the limit was
+        // momentary.
+        //
+        // Decided BEFORE the tick on purpose. The tick that reclaims a starved
+        // range also re-assigns it, and with the cap still at the budget it hands
+        // the range straight back to a connection the origin is going to starve
+        // again. `conn_stalling` is the scheduler's own reclaim predicate, so
+        // what is lowered here is exactly what that tick would otherwise re-ask.
         let now = t0.elapsed().as_secs_f64();
+        {
+            let mut starved = 0usize;
+            let mut starved_while_served = false;
+            for j in 0..sched.n_conns() {
+                // Requested, and nothing has arrived on that request.
+                let unfed = inflight.contains_key(&j)
+                    && sched
+                        .conn_range(j)
+                        .map(|(lo, pos, _hi)| pos == lo)
+                        .unwrap_or(false);
+                if unfed && sched.conn_stalling(j, now) {
+                    starved += 1;
+                    let src = sched.conn_source(j);
+                    let served = (0..sched.n_conns()).any(|k| {
+                        k != j
+                            && sched.conn_source(k) == src
+                            && sched
+                                .conn_range(k)
+                                .map(|(lo, pos, _hi)| pos > lo)
+                                .unwrap_or(false)
+                    });
+                    starved_while_served |= served;
+                }
+            }
+            if starved > 0 && starved_while_served && now >= cap_settled_until {
+                let live_now = (0..sched.n_conns())
+                    .filter(|&k| {
+                        sched
+                            .conn_range(k)
+                            .map(|(lo, pos, _hi)| pos > lo)
+                            .unwrap_or(false)
+                    })
+                    .count();
+                // Never below what is visibly working, and never below one.
+                let floor = live_now.max(served_peak_cur).max(served_peak_prev).max(1);
+                // Never more than halve in one round, the same step the refusal
+                // path takes. A starvation round costs a whole stall timeout, so
+                // the temptation is to jump straight to `floor`; the reason not to
+                // is that one badly timed round would then cap the transfer at a
+                // single connection, and the upward probe needs one interval per
+                // connection to undo it. Halving converges in log2 rounds and
+                // bounds what a wrong reading can cost.
+                let next = (throttle_cap / 2).max(floor);
+                if next < throttle_cap {
+                    throttle_cap = next;
+                    // One reduction per stall round: the starved connections cross
+                    // the timeout together, and the evidence is one fact, not six.
+                    cap_settled_until = now + sched.stall_timeout().max(1.0);
+                    // Same re-basing as the refusal path: the peak that justified
+                    // the old cap says nothing about the new one.
+                    served_peak_cur = live_now;
+                    served_peak_prev = 0;
+                    served_peak_rotate_at = now + probe_interval;
+                    if sched.active_limit() > throttle_cap {
+                        sched.set_active_limit(throttle_cap);
+                    }
+                    sched.set_conn_ceiling(throttle_cap);
+                    sched.set_limit_reason(hya_core::LimitReason::Starved {
+                        serving: throttle_cap,
+                    });
+                    if let Some(r) = ramp.as_mut() {
+                        r.clamp_max(throttle_cap);
+                    }
+                    probe_backoff = (probe_backoff * 2.0).min(MAX_PROBE_BACKOFF);
+                    next_probe_at = now + probe_interval * probe_backoff;
+                    probe_held_mark = sched.bytes_held();
+                    if trace_errors {
+                        eprintln!(
+                            "[trace] t={now:.2} starved: {starved} requested and silent past \
+                             the stall timeout, {live_now} delivering, concurrency \
+                             ceiling -> {throttle_cap}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // 2. let the scheduler decide, and act on what it returns
         for act in sched.tick(now) {
             match act {
                 Action::Cancel { conn } => {
@@ -1099,11 +1296,22 @@ pub async fn run_transfer_with_reserves<C: Connector>(
                 // rather than twice. No `abort` and no request — that is the point,
                 // the connection keeps streaming the part it still owns.
                 Action::Shrink { conn, hi } => {
+                    if trace_repair {
+                        eprintln!("act: t={now:.2} shrink conn={conn} hi={hi}");
+                    }
                     if let Some(b) = bounds.get(&conn) {
                         b.shrink_to(hi);
                     }
                 }
                 Action::Request { conn, range } => {
+                    if trace_repair {
+                        eprintln!(
+                            "act: t={now:.2} request conn={conn} lo={} hi={} ({:.1}MB)",
+                            range.lo,
+                            range.hi,
+                            (range.hi - range.lo) as f64 / 1e6
+                        );
+                    }
                     if let Some(h) = inflight.remove(&conn) {
                         h.abort(); // supersede: never two live responses per conn
                     }
@@ -1133,10 +1341,26 @@ pub async fn run_transfer_with_reserves<C: Connector>(
             }
         }
 
-        tokio::select! {
-            _ = ticker.tick() => {}
-            Some(a) = rx.recv() => { sched.on_bytes_at(a.conn, a.off, a.bytes, a.at, a.dt); }
-        }
+        // Wait for the TICK, and only the tick.
+        //
+        // This used to also wake on every arrival — `Some(a) = rx.recv()` beside
+        // the ticker — which turned the tick loop into a per-read loop: every 16
+        // to 64 KiB that landed on any socket woke this task, credited one
+        // arrival, and then ran the whole loop body again, the stalled-connection
+        // scan, the repair evaluation, the reason bookkeeping, the progress
+        // callback with its per-connection rendering, all of it, before sleeping
+        // for the next read. Measured on a 1 GB transfer at four connections
+        // against `aria2c`: 19 000 voluntary and 5 700 involuntary context
+        // switches against 1 800 and 40, and 40 000 and 22 000 over TLS where the
+        // reads are 16 KiB records. The user time was already lower than
+        // `aria2c`'s; all of the CPU gap was this.
+        //
+        // Nothing needs sub-tick latency. Arrivals carry their own timestamps, so
+        // rate samples are exact whenever they are credited; the channel is
+        // unbounded, so a tick's worth of them queue without back-pressure; and
+        // every decision this loop makes is a tick-granularity decision anyway.
+        // They are drained at the top of the loop, as they always were.
+        ticker.tick().await;
         observe(&sched, sched.bytes_held());
 
         // Watchdog: any byte of progress resets the clock, so this fires only
