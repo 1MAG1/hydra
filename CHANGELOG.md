@@ -5,6 +5,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [0.4.1] - 2026-09-04
+
+### Added
+
+- **Metalink 3.0 & RFC 5854 / RFC 6249 Multi-Source Mirror Engine (`hya-net`, `hya-core`, `hydra-cli`, `hydra-gui`, `hydra-ffi`)**: Introduced native Metalink support enabling robust multi-mirror range assembly, dynamic reserve benches, and localised chunk repair:
+  - **Dual-Dialect Parser & RFC 6249 Discovery**: Added a zero-heavy-dependency XML pull parser supporting Metalink 3.0 (`.metalink`) and Metalink 4.0 / RFC 5854 (`.meta4`) documents from disk, direct URLs, or dynamic mirror redirectors. Automatically discovers duplicate mirror endpoints via HTTP `Link: <...>; rel=duplicate` headers during connection probing.
+  - **Multi-Source Range Splicing & Exterior Verification**: Assembles byte ranges across disparate mirror hosts without requiring shared `ETag` validators by anchoring verification to exterior document digests and sizes.
+  - **Dynamic Mirror Reserve Bench**: Enforces politeness socket budgets while maintaining secondary mirrors on a reserve bench; when an active mirror fails or throttles mid-transfer, connections hot-swap to reserves in place without stranding assigned ranges.
+  - **Localised Piece Verification & Repair**: Validates per-piece checksums (`<pieces>`) on the fly as data lands; detects corrupted segments and repairs them individually from alternate mirrors without re-downloading the entire file.
+  - **CLI `metalink` Subcommand & Filtering Flags**: Inspect Metalink documents (`hydra metalink <target>` or `--json`) and filter candidate mirrors by geography (`--metalink-location`), operating system (`--metalink-os`), protocol (`--metalink-preferred-protocol`, `--metalink-enable-unique-protocol`), or target filename (`--metalink-file`).
+  - **GUI Metalink Inspection Modal**: Automatically detects Metalink documents in the *Add URL* dialog, presenting an inspection view showing contained files, sizes, usable mirror counts, and piece hash availability before starting downloads.
+  - **C ABI Metalink API (`libhydra`)**: Exposed `hydra_metalink_parse`, `hydra_metalink_doc_t`, and multi-mirror job creation functions in the frozen C ABI.
+- **GUI Batch Download Dialog Enhancements (`hydra-gui`)**: Overhauled the batch download window with advanced management features:
+  - **Sortable Multi-Column Table**: Added clickable column headers with directional sorting indicators for *File Name*, *File Type*, *Size*, *Download from*, and *Save to*.
+  - **Content Filters**: Added quick-filter toggles to *"Hide HTML files"* and *"Hide duplicate links"*.
+  - **Bulk Selection Controls**: Added master header checkbox to select or deselect all visible items in one click.
+  - **Inline Output Folder Selector**: Added a directory browse button directly in the dialog for assigning custom destination paths to selected items.
+  - **Selection Summary**: Displays total count of selected items and aggregate download size in the dialog footer.
+- **Power Management: System Sleep & Safety Countdown Prompt (`hydra-gui`)**:
+  - Added system **Sleep** option alongside Shutdown and Log Off upon download completion in the progress window and queue scheduler.
+  - Added an interactive 30-second cancellable countdown prompt before executing power actions (sleep, shutdown, log off), preventing accidental interruptions.
+- **Remove Completed Downloads Option (`hydra-gui`)**: Added an option under *Options → Downloads* (*"Remove completed downloads from download list"*) and a per-download checkbox in the Progress completion tab to automatically prune finished items from the download list upon completion or dialog dismissal.
+- **Expanded Internationalization to 30 Locales (`hydra-gui`)**:
+  - Added 15 new language translations: Czech (`cs`), Danish (`da`), Greek (`el`), Finnish (`fi`), Hindi (`hi`), Hungarian (`hu`), Indonesian (`id`), Italian (`it`), Polish (`pl`), Portuguese (`pt`), Romanian (`ro`), Swedish (`sv`), Thai (`th`), Ukrainian (`uk`), and Vietnamese (`vi`).
+  - Completely synchronized translations for Metalink, batch filters, power sleep actions, dormant connection reasons, and concurrency measurement strings across all 30 supported locales.
+- **Chocolatey Windows Package Distribution (`packaging/choco`)**: Added official Chocolatey packaging files (`hydra-download-manager.nuspec`, automated install/uninstall scripts) for Windows package management via `choco install hydra`.
+- **Transfer Benchmarks & Automated Testbed Suite (`docs/`, `scripts/benchmark/`)**: Added comprehensive benchmark documentation and testbed tooling measuring HYDRA against `aria2c`, `wget`, and `curl` over 100 ms high-latency paths and public mirror endpoints, demonstrating higher average speed (414 MB/s with `-x 8`), flat 6.9 MiB peak memory, and minimal CPU time (1.48 s). Added reproducible testbed scripts (`bed.sh`, `server-benchmark.sh`, `plot_bed.py`, `plot_srv.py`).
+
+### Fixed
+
+- **International Script & RFC 6266 Content-Disposition Resolution (`hya-net`, `hydra-gui`)**:
+  - Replaced naive substring matching with a full RFC 6266 parameter parser that prioritizes RFC 5987 / RFC 6266 §4.3 encoded `filename*` parameters over plain `filename=`.
+  - Added UTF-8 percent-decoding for non-ASCII filenames across CJK, Arabic, Persian, Cyrillic, and Hebrew scripts, eliminating issues where cloud storage IDs were assigned as fallback names.
+  - Stripped malicious bidirectional Unicode overrides (`U+202E` RLO, isolates, marks, BOM) to prevent file extension spoofing while preserving legitimate script characters such as Persian zero-width non-joiners (`U+200C`).
+  - Replaced lossy Latin-1 fallback with proper charset rejection to prevent filename corruption on legacy encodings.
+  - Clamped filenames by byte boundary (<= 255 bytes) while preserving the file extension to prevent `ENAMETOOLONG` filesystem errors on multi-byte UTF-8 scripts.
+- **User-Chosen Filename Preservation & Conflict Guarding (`hydra-gui`)**:
+  - Added `name_locked` tracking to ensure user-edited names in File Info or Add URL dialogs are preserved and never overwritten by subsequent probe `Content-Disposition` headers.
+  - Eliminated false "file already exists" warnings on non-file URLs or flat-folder downloads, and ensured duplicate confirmation dialogs display the full destination file path.
+- **File Info Dialog Edits on Fast Background Completion (`hydra-gui`)**: Fixed a race condition where files that finished downloading before the File Info dialog was dismissed lost user edits; edits are now adopted upon confirmation and output files are renamed accordingly.
+- **Rate Limiter Quantization Bottleneck & High-Bandwidth Throughput (`hya-net`)**: Fixed throughput capping at ~78–89 MiB/s when configuring high rate limits (200–400 MiB/s). Introduced a 10 ms burst window (`BURST_WINDOW`) crediting timer overshoots back to avoid over-throttling on OS timer tick quantization, and deferred sub-tick debts (< 2 ms) to subsequent reservations in `Pace::wait`.
+- **Silent Origin Starvation Detection & Cap Step-Down (`hya-net`, `hya-core`)**: Detected origins that accept TCP handshakes and HTTP request headers but stream data to only a subset of connections while starving the rest; dynamically steps down connection concurrency (similar to HTTP 429 backoff) rather than hanging or stalling the transfer.
+- **HTTP Status Reason Phrases & Probe Error Rejection (`hydra-cli`, `hya-net`, `hydra-ffi`)**: Added `describe_status` helper to format standard HTTP reason phrases. Rejects probe responses with HTTP status >= 400 immediately with human-readable error messages rather than attempting multi-range downloads on HTTP error pages.
+- **macOS GUI Auto-Start Service Registration (`hydra-gui`)**: Fixed launch agent path and service registration to ensure reliable automatic startup on macOS.
+- **Silent NSIS Desktop Shortcut Creation (`packaging/windows`)**: Enabled desktop shortcut creation by default during silent Windows NSIS installer runs.
+
+### Changed & Refactored
+
+- **Connection Performance & Core Scheduler Rework (`hya-core`, `hya-net`, `hydra-cli`)**: Comprehensively overhauled the connection scheduler, rate limiter, and async I/O loops to achieve **high average download speed**, **low peak memory**, and **low CPU time**:
+  - **High Average Speed**:
+    - *TCP Slow-Start Aware Collapse Detector*: Introduced short/long EWMA rising ratio detection in `CollapseDetector` (`is_slow_start`) to differentiate initial connection ramp-up from throughput stalls. Connections must be warm and settled before being evaluated as repair victims or takers, enforcing persistent divergence before stealing ranges and ensuring connections issue exactly one request per chunk with zero redundant repairs.
+    - *Rate Limiter Pacing Overhaul*: Carries sub-tick debts and credits timer overshoots back in `Pace`, preventing quantization stalls on 1 ms OS timers and unlocking full gigabit line saturation (reaching 414 MB/s over 100 ms paths).
+    - *Initial RTT Probe Seeding*: Captures probe latency (`first_rtt`) to seed realistic connection setup cost deltas into the scheduler.
+    - *Silent Starvation Recovery*: Dynamically steps down concurrency ceilings when servers stall surplus streams, maintaining uninterrupted throughput.
+  - **Low Memory Peak**:
+    - *Strict Resident Memory Ceiling*: Streaming architecture and connection pooling maintain a flat **6.9–8.0 MiB peak memory footprint** across multi-gigabyte transfers, consuming less than a third of the memory of `aria2c` (21.1–25.3 MiB) and `curl` (10.9–23.1 MiB).
+    - *Gated Stream Checksum Hashing*: Made SHA-256 calculation opt-in via `--print-checksum`, avoiding streaming buffer allocations and memory bloat on multi-stream jobs.
+  - **Low CPU Time**:
+    - *Decoupled Ticker-Based Transfer Loop*: Decoupled `run_transfer_with_reserves` from packet arrival wakeups, replacing per-arrival scheduler iterations with a dedicated ticker loop. Eliminates tens of thousands of redundant scheduler passes and thread context switches per transfer.
+    - *Single-Worker Tokio Runtime*: Defaulted CLI async runtime to a single worker thread (`HYDRA_WORKERS=1` by default), eliminating cross-core thread bouncing, cache contention, and synchronization overhead.
+    - *Measured CPU Efficiency*: Achieved **1.48 s total CPU time** on a 1 GB download at 414 MB/s (compared to **2.52 s** for `aria2c` and **3.21 s** for `curl`).
+- **Connection Measurement Diagnostics & Dormant States (`hydra-gui`, `hya-core`)**: Introduced `LimitReason` enum (`Measuring`, `Settled`, `ServerLimit`, `SilentStarvation`) to track why connection counts sit below politeness budgets. The GUI connection list now displays explicit dormant connection labels (*"Waiting (measuring)..."*, *"Not used (measured slower)"*, *"Not used (server limit)"*) and temporary status notifications detailing concurrency search verdicts.
+
+---
+
 ## [0.4.0] - 2026-08-31
 
 ### Added
